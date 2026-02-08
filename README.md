@@ -1,2 +1,3 @@
 # sqlexplore
-A CLI app that enables easy SQL exploration over data files
+
+SQL exploration over data files with your CLI
