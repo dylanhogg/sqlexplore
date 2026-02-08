@@ -17,13 +17,13 @@ clean:
 	rm -rf .venv
 
 run:
-	uv run python -m sqlexplore.app reqarg1 --optional-arg "optional arg"
+	uv run python -m sqlexplore.app gnaf.parquet
 
 run-as-tool:
-	uv run app reqarg1 --optional-arg "optional arg"
+	uv run app gnaf.parquet
 
 run-as-docker:
-	docker compose run --rm app reqarg --optional-arg optarg
+	docker compose run --rm app gnaf.parquet
 
 docker-build:
 	docker compose build --no-cache

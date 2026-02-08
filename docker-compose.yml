@@ -6,7 +6,8 @@ services:
     volumes:
       - .:/app
       - ./log:/app/log
-    command: ["reqarg1", "--optional-arg", "optarg1"]
+    # command: ["reqarg1", "--optional-arg", "optarg1"]
+    command: ["gnaf.parquet"]
 
   tests:
     build: .

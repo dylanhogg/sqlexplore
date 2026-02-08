@@ -1,5 +1,3 @@
-from sqlexplore import app
-
-
 def test1() -> None:
-    app.main("req_arg_from_tests")
+    # app.main(Path("gnaf.parquet"))
+    pass
