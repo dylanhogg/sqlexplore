@@ -47,7 +47,17 @@ precommit-install:
 precommit:
 	uv run pre-commit run --all-files
 
+build-dist:
+	uv build
+
+publish-check:
+	uv publish --dry-run
+
+publish-pypi:
+	@test -n "$$UV_PUBLISH_TOKEN" || (echo "UV_PUBLISH_TOKEN is required"; exit 1)
+	uv publish
+
 .DEFAULT_GOAL := help
-.PHONY: help
+.PHONY: help build-dist publish-check publish-testpypi publish-pypi
 help:
 	@LC_ALL=C $(MAKE) -pRrq -f $(lastword $(MAKEFILE_LIST)) : 2>/dev/null | awk -v RS= -F: '/^# File/,/^# Finished Make data base/ {if ($$1 !~ "^[#.]") {print $$1}}' | sort | egrep -v -e '^[^[:alnum:]]' -e '^$@$$'
