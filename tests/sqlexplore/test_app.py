@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any, cast
 
-from textual.widgets import DataTable, RichLog
+from textual.widgets import DataTable, OptionList, RichLog
 
 from sqlexplore.app import SqlExplorerEngine, SqlExplorerTui, SqlQueryEditor
 
@@ -161,6 +161,91 @@ def test_results_header_click_sorts_asc_desc(tmp_path: Path) -> None:
                 app.on_data_table_header_selected(click)
                 await pilot.pause()
                 assert _column_values(results, 1) == ["100", "20", "3"]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_completion_menu_opens_hides_and_reopens_with_ctrl_space(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                menu = app.query_one("#completion_menu", OptionList)
+
+                editor.text = ""
+                editor.focus()
+                await pilot.pause()
+                await pilot.press("s", "e", "l", "e", "c", "t", "space")
+                await pilot.pause()
+                assert menu.display is True
+                assert menu.option_count > 0
+
+                await pilot.press("escape")
+                await pilot.pause()
+                assert menu.display is False
+
+                await pilot.press("ctrl+space")
+                await pilot.pause()
+                assert menu.display is True
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_completion_menu_down_enter_accepts_selected_item(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                menu = app.query_one("#completion_menu", OptionList)
+
+                editor.text = ""
+                editor.focus()
+                await pilot.pause()
+                await pilot.press("/", "s")
+                await pilot.pause()
+                assert menu.display is True
+                assert menu.option_count >= 2
+
+                selected_prompt = str(menu.get_option_at_index(1).prompt)
+                selected_label = selected_prompt.split("  [", 1)[0]
+
+                await pilot.press("down")
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+
+                assert editor.text == selected_label
+                assert "\n" not in editor.text
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_completion_menu_tab_accepts_primary_completion(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                menu = app.query_one("#completion_menu", OptionList)
+
+                editor.text = ""
+                editor.focus()
+                await pilot.pause()
+                await pilot.press("/", "t", "o")
+                await pilot.pause()
+                assert menu.display is True
+
+                await pilot.press("tab")
+                await pilot.pause()
+                assert editor.text == "/top"
         finally:
             engine.close()
 

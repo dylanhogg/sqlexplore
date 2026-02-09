@@ -9,6 +9,7 @@ dependencies = [
     "loguru>=0.7.3",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
+    "sqlglot>=26.0.0",
     "textual>=7.5.0",
     "typer>=0.21.1",
 ]
