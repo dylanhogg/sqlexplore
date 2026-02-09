@@ -5,17 +5,15 @@ Note: This is a working todo list for a developer, not for an LLM AI Agent.
 
 ## UI & UX (layout, navigation, keybindings)
 
-- Ensure shortcut key combinations work as expected
-- Remap keys to more like VS Code
-- Commands mapped to forward slash
-- Remove left pane window
+- X Ensure shortcut key combinations work as expected
+- X Remap keys to more like VS Code
+- Show/hide left pane window
 - Include UI overview like HuggingFace datasets page (column lengths, sort by column, etc.)
-- Column ordering
+- X Column ordering
 
 ## Query authoring experience
 
 - Add SQL syntax highlighting in Query pane
-- LLM auto-complete (combine existing AC with LLM prediction)
 
 ## Data formatting & schema introspection
 
@@ -37,6 +35,7 @@ Note: This is a working todo list for a developer, not for an LLM AI Agent.
 
 ## LLM features (generation, summarisation, chat)
 
+- LLM auto-complete (combine existing AC with LLM prediction)
 - LLM: hook in gpt5-mini for SQL generation
 - Add LLM summarise
 - LLM “talk to data” mode
@@ -52,3 +51,8 @@ Note: This is a working todo list for a developer, not for an LLM AI Agent.
 ## Storage / engine support
 
 - Support SQLite
+- Support Excel
+- Ensure multipart parquet files are supported
+
+
+

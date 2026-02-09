@@ -122,6 +122,27 @@ def test_secondary_help_and_quit_shortcuts_work(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_ctrl_b_toggles_data_explorer_sidebar(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                sidebar = app.query_one("#sidebar")
+                assert sidebar.display is True
+
+                await pilot.press("ctrl+b")
+                await pilot.pause()
+                assert sidebar.display is False
+
+                await pilot.press("ctrl+b")
+                await pilot.pause()
+                assert sidebar.display is True
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_results_header_click_sorts_asc_desc(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path, csv_text="a,b\nx,20\ny,3\nz,100\n")

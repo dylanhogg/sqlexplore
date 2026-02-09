@@ -264,6 +264,7 @@ class SqlExplorerEngine:
                 "Tab accept completion",
                 "Up/Down query history",
                 "Ctrl+1 editor, Ctrl+2 results",
+                "Ctrl+B toggle Data Explorer",
                 "F1 (or Ctrl+Shift+P) help",
                 "F10 (or Ctrl+Q) quit",
                 "",
@@ -312,7 +313,10 @@ class SqlExplorerEngine:
                 "Editor: Tab completes; Up/Down cycles query history at first/last line; "
                 "Ctrl+Enter/F5 runs; Ctrl+N/F6 loads sample; Ctrl+L/F7 clears."
             ),
-            "Navigation: Ctrl+1 focuses query editor, Ctrl+2 focuses results. Help: F1 or Ctrl+Shift+P.",
+            (
+                "Navigation: Ctrl+1 focuses query editor, Ctrl+2 focuses results, "
+                "Ctrl+B toggles Data Explorer. Help: F1 or Ctrl+Shift+P."
+            ),
             "",
             f"settings: limit={self.default_limit}, rows={self.max_rows_display}, values={self.max_value_chars}",
         ]
@@ -812,6 +816,7 @@ class SqlExplorerTui(App[None]):
         Binding("f7", "clear_editor", "Clear", show=False, priority=True),
         Binding("ctrl+1", "focus_editor", "Editor", priority=True),
         Binding("ctrl+2", "focus_results", "Results", priority=True),
+        Binding("ctrl+b", "toggle_sidebar", "Data Explorer", key_display="^b", priority=True),
         Binding("f1", "show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "show_help", "Help", show=False, priority=True),
         Binding("f10", "quit", "Quit", priority=True),
@@ -909,6 +914,12 @@ class SqlExplorerTui(App[None]):
 
     def action_focus_results(self) -> None:
         self._results_table().focus()
+
+    def action_toggle_sidebar(self) -> None:
+        sidebar = self.query_one("#sidebar", Vertical)
+        sidebar.display = not sidebar.display
+        state = "shown" if sidebar.display else "hidden"
+        self._log(f"Data Explorer {state}.", "info")
 
     def action_show_help(self) -> None:
         self._log(self.engine.help_text(), "info")
