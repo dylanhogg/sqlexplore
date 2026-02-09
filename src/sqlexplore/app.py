@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -12,7 +13,9 @@ import typer
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -26,26 +29,26 @@ app = typer.Typer(
 
 ResultStatus = Literal["ok", "info", "error"]
 HELPER_COMMANDS = [
-    ":help",
-    ":schema",
-    ":sample",
-    ":filter",
-    ":sort",
-    ":group",
-    ":agg",
-    ":top",
-    ":profile",
-    ":describe",
-    ":history",
-    ":rerun",
-    ":rows",
-    ":values",
-    ":limit",
-    ":save",
-    ":last",
-    ":clear",
-    ":exit",
-    ":quit",
+    "/help",
+    "/schema",
+    "/sample",
+    "/filter",
+    "/sort",
+    "/group",
+    "/agg",
+    "/top",
+    "/profile",
+    "/describe",
+    "/history",
+    "/rerun",
+    "/rows",
+    "/values",
+    "/limit",
+    "/save",
+    "/last",
+    "/clear",
+    "/exit",
+    "/quit",
 ]
 SQL_KEYWORDS = [
     "SELECT",
@@ -86,7 +89,7 @@ SQL_KEYWORDS = [
     "OUTER",
     "ON",
 ]
-_HELPER_PREFIX_RE = re.compile(r"(?<!\S)(:[A-Za-z_]*)$")
+_HELPER_PREFIX_RE = re.compile(r"(?<!\S)(/[A-Za-z_]*)$")
 _IDENT_PREFIX_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_$]*)$")
 _QUOTED_PREFIX_RE = re.compile(r'("(?:""|[^"])*)$')
 _SIMPLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
@@ -172,6 +175,19 @@ def _is_numeric_type(type_name: str) -> bool:
     return any(marker in upper for marker in ("INT", "DOUBLE", "FLOAT", "DECIMAL", "REAL", "NUMERIC"))
 
 
+def _sort_cell_key(value: Any) -> tuple[int, int, float | str]:
+    if value is None:
+        return (2, 0, "")
+    if isinstance(value, bool):
+        return (0, 0, float(int(value)))
+    if isinstance(value, int | float):
+        number = float(value)
+        if math.isnan(number):
+            return (1, 0, "")
+        return (0, 0, number)
+    return (0, 1, str(value).casefold())
+
+
 class SqlExplorerEngine:
     def __init__(
         self,
@@ -244,28 +260,30 @@ class SqlExplorerEngine:
             [
                 "",
                 "Shortcuts",
-                "Ctrl+Enter run query",
-                "Ctrl+J sample query",
-                "Ctrl+K clear editor",
+                "Ctrl+Enter or F5 run query",
+                "Ctrl+N or F6 sample query",
+                "Ctrl+L or F7 clear editor",
                 "Tab accept completion",
                 "Up/Down query history",
-                "Ctrl+H help",
-                "Ctrl+Q quit",
+                "Ctrl+1 editor, Ctrl+2 results",
+                "Ctrl+B toggle Data Explorer",
+                "F1 (or Ctrl+Shift+P) help",
+                "F10 (or Ctrl+Q) quit",
                 "",
                 "Helper Commands",
-                ":sample [n]",
-                ":filter <cond>",
-                ":sort <exprs>",
-                ":group cols | aggs [| having]",
-                ":agg aggs [| where]",
-                ":top <col> [n]",
-                ":profile <col>",
-                ":describe",
-                ":history [n]",
-                ":rerun <n>",
-                ":schema  :last  :save <path>",
-                ":rows <n> :values <n> :limit <n>",
-                ":clear  :exit",
+                "/sample [n]",
+                "/filter <cond>",
+                "/sort <exprs>",
+                "/group cols | aggs [| having]",
+                "/agg aggs [| where]",
+                "/top <col> [n]",
+                "/profile <col>",
+                "/describe",
+                "/history [n]",
+                "/rerun <n>",
+                "/schema  /last  /save <path>",
+                "/rows <n> /values <n> /limit <n>",
+                "/clear  /exit",
             ]
         )
         return "\n".join(head)
@@ -273,27 +291,34 @@ class SqlExplorerEngine:
     def help_text(self) -> str:
         lines = [
             "Run standard SQL directly. Helper commands:",
-            ":help",
-            ":schema",
-            ":sample [n]",
-            ":filter <where condition>",
-            ":sort <order expressions>",
-            ":group <group cols> | <aggregates> [| having]",
-            ":agg <aggregates> [| where]",
-            ":top <column> [n]",
-            ":profile <column>",
-            ":describe",
-            ":history [n]",
-            ":rerun <history_index>",
-            ":rows <n>",
-            ":values <n>",
-            ":limit <n>",
-            ":save <path.csv|path.parquet|path.json>",
-            ":last",
-            ":clear",
-            ":exit / :quit",
+            "/help",
+            "/schema",
+            "/sample [n]",
+            "/filter <where condition>",
+            "/sort <order expressions>",
+            "/group <group cols> | <aggregates> [| having]",
+            "/agg <aggregates> [| where]",
+            "/top <column> [n]",
+            "/profile <column>",
+            "/describe",
+            "/history [n]",
+            "/rerun <history_index>",
+            "/rows <n>",
+            "/values <n>",
+            "/limit <n>",
+            "/save <path.csv|path.parquet|path.json>",
+            "/last",
+            "/clear",
+            "/exit or /quit",
             "",
-            "Editor: Tab completes; Up/Down cycles query history at first/last line.",
+            (
+                "Editor: Tab completes; Up/Down cycles query history at first/last line; "
+                "Ctrl+Enter/F5 runs; Ctrl+N/F6 loads sample; Ctrl+L/F7 clears."
+            ),
+            (
+                "Navigation: Ctrl+1 focuses query editor, Ctrl+2 focuses results, "
+                "Ctrl+B toggles Data Explorer. Help: F1 or Ctrl+Shift+P."
+            ),
             "",
             f"settings: limit={self.default_limit}, rows={self.max_rows_display}, values={self.max_value_chars}",
         ]
@@ -361,48 +386,48 @@ class SqlExplorerEngine:
     def run_input(self, raw_input: str) -> EngineResponse:
         text = raw_input.strip()
         if not text:
-            return EngineResponse(status="info", message="Type SQL or :help.")
-        if text.startswith(":"):
+            return EngineResponse(status="info", message="Type SQL or /help.")
+        if text.startswith("/"):
             return self._run_command(text)
         return self.run_sql(text)
 
     def _run_command(self, command: str) -> EngineResponse:
         stripped = command.strip()
-        if stripped in {":exit", ":quit"}:
+        if stripped in {"/exit", "/quit"}:
             return EngineResponse(status="info", message="Exiting SQL explorer.", should_exit=True)
-        if stripped == ":help":
+        if stripped == "/help":
             return EngineResponse(status="info", message=self.help_text())
-        if stripped == ":schema":
+        if stripped == "/schema":
             rows = [(str(r[0]), str(r[1]), str(r[2])) for r in self._schema_rows]
             return self._table_response(["column", "type", "nullable"], rows, "Schema")
-        if stripped == ":clear":
+        if stripped == "/clear":
             return EngineResponse(status="info", message="Editor cleared.", clear_editor=True)
-        if stripped == ":last":
+        if stripped == "/last":
             return EngineResponse(status="info", message="Loaded last SQL in editor.", load_query=self.last_sql)
-        if stripped == ":describe":
+        if stripped == "/describe":
             return self._describe_dataset()
 
-        if stripped.startswith(":history"):
+        if stripped.startswith("/history"):
             parts = stripped.split()
             count = 20
             if len(parts) == 2:
                 try:
                     count = max(1, int(parts[1]))
                 except ValueError:
-                    return EngineResponse(status="error", message="Usage: :history [n]")
+                    return EngineResponse(status="error", message="Usage: /history [n]")
             history = self.executed_sql[-count:]
             start_idx = max(1, len(self.executed_sql) - len(history) + 1)
             rows = [(idx, sql) for idx, sql in enumerate(history, start=start_idx)]
             return self._table_response(["#", "sql"], rows, f"History ({len(history)} queries)")
 
-        if stripped.startswith(":rerun"):
+        if stripped.startswith("/rerun"):
             parts = stripped.split()
             if len(parts) != 2:
-                return EngineResponse(status="error", message="Usage: :rerun <n>")
+                return EngineResponse(status="error", message="Usage: /rerun <n>")
             try:
                 idx = int(parts[1])
             except ValueError:
-                return EngineResponse(status="error", message=":rerun expects an integer index")
+                return EngineResponse(status="error", message="/rerun expects an integer index")
             if idx < 1 or idx > len(self.executed_sql):
                 return EngineResponse(status="error", message="History index out of range")
             sql = self.executed_sql[idx - 1]
@@ -410,52 +435,52 @@ class SqlExplorerEngine:
             out.generated_sql = sql
             return out
 
-        if stripped.startswith(":rows"):
-            payload = stripped.removeprefix(":rows").strip()
+        if stripped.startswith("/rows"):
+            payload = stripped.removeprefix("/rows").strip()
             parsed = _parse_optional_positive_int(payload)
             if parsed is None:
-                return EngineResponse(status="error", message="Usage: :rows <n>")
+                return EngineResponse(status="error", message="Usage: /rows <n>")
             self.max_rows_display = parsed
             return EngineResponse(status="ok", message=f"Row display limit set to {self.max_rows_display}")
 
-        if stripped.startswith(":values"):
-            payload = stripped.removeprefix(":values").strip()
+        if stripped.startswith("/values"):
+            payload = stripped.removeprefix("/values").strip()
             parsed = _parse_optional_positive_int(payload)
             if parsed is None:
-                return EngineResponse(status="error", message="Usage: :values <n>")
+                return EngineResponse(status="error", message="Usage: /values <n>")
             self.max_value_chars = parsed
             return EngineResponse(status="ok", message=f"Value display limit set to {self.max_value_chars}")
 
-        if stripped.startswith(":limit"):
-            payload = stripped.removeprefix(":limit").strip()
+        if stripped.startswith("/limit"):
+            payload = stripped.removeprefix("/limit").strip()
             parsed = _parse_optional_positive_int(payload)
             if parsed is None:
-                return EngineResponse(status="error", message="Usage: :limit <n>")
+                return EngineResponse(status="error", message="Usage: /limit <n>")
             self.default_limit = parsed
             return EngineResponse(status="ok", message=f"Default helper query limit set to {self.default_limit}")
 
-        if stripped.startswith(":save"):
-            payload = stripped.removeprefix(":save").strip()
+        if stripped.startswith("/save"):
+            payload = stripped.removeprefix("/save").strip()
             if not payload:
-                return EngineResponse(status="error", message="Usage: :save <path>")
+                return EngineResponse(status="error", message="Usage: /save <path>")
             return self._save_last_result(payload)
 
-        if stripped.startswith(":profile"):
-            payload = stripped.removeprefix(":profile").strip()
+        if stripped.startswith("/profile"):
+            payload = stripped.removeprefix("/profile").strip()
             if not payload:
-                return EngineResponse(status="error", message="Usage: :profile <column>")
+                return EngineResponse(status="error", message="Usage: /profile <column>")
             return self._profile_column(payload)
 
         generated_sql = self._helper_command_to_sql(stripped)
         if generated_sql is None:
-            return EngineResponse(status="error", message=f"Unknown command: {stripped}. Use :help")
+            return EngineResponse(status="error", message=f"Unknown command: {stripped}. Use /help")
 
         out = self.run_sql(generated_sql)
         out.generated_sql = generated_sql
         return out
 
     def _helper_command_to_sql(self, command: str) -> str | None:
-        if command.startswith(":sample"):
+        if command.startswith("/sample"):
             parts = command.split()
             sample_n = self.default_limit
             if len(parts) == 2:
@@ -465,24 +490,29 @@ class SqlExplorerEngine:
                     return None
             return f'SELECT * FROM "{self.table_name}" LIMIT {sample_n}'
 
-        if command.startswith(":filter"):
-            cond = command.removeprefix(":filter").strip()
+        if command.startswith("/filter"):
+            cond = command.removeprefix("/filter").strip()
             if not cond:
                 return None
             return f'SELECT * FROM "{self.table_name}" WHERE {cond} LIMIT {self.default_limit}'
 
-        if command.startswith(":sort"):
-            expr = command.removeprefix(":sort").strip()
+        if command.startswith("/sort"):
+            expr = command.removeprefix("/sort").strip()
             if not expr:
                 return None
             return f'SELECT * FROM "{self.table_name}" ORDER BY {expr} LIMIT {self.default_limit}'
 
-        if command.startswith(":group"):
-            payload = command.removeprefix(":group").strip()
+        if command.startswith("/group"):
+            payload = command.removeprefix("/group").strip()
             parts = _split_pipe_sections(payload)
-            if len(parts) < 2:
+            if not parts:
                 return None
             group_cols = parts[0]
+            if len(parts) == 1:
+                return (
+                    f'SELECT {group_cols}, COUNT(*) AS count FROM "{self.table_name}" '
+                    f"GROUP BY {group_cols} ORDER BY count DESC, {group_cols}"
+                )
             aggs = parts[1]
             having = parts[2] if len(parts) > 2 else ""
             sql = f'SELECT {group_cols}, {aggs} FROM "{self.table_name}" GROUP BY {group_cols}'
@@ -491,8 +521,8 @@ class SqlExplorerEngine:
             sql += f" ORDER BY {group_cols}"
             return sql
 
-        if command.startswith(":agg"):
-            payload = command.removeprefix(":agg").strip()
+        if command.startswith("/agg"):
+            payload = command.removeprefix("/agg").strip()
             parts = _split_pipe_sections(payload)
             if not parts:
                 return None
@@ -503,7 +533,7 @@ class SqlExplorerEngine:
                 sql += f" WHERE {where}"
             return sql
 
-        if command.startswith(":top"):
+        if command.startswith("/top"):
             parts = command.split()
             if len(parts) < 2 or len(parts) > 3:
                 return None
@@ -636,6 +666,21 @@ class SqlExplorerEngine:
 
 
 class SqlQueryEditor(TextArea):
+    BINDINGS = [
+        Binding("ctrl+enter", "app.run_query", "Run", priority=True),
+        Binding("f5", "app.run_query", "Run", show=False, priority=True),
+        Binding("ctrl+n", "app.load_sample", "Sample", priority=True),
+        Binding("f6", "app.load_sample", show=False, priority=True),
+        Binding("ctrl+l", "app.clear_editor", "Clear", priority=True),
+        Binding("f7", "app.clear_editor", show=False, priority=True),
+        Binding("ctrl+1", "app.focus_editor", "Editor", priority=True),
+        Binding("ctrl+2", "app.focus_results", "Results", priority=True),
+        Binding("f1", "app.show_help", "Help", priority=True),
+        Binding("ctrl+shift+p", "app.show_help", show=False, priority=True),
+        Binding("f10", "app.quit", "Quit", priority=True),
+        Binding("ctrl+q", "app.quit", show=False, priority=True),
+    ]
+
     def __init__(
         self,
         text: str,
@@ -648,6 +693,15 @@ class SqlQueryEditor(TextArea):
         self._token_provider = token_provider
         self._history_prev = history_prev
         self._history_next = history_next
+        self._sql_syntax = Syntax(
+            "",
+            "sql",
+            theme="monokai",
+            word_wrap=False,
+            line_numbers=False,
+            indent_guides=False,
+            background_color="default",
+        )
         self.indent_width = 4
 
     async def _on_key(self, event: Any) -> None:
@@ -715,6 +769,43 @@ class SqlQueryEditor(TextArea):
             return
         self.suggestion = ""
 
+    def get_line(self, line_index: int) -> Text:
+        line_string = self.document.get_line(line_index)
+        if not line_string:
+            return Text("", end="", no_wrap=True)
+        if line_string.lstrip().startswith("/"):
+            return self._highlight_helper_command_line(line_string)
+
+        highlighted = self._sql_syntax.highlight(line_string)
+        # Rich appends a trailing newline to highlighted output; remove only that
+        # so user-typed trailing spaces remain intact for correct cursor rendering.
+        if highlighted.plain.endswith("\n"):
+            highlighted = highlighted[:-1]
+        highlighted.end = ""
+        highlighted.no_wrap = True
+        return highlighted
+
+    def _highlight_helper_command_line(self, line: str) -> Text:
+        rendered = Text(end="", no_wrap=True)
+        indent_count = len(line) - len(line.lstrip())
+        if indent_count:
+            rendered.append(line[:indent_count])
+
+        command_line = line[indent_count:]
+        if not command_line.startswith("/"):
+            rendered.append(command_line, style="bright_white")
+            return rendered
+
+        parts = command_line.split(maxsplit=1)
+        command = parts[0]
+        args = parts[1] if len(parts) > 1 else ""
+        command_style = "bold cyan" if command in HELPER_COMMANDS else "bold red"
+        rendered.append(command, style=command_style)
+        if args:
+            rendered.append(" ")
+            rendered.append(args, style="bright_white")
+        return rendered
+
 
 class SqlExplorerTui(App[None]):
     TITLE = "my-project SQL Explorer"
@@ -766,18 +857,28 @@ class SqlExplorerTui(App[None]):
 
     BINDINGS = [
         Binding("ctrl+enter", "run_query", "Run", priority=True),
-        Binding("ctrl+j", "load_sample", "Sample", priority=True),
-        Binding("ctrl+k", "clear_editor", "Clear", priority=True),
-        Binding("ctrl+e", "focus_editor", "Editor", priority=True),
-        Binding("ctrl+r", "focus_results", "Results", priority=True),
-        Binding("ctrl+h", "show_help", "Help", priority=True),
-        Binding("ctrl+q", "quit", "Quit", priority=True),
+        Binding("f5", "run_query", "Run", show=False, priority=True),
+        Binding("ctrl+n", "load_sample", "Sample", priority=True),
+        Binding("f6", "load_sample", "Sample", show=False, priority=True),
+        Binding("ctrl+l", "clear_editor", "Clear", priority=True),
+        Binding("f7", "clear_editor", "Clear", show=False, priority=True),
+        Binding("ctrl+1", "focus_editor", "Editor", priority=True),
+        Binding("ctrl+2", "focus_results", "Results", priority=True),
+        Binding("ctrl+b", "toggle_sidebar", "Data Explorer", key_display="^b", priority=True),
+        Binding("f1", "show_help", "Help", priority=True),
+        Binding("ctrl+shift+p", "show_help", "Help", show=False, priority=True),
+        Binding("f10", "quit", "Quit", priority=True),
+        Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
     ]
 
     def __init__(self, engine: SqlExplorerEngine) -> None:
         super().__init__()
         self.engine = engine
         self._history_cursor: int | None = None
+        self._active_result: QueryResult | None = None
+        self._base_rows: list[tuple[Any, ...]] = []
+        self._sort_column_index: int | None = None
+        self._sort_reverse = False
 
     def _reset_history_cursor(self) -> None:
         self._history_cursor = None
@@ -831,7 +932,7 @@ class SqlExplorerTui(App[None]):
     def on_mount(self) -> None:
         table = self._results_table()
         table.zebra_stripes = True
-        self._log("Ready. Press Ctrl+Enter to run SQL, or Ctrl+H for command help.", "info")
+        self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
         boot = self.engine.run_sql(self.engine.default_query, remember=False)
         self._apply_response(boot)
         self._query_editor().focus()
@@ -862,6 +963,12 @@ class SqlExplorerTui(App[None]):
     def action_focus_results(self) -> None:
         self._results_table().focus()
 
+    def action_toggle_sidebar(self) -> None:
+        sidebar = self.query_one("#sidebar", Vertical)
+        sidebar.display = not sidebar.display
+        state = "shown" if sidebar.display else "hidden"
+        self._log(f"Data Explorer {state}.", "info")
+
     def action_show_help(self) -> None:
         self._log(self.engine.help_text(), "info")
 
@@ -891,9 +998,18 @@ class SqlExplorerTui(App[None]):
         sidebar.update(self.engine.schema_preview())
 
     def _render_table(self, result: QueryResult) -> None:
+        self._active_result = result
+        self._base_rows = list(result.rows)
+        self._sort_column_index = None
+        self._sort_reverse = False
+
+        self._redraw_results_table()
+
+    def _redraw_results_table(self) -> None:
+        result = self._active_result
         table = self._results_table()
         table.clear(columns=True)
-        if not result.columns:
+        if result is None or not result.columns:
             self.query_one("#results_header", Static).update("Results")
             return
 
@@ -904,7 +1020,31 @@ class SqlExplorerTui(App[None]):
         header = f"Results ({len(result.rows):,}/{result.total_rows:,} rows, {result.elapsed_ms:.1f} ms)"
         if result.truncated:
             header += " [truncated]"
+        if self._sort_column_index is not None and self._sort_column_index < len(result.columns):
+            direction = "desc" if self._sort_reverse else "asc"
+            header += f" [sorted: {result.columns[self._sort_column_index]} {direction}]"
         self.query_one("#results_header", Static).update(header)
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        result = self._active_result
+        if result is None or not result.rows:
+            return
+
+        if self._sort_column_index == event.column_index:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_column_index = event.column_index
+            self._sort_reverse = False
+
+        column_index = event.column_index
+        result.rows = sorted(
+            self._base_rows,
+            key=lambda row: _sort_cell_key(row[column_index]) if column_index < len(row) else (2, 0, ""),
+            reverse=self._sort_reverse,
+        )
+        self._redraw_results_table()
+        direction = "DESC" if self._sort_reverse else "ASC"
+        self._log(f"Sorted results by {event.label.plain} {direction}", "info")
 
     def _log(self, message: str, status: ResultStatus) -> None:
         logger = self.query_one("#activity_log", RichLog)

@@ -1,21 +1,18 @@
 # TODO (list for humans, not AI agents)
 
-Note: This is a working todo list for a developer, not for an LLM AI Agent.
+Note: This is a working todo list for a human developer, not for an LLM AI Agent.
       If you are an LLM AI Agent, please ignore this file.
 
 ## UI & UX (layout, navigation, keybindings)
 
-- Ensure shortcut key combinations work as expected
-- Remap keys to more like VS Code
-- Commands mapped to forward slash
-- Remove left pane window
+- Move ^b helper further left in status bar next to similar control keys
 - Include UI overview like HuggingFace datasets page (column lengths, sort by column, etc.)
-- Column ordering
 
 ## Query authoring experience
 
-- Add SQL syntax highlighting in Query pane
-- LLM auto-complete (combine existing AC with LLM prediction)
+- Better autocomplete
+- Better guided SQL writing
+- SQL syntax checking / parsing (e.g. https://github.com/andialbrecht/sqlparse or https://github.com/tobymao/sqlglot)
 
 ## Data formatting & schema introspection
 
@@ -24,7 +21,7 @@ Note: This is a working todo list for a developer, not for an LLM AI Agent.
 
 ## Analytics & profiling
 
-- More statistics
+- More calculated statistics options
 
 ## Export, persistence & I/O
 
@@ -33,12 +30,15 @@ Note: This is a working todo list for a developer, not for an LLM AI Agent.
 
 ## Integrations / “open in …”
 
-- Add open in marimo
+- Add open in marimo notebooks
+- Open in Jupyter Notebook
+- Open in Google Colab
 
 ## LLM features (generation, summarisation, chat)
 
-- LLM: hook in gpt5-mini for SQL generation
-- Add LLM summarise
+- Add LLM auto-complete (combine existing AC with LLM prediction)
+- LLM: hook in gpt5-mini for SQL generation from natural language
+- Add LLM summarise results
 - LLM “talk to data” mode
 
 ## Data generation
@@ -52,3 +52,8 @@ Note: This is a working todo list for a developer, not for an LLM AI Agent.
 ## Storage / engine support
 
 - Support SQLite
+- Support Excel
+- Ensure multipart parquet files are supported
+
+
+
