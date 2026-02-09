@@ -17,7 +17,7 @@ clean:
 	rm -rf .venv
 
 run:
-	uv run python -m sqlexplore.app gnaf.parquet
+	uv run python -m sqlexplore.app data/example.parquet
 
 run-as-tool:
 	uv run app gnaf.parquet
