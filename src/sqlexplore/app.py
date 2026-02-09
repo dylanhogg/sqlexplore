@@ -20,7 +20,7 @@ from sqlglot.tokens import Tokenizer as SqlglotTokenizer
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Header, RichLog, Static, TextArea
+from textual.widgets import DataTable, Footer, Header, OptionList, RichLog, Static, TextArea
 
 app = typer.Typer(
     help="Interactive DuckDB SQL explorer for CSV/TSV/Parquet files.",
@@ -327,6 +327,7 @@ class SqlExplorerEngine:
                 "Ctrl+N or F6 sample query",
                 "Ctrl+L or F7 clear editor",
                 "Tab accept completion",
+                "Ctrl+Space open completions",
                 "Up/Down query history",
                 "Ctrl+1 editor, Ctrl+2 results",
                 "Ctrl+B toggle Data Explorer",
@@ -346,8 +347,9 @@ class SqlExplorerEngine:
             [
                 "",
                 (
-                    "Editor: Tab completes; Up/Down cycles query history at first/last line; "
-                    "Ctrl+Enter/F5 runs; Ctrl+N/F6 loads sample; Ctrl+L/F7 clears."
+                    "Editor: Tab/Enter accepts completion; Esc closes completion menu; "
+                    "Ctrl+Space opens completions; Up/Down navigates completion menu or query history "
+                    "at first/last line; Ctrl+Enter/F5 runs; Ctrl+N/F6 loads sample; Ctrl+L/F7 clears."
                 ),
                 (
                     "Navigation: Ctrl+1 focuses query editor, Ctrl+2 focuses results, "
@@ -1362,6 +1364,8 @@ class SqlQueryEditor(TextArea):
         history_next: Callable[[], str | None],
         completion_provider: Callable[[str, tuple[int, int]], list[CompletionItem]] | None = None,
         helper_command_provider: Callable[[], list[str]] | None = None,
+        completion_changed: Callable[[list[CompletionItem], int, bool], None] | None = None,
+        completion_accepted: Callable[[CompletionItem], None] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(text, language="sql", theme="monokai", tab_behavior="indent", soft_wrap=False, **kwargs)
@@ -1370,6 +1374,12 @@ class SqlQueryEditor(TextArea):
         self._history_next = history_next
         self._completion_provider = completion_provider
         self._helper_command_provider = helper_command_provider or (lambda: list(DEFAULT_HELPER_COMMANDS))
+        self._completion_changed = completion_changed
+        self._completion_accepted = completion_accepted
+        self._completion_items: list[CompletionItem] = []
+        self._completion_index = 0
+        self._completion_open = False
+        self._suspend_completion_refresh = False
         self._sql_syntax = Syntax(
             "",
             "sql",
@@ -1381,7 +1391,122 @@ class SqlQueryEditor(TextArea):
         )
         self.indent_width = 4
 
+    def dismiss_completion_menu(self) -> None:
+        self._completion_items = []
+        self._completion_index = 0
+        self._completion_open = False
+        self.suggestion = ""
+        self._notify_completion_change()
+
+    def _notify_completion_change(self) -> None:
+        if self._completion_changed is None:
+            return
+        items = self._completion_items if self._completion_open else []
+        index = self._completion_index if items else 0
+        self._completion_changed(items, index, self._completion_open)
+
+    def _refresh_completion_state(self, *, force_open: bool = False) -> None:
+        if self._completion_provider is None:
+            self.dismiss_completion_menu()
+            return
+        completions = self._completion_provider(self.text, self.cursor_location)
+        if not completions:
+            self.dismiss_completion_menu()
+            return
+        row, col = self.cursor_location
+        line_before = self.document[row][:col]
+        should_open = (bool(line_before.strip()) or force_open) and self.has_focus
+        self._completion_items = completions
+        self._completion_index = max(0, min(self._completion_index, len(self._completion_items) - 1))
+        self._completion_open = should_open
+        self._notify_completion_change()
+
+    def _apply_inline_suggestion_from_selected_completion(self) -> None:
+        if not self._completion_items:
+            self.suggestion = ""
+            return
+        row, col = self.cursor_location
+        item = self._completion_items[self._completion_index]
+        if item.replacement_end != col:
+            self.suggestion = ""
+            return
+        replacement_start = max(0, min(item.replacement_start, col))
+        current_text = self.document[row][replacement_start:col]
+        if not current_text:
+            self.suggestion = ""
+            return
+        if not item.insert_text.casefold().startswith(current_text.casefold()):
+            self.suggestion = ""
+            return
+        self.suggestion = item.insert_text[len(current_text) :]
+
+    def _move_completion_selection(self, delta: int) -> None:
+        if not self._completion_open or not self._completion_items:
+            return
+        self._completion_index = (self._completion_index + delta) % len(self._completion_items)
+        self._notify_completion_change()
+        self._apply_inline_suggestion_from_selected_completion()
+
+    def accept_completion_at_index(self, index: int) -> bool:
+        if not self._completion_items:
+            return False
+        target_index = max(0, min(index, len(self._completion_items) - 1))
+        self._completion_index = target_index
+        item = self._completion_items[self._completion_index]
+        row, col = self.cursor_location
+        if item.replacement_end != col:
+            return False
+        start = (row, item.replacement_start)
+        end = (row, item.replacement_end)
+        self._suspend_completion_refresh = True
+        try:
+            result = self.replace(item.insert_text, start, end, maintain_selection_offset=False)
+            self.move_cursor(result.end_location)
+        finally:
+            self._suspend_completion_refresh = False
+        self.dismiss_completion_menu()
+        if self._completion_accepted is not None:
+            self._completion_accepted(item)
+        return True
+
+    def set_completion_index(self, index: int) -> None:
+        if not self._completion_items:
+            return
+        self._completion_index = max(0, min(index, len(self._completion_items) - 1))
+        self._notify_completion_change()
+        self._apply_inline_suggestion_from_selected_completion()
+
+    def _accept_selected_completion(self) -> bool:
+        if not self._completion_open or not self._completion_items:
+            return False
+        return self.accept_completion_at_index(self._completion_index)
+
     async def _on_key(self, event: Any) -> None:
+        if event.key == "ctrl+space":
+            event.stop()
+            event.prevent_default()
+            self._refresh_completion_state(force_open=True)
+            self._apply_inline_suggestion_from_selected_completion()
+            return
+        if event.key == "escape" and self._completion_open:
+            event.stop()
+            event.prevent_default()
+            self.dismiss_completion_menu()
+            return
+        if event.key == "up" and self._completion_open:
+            event.stop()
+            event.prevent_default()
+            self._move_completion_selection(-1)
+            return
+        if event.key == "down" and self._completion_open:
+            event.stop()
+            event.prevent_default()
+            self._move_completion_selection(1)
+            return
+        if event.key in {"tab", "enter"} and self._accept_selected_completion():
+            event.stop()
+            event.prevent_default()
+            return
         if event.key == "tab":
             event.stop()
             event.prevent_default()
@@ -1419,27 +1544,15 @@ class SqlQueryEditor(TextArea):
         super().action_cursor_down(select)
 
     def update_suggestion(self) -> None:
-        row, col = self.cursor_location
+        if self._suspend_completion_refresh:
+            self.suggestion = ""
+            return
         if self._completion_provider is not None:
-            completions = self._completion_provider(self.text, self.cursor_location)
-            if not completions:
-                self.suggestion = ""
-                return
-            item = completions[0]
-            if item.replacement_end != col:
-                self.suggestion = ""
-                return
-            replacement_start = max(0, min(item.replacement_start, col))
-            current_text = self.document[row][replacement_start:col]
-            if not current_text:
-                self.suggestion = ""
-                return
-            if not item.insert_text.casefold().startswith(current_text.casefold()):
-                self.suggestion = ""
-                return
-            self.suggestion = item.insert_text[len(current_text) :]
+            self._refresh_completion_state()
+            self._apply_inline_suggestion_from_selected_completion()
             return
 
+        row, col = self.cursor_location
         left_text = self.document[row][:col]
         prefix_match = (
             _HELPER_PREFIX_RE.search(left_text)
@@ -1464,6 +1577,15 @@ class SqlQueryEditor(TextArea):
             self.suggestion = candidate[len(prefix) :]
             return
         self.suggestion = ""
+
+    def on_focus(self, _event: Any) -> None:
+        if self._completion_provider is None:
+            return
+        self._refresh_completion_state()
+        self._apply_inline_suggestion_from_selected_completion()
+
+    def on_blur(self, _event: Any) -> None:
+        self.dismiss_completion_menu()
 
     def get_line(self, line_index: int) -> Text:
         line_string = self.document.get_line(line_index)
@@ -1541,6 +1663,14 @@ class SqlExplorerTui(App[None]):
         border: round #4d7ea8;
     }
 
+    #completion_menu {
+        display: none;
+        max-height: 8;
+        border: round #4d7ea8;
+        margin-bottom: 1;
+        background: #0f1b22;
+    }
+
     #results_table {
         height: 1fr;
         border: round #5b8f67;
@@ -1606,6 +1736,38 @@ class SqlExplorerTui(App[None]):
     def _query_editor(self) -> SqlQueryEditor:
         return self.query_one("#query_editor", SqlQueryEditor)
 
+    def _completion_menu(self) -> OptionList:
+        return self.query_one("#completion_menu", OptionList)
+
+    @staticmethod
+    def _completion_option_prompt(item: CompletionItem) -> str:
+        kind = item.kind.replace("_", " ")
+        if item.detail:
+            return f"{item.insert_text}  [{kind}] {item.detail}"
+        return f"{item.insert_text}  [{kind}]"
+
+    def _on_editor_completion_changed(
+        self,
+        items: list[CompletionItem],
+        selected_index: int,
+        is_open: bool,
+    ) -> None:
+        if not self.screen.is_mounted:
+            return
+        menu = self._completion_menu()
+        if not is_open or not items:
+            menu.display = False
+            menu.clear_options()
+            return
+        visible_items = items[:8]
+        prompts = [self._completion_option_prompt(item) for item in visible_items]
+        menu.set_options(prompts)
+        menu.highlighted = min(max(0, selected_index), len(visible_items) - 1)
+        menu.display = True
+
+    def _on_editor_completion_accepted(self, _item: CompletionItem) -> None:
+        self._on_editor_completion_changed([], 0, False)
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="body"):
@@ -1620,8 +1782,11 @@ class SqlExplorerTui(App[None]):
                     self._history_next,
                     completion_provider=self.engine.completion_items,
                     helper_command_provider=self.engine.helper_commands,
+                    completion_changed=self._on_editor_completion_changed,
+                    completion_accepted=self._on_editor_completion_accepted,
                     id="query_editor",
                 )
+                yield OptionList(id="completion_menu")
                 yield Static("Results", id="results_header", classes="section-title")
                 yield DataTable(id="results_table")
                 yield Static("Activity", classes="section-title")
@@ -1631,6 +1796,7 @@ class SqlExplorerTui(App[None]):
     def on_mount(self) -> None:
         table = self._results_table()
         table.zebra_stripes = True
+        self._completion_menu().display = False
         self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
         boot = self.engine.run_sql(self.engine.default_query, remember=False)
         self._apply_response(boot)
@@ -1638,6 +1804,7 @@ class SqlExplorerTui(App[None]):
 
     def action_run_query(self) -> None:
         editor = self._query_editor()
+        editor.dismiss_completion_menu()
         query = editor.text
         response = self.engine.run_input(query)
         self._reset_history_cursor()
@@ -1645,6 +1812,7 @@ class SqlExplorerTui(App[None]):
 
     def action_load_sample(self) -> None:
         editor = self._query_editor()
+        editor.dismiss_completion_menu()
         editor.text = self.engine.default_query
         self._reset_history_cursor()
         editor.focus()
@@ -1652,6 +1820,7 @@ class SqlExplorerTui(App[None]):
 
     def action_clear_editor(self) -> None:
         editor = self._query_editor()
+        editor.dismiss_completion_menu()
         editor.text = ""
         self._reset_history_cursor()
         editor.focus()
