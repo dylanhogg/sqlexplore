@@ -26,26 +26,26 @@ app = typer.Typer(
 
 ResultStatus = Literal["ok", "info", "error"]
 HELPER_COMMANDS = [
-    ":help",
-    ":schema",
-    ":sample",
-    ":filter",
-    ":sort",
-    ":group",
-    ":agg",
-    ":top",
-    ":profile",
-    ":describe",
-    ":history",
-    ":rerun",
-    ":rows",
-    ":values",
-    ":limit",
-    ":save",
-    ":last",
-    ":clear",
-    ":exit",
-    ":quit",
+    "/help",
+    "/schema",
+    "/sample",
+    "/filter",
+    "/sort",
+    "/group",
+    "/agg",
+    "/top",
+    "/profile",
+    "/describe",
+    "/history",
+    "/rerun",
+    "/rows",
+    "/values",
+    "/limit",
+    "/save",
+    "/last",
+    "/clear",
+    "/exit",
+    "/quit",
 ]
 SQL_KEYWORDS = [
     "SELECT",
@@ -86,7 +86,7 @@ SQL_KEYWORDS = [
     "OUTER",
     "ON",
 ]
-_HELPER_PREFIX_RE = re.compile(r"(?<!\S)(:[A-Za-z_]*)$")
+_HELPER_PREFIX_RE = re.compile(r"(?<!\S)(/[A-Za-z_]*)$")
 _IDENT_PREFIX_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_$]*)$")
 _QUOTED_PREFIX_RE = re.compile(r'("(?:""|[^"])*)$')
 _SIMPLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
@@ -253,19 +253,19 @@ class SqlExplorerEngine:
                 "Ctrl+Q quit",
                 "",
                 "Helper Commands",
-                ":sample [n]",
-                ":filter <cond>",
-                ":sort <exprs>",
-                ":group cols | aggs [| having]",
-                ":agg aggs [| where]",
-                ":top <col> [n]",
-                ":profile <col>",
-                ":describe",
-                ":history [n]",
-                ":rerun <n>",
-                ":schema  :last  :save <path>",
-                ":rows <n> :values <n> :limit <n>",
-                ":clear  :exit",
+                "/sample [n]",
+                "/filter <cond>",
+                "/sort <exprs>",
+                "/group cols | aggs [| having]",
+                "/agg aggs [| where]",
+                "/top <col> [n]",
+                "/profile <col>",
+                "/describe",
+                "/history [n]",
+                "/rerun <n>",
+                "/schema  /last  /save <path>",
+                "/rows <n> /values <n> /limit <n>",
+                "/clear  /exit",
             ]
         )
         return "\n".join(head)
@@ -273,25 +273,25 @@ class SqlExplorerEngine:
     def help_text(self) -> str:
         lines = [
             "Run standard SQL directly. Helper commands:",
-            ":help",
-            ":schema",
-            ":sample [n]",
-            ":filter <where condition>",
-            ":sort <order expressions>",
-            ":group <group cols> | <aggregates> [| having]",
-            ":agg <aggregates> [| where]",
-            ":top <column> [n]",
-            ":profile <column>",
-            ":describe",
-            ":history [n]",
-            ":rerun <history_index>",
-            ":rows <n>",
-            ":values <n>",
-            ":limit <n>",
-            ":save <path.csv|path.parquet|path.json>",
-            ":last",
-            ":clear",
-            ":exit / :quit",
+            "/help",
+            "/schema",
+            "/sample [n]",
+            "/filter <where condition>",
+            "/sort <order expressions>",
+            "/group <group cols> | <aggregates> [| having]",
+            "/agg <aggregates> [| where]",
+            "/top <column> [n]",
+            "/profile <column>",
+            "/describe",
+            "/history [n]",
+            "/rerun <history_index>",
+            "/rows <n>",
+            "/values <n>",
+            "/limit <n>",
+            "/save <path.csv|path.parquet|path.json>",
+            "/last",
+            "/clear",
+            "/exit or /quit",
             "",
             "Editor: Tab completes; Up/Down cycles query history at first/last line.",
             "",
@@ -361,48 +361,48 @@ class SqlExplorerEngine:
     def run_input(self, raw_input: str) -> EngineResponse:
         text = raw_input.strip()
         if not text:
-            return EngineResponse(status="info", message="Type SQL or :help.")
-        if text.startswith(":"):
+            return EngineResponse(status="info", message="Type SQL or /help.")
+        if text.startswith("/"):
             return self._run_command(text)
         return self.run_sql(text)
 
     def _run_command(self, command: str) -> EngineResponse:
         stripped = command.strip()
-        if stripped in {":exit", ":quit"}:
+        if stripped in {"/exit", "/quit"}:
             return EngineResponse(status="info", message="Exiting SQL explorer.", should_exit=True)
-        if stripped == ":help":
+        if stripped == "/help":
             return EngineResponse(status="info", message=self.help_text())
-        if stripped == ":schema":
+        if stripped == "/schema":
             rows = [(str(r[0]), str(r[1]), str(r[2])) for r in self._schema_rows]
             return self._table_response(["column", "type", "nullable"], rows, "Schema")
-        if stripped == ":clear":
+        if stripped == "/clear":
             return EngineResponse(status="info", message="Editor cleared.", clear_editor=True)
-        if stripped == ":last":
+        if stripped == "/last":
             return EngineResponse(status="info", message="Loaded last SQL in editor.", load_query=self.last_sql)
-        if stripped == ":describe":
+        if stripped == "/describe":
             return self._describe_dataset()
 
-        if stripped.startswith(":history"):
+        if stripped.startswith("/history"):
             parts = stripped.split()
             count = 20
             if len(parts) == 2:
                 try:
                     count = max(1, int(parts[1]))
                 except ValueError:
-                    return EngineResponse(status="error", message="Usage: :history [n]")
+                    return EngineResponse(status="error", message="Usage: /history [n]")
             history = self.executed_sql[-count:]
             start_idx = max(1, len(self.executed_sql) - len(history) + 1)
             rows = [(idx, sql) for idx, sql in enumerate(history, start=start_idx)]
             return self._table_response(["#", "sql"], rows, f"History ({len(history)} queries)")
 
-        if stripped.startswith(":rerun"):
+        if stripped.startswith("/rerun"):
             parts = stripped.split()
             if len(parts) != 2:
-                return EngineResponse(status="error", message="Usage: :rerun <n>")
+                return EngineResponse(status="error", message="Usage: /rerun <n>")
             try:
                 idx = int(parts[1])
             except ValueError:
-                return EngineResponse(status="error", message=":rerun expects an integer index")
+                return EngineResponse(status="error", message="/rerun expects an integer index")
             if idx < 1 or idx > len(self.executed_sql):
                 return EngineResponse(status="error", message="History index out of range")
             sql = self.executed_sql[idx - 1]
@@ -410,52 +410,52 @@ class SqlExplorerEngine:
             out.generated_sql = sql
             return out
 
-        if stripped.startswith(":rows"):
-            payload = stripped.removeprefix(":rows").strip()
+        if stripped.startswith("/rows"):
+            payload = stripped.removeprefix("/rows").strip()
             parsed = _parse_optional_positive_int(payload)
             if parsed is None:
-                return EngineResponse(status="error", message="Usage: :rows <n>")
+                return EngineResponse(status="error", message="Usage: /rows <n>")
             self.max_rows_display = parsed
             return EngineResponse(status="ok", message=f"Row display limit set to {self.max_rows_display}")
 
-        if stripped.startswith(":values"):
-            payload = stripped.removeprefix(":values").strip()
+        if stripped.startswith("/values"):
+            payload = stripped.removeprefix("/values").strip()
             parsed = _parse_optional_positive_int(payload)
             if parsed is None:
-                return EngineResponse(status="error", message="Usage: :values <n>")
+                return EngineResponse(status="error", message="Usage: /values <n>")
             self.max_value_chars = parsed
             return EngineResponse(status="ok", message=f"Value display limit set to {self.max_value_chars}")
 
-        if stripped.startswith(":limit"):
-            payload = stripped.removeprefix(":limit").strip()
+        if stripped.startswith("/limit"):
+            payload = stripped.removeprefix("/limit").strip()
             parsed = _parse_optional_positive_int(payload)
             if parsed is None:
-                return EngineResponse(status="error", message="Usage: :limit <n>")
+                return EngineResponse(status="error", message="Usage: /limit <n>")
             self.default_limit = parsed
             return EngineResponse(status="ok", message=f"Default helper query limit set to {self.default_limit}")
 
-        if stripped.startswith(":save"):
-            payload = stripped.removeprefix(":save").strip()
+        if stripped.startswith("/save"):
+            payload = stripped.removeprefix("/save").strip()
             if not payload:
-                return EngineResponse(status="error", message="Usage: :save <path>")
+                return EngineResponse(status="error", message="Usage: /save <path>")
             return self._save_last_result(payload)
 
-        if stripped.startswith(":profile"):
-            payload = stripped.removeprefix(":profile").strip()
+        if stripped.startswith("/profile"):
+            payload = stripped.removeprefix("/profile").strip()
             if not payload:
-                return EngineResponse(status="error", message="Usage: :profile <column>")
+                return EngineResponse(status="error", message="Usage: /profile <column>")
             return self._profile_column(payload)
 
         generated_sql = self._helper_command_to_sql(stripped)
         if generated_sql is None:
-            return EngineResponse(status="error", message=f"Unknown command: {stripped}. Use :help")
+            return EngineResponse(status="error", message=f"Unknown command: {stripped}. Use /help")
 
         out = self.run_sql(generated_sql)
         out.generated_sql = generated_sql
         return out
 
     def _helper_command_to_sql(self, command: str) -> str | None:
-        if command.startswith(":sample"):
+        if command.startswith("/sample"):
             parts = command.split()
             sample_n = self.default_limit
             if len(parts) == 2:
@@ -465,20 +465,20 @@ class SqlExplorerEngine:
                     return None
             return f'SELECT * FROM "{self.table_name}" LIMIT {sample_n}'
 
-        if command.startswith(":filter"):
-            cond = command.removeprefix(":filter").strip()
+        if command.startswith("/filter"):
+            cond = command.removeprefix("/filter").strip()
             if not cond:
                 return None
             return f'SELECT * FROM "{self.table_name}" WHERE {cond} LIMIT {self.default_limit}'
 
-        if command.startswith(":sort"):
-            expr = command.removeprefix(":sort").strip()
+        if command.startswith("/sort"):
+            expr = command.removeprefix("/sort").strip()
             if not expr:
                 return None
             return f'SELECT * FROM "{self.table_name}" ORDER BY {expr} LIMIT {self.default_limit}'
 
-        if command.startswith(":group"):
-            payload = command.removeprefix(":group").strip()
+        if command.startswith("/group"):
+            payload = command.removeprefix("/group").strip()
             parts = _split_pipe_sections(payload)
             if len(parts) < 2:
                 return None
@@ -491,8 +491,8 @@ class SqlExplorerEngine:
             sql += f" ORDER BY {group_cols}"
             return sql
 
-        if command.startswith(":agg"):
-            payload = command.removeprefix(":agg").strip()
+        if command.startswith("/agg"):
+            payload = command.removeprefix("/agg").strip()
             parts = _split_pipe_sections(payload)
             if not parts:
                 return None
@@ -503,7 +503,7 @@ class SqlExplorerEngine:
                 sql += f" WHERE {where}"
             return sql
 
-        if command.startswith(":top"):
+        if command.startswith("/top"):
             parts = command.split()
             if len(parts) < 2 or len(parts) > 3:
                 return None
