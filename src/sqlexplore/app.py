@@ -13,7 +13,9 @@ import typer
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -691,6 +693,15 @@ class SqlQueryEditor(TextArea):
         self._token_provider = token_provider
         self._history_prev = history_prev
         self._history_next = history_next
+        self._sql_syntax = Syntax(
+            "",
+            "sql",
+            theme="monokai",
+            word_wrap=False,
+            line_numbers=False,
+            indent_guides=False,
+            background_color="default",
+        )
         self.indent_width = 4
 
     async def _on_key(self, event: Any) -> None:
@@ -757,6 +768,43 @@ class SqlQueryEditor(TextArea):
             self.suggestion = candidate[len(prefix) :]
             return
         self.suggestion = ""
+
+    def get_line(self, line_index: int) -> Text:
+        line_string = self.document.get_line(line_index)
+        if not line_string:
+            return Text("", end="", no_wrap=True)
+        if line_string.lstrip().startswith("/"):
+            return self._highlight_helper_command_line(line_string)
+
+        highlighted = self._sql_syntax.highlight(line_string)
+        # Rich appends a trailing newline to highlighted output; remove only that
+        # so user-typed trailing spaces remain intact for correct cursor rendering.
+        if highlighted.plain.endswith("\n"):
+            highlighted = highlighted[:-1]
+        highlighted.end = ""
+        highlighted.no_wrap = True
+        return highlighted
+
+    def _highlight_helper_command_line(self, line: str) -> Text:
+        rendered = Text(end="", no_wrap=True)
+        indent_count = len(line) - len(line.lstrip())
+        if indent_count:
+            rendered.append(line[:indent_count])
+
+        command_line = line[indent_count:]
+        if not command_line.startswith("/"):
+            rendered.append(command_line, style="bright_white")
+            return rendered
+
+        parts = command_line.split(maxsplit=1)
+        command = parts[0]
+        args = parts[1] if len(parts) > 1 else ""
+        command_style = "bold cyan" if command in HELPER_COMMANDS else "bold red"
+        rendered.append(command, style=command_style)
+        if args:
+            rendered.append(" ")
+            rendered.append(args, style="bright_white")
+        return rendered
 
 
 class SqlExplorerTui(App[None]):

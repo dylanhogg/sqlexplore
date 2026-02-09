@@ -165,3 +165,24 @@ def test_results_header_click_sorts_asc_desc(tmp_path: Path) -> None:
             engine.close()
 
     asyncio.run(run())
+
+
+def test_query_editor_applies_sql_highlighting_to_single_line() -> None:
+    editor = SqlQueryEditor("SELECT a FROM t", lambda: [], lambda: None, lambda: None)
+    line = editor.get_line(0)
+    assert line.plain == "SELECT a FROM t"
+    assert len(line.spans) > 0
+    assert any(" on " not in str(span.style) for span in line.spans)
+
+
+def test_query_editor_styles_helper_commands() -> None:
+    editor = SqlQueryEditor("/sample 5", lambda: [], lambda: None, lambda: None)
+    line = editor.get_line(0)
+    assert line.plain == "/sample 5"
+    assert any("cyan" in str(span.style) for span in line.spans)
+
+
+def test_query_editor_preserves_trailing_spaces() -> None:
+    editor = SqlQueryEditor("SELECT ", lambda: [], lambda: None, lambda: None)
+    line = editor.get_line(0)
+    assert line.plain == "SELECT "
