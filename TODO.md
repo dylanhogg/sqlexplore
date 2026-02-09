@@ -13,6 +13,9 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Better autocomplete
 - Better guided SQL writing
 - SQL syntax checking / parsing (e.g. https://github.com/andialbrecht/sqlparse or https://github.com/tobymao/sqlglot)
+- Expand SQL autocomplete to include more clauses and keywords (e.g. TRIM etc)
+- Ensure all "SQL keywords" are upper cased in autocomplete.
+- Always emit the exectuted SQL to the Activity panel.
 
 ## Data formatting & schema introspection
 

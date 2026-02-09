@@ -153,6 +153,7 @@ Deliverables:
 Acceptance:
 - Perceived latency remains low.
 - Feature feels unified, complete, and consistent.
+- Helper commands and SQL autocomplete should work correctly together.
 
 ## Test Strategy
 

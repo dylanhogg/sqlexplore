@@ -156,3 +156,29 @@ def test_sql_inside_literal_does_not_suggest(tmp_path: Path) -> None:
         assert completions == []
     finally:
         engine.close()
+
+
+def test_sql_quoted_prefix_suggests_quoted_simple_identifier(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, 'SELECT "co')
+        assert '"col_name"' in completions
+    finally:
+        engine.close()
+
+
+def test_accepted_completion_is_ranked_higher_on_next_lookup(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        before = _completion_values(engine, "/s")
+        before_index = before.index("/sort")
+
+        for _ in range(4):
+            engine.record_completion_acceptance("/sort")
+
+        after = _completion_values(engine, "/s")
+        after_index = after.index("/sort")
+        assert after_index <= before_index
+        assert after[0] == "/sort"
+    finally:
+        engine.close()

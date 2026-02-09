@@ -268,6 +268,11 @@ class SqlExplorerEngine:
         self.columns: list[str] = []
         self.column_types: dict[str, str] = {}
         self.column_lookup: dict[str, str] = {}
+        self._column_completion_cache: list[CompletionItem] | None = None
+        self._aggregate_completion_cache: list[CompletionItem] | None = None
+        self._predicate_completion_cache: list[CompletionItem] | None = None
+        self._direction_completion_cache: list[CompletionItem] | None = None
+        self._sql_clause_completion_cache: dict[str, list[CompletionItem]] = {}
         self.refresh_schema()
         self._command_specs = self._build_command_specs()
         self._command_lookup = self._index_command_specs(self._command_specs)
@@ -286,6 +291,16 @@ class SqlExplorerEngine:
         self.columns = [str(row[0]) for row in self._schema_rows]
         self.column_types = {str(row[0]): str(row[1]) for row in self._schema_rows}
         self.column_lookup = {col.lower(): col for col in self.columns}
+        self._invalidate_completion_caches()
+
+    def _invalidate_completion_caches(self) -> None:
+        self._column_completion_cache = None
+        self._aggregate_completion_cache = None
+        self._predicate_completion_cache = None
+        self._direction_completion_cache = None
+        self._sql_clause_completion_cache = {}
+        if hasattr(self, "_completion_engine"):
+            self._completion_engine.clear_cache()
 
     def helper_commands(self) -> list[str]:
         commands: list[str] = []
@@ -869,6 +884,8 @@ class SqlExplorerEngine:
         return CompletionItem(label=value, insert_text=value, kind=kind, detail=detail, score=score)
 
     def _column_completion_items(self) -> list[CompletionItem]:
+        if self._column_completion_cache is not None:
+            return self._column_completion_cache
         items: list[CompletionItem] = []
         seen: set[str] = set()
         for column in self.columns:
@@ -878,6 +895,20 @@ class SqlExplorerEngine:
                 continue
             seen.add(key)
             items.append(self._base_completion_item(expr, "column", self.column_types[column], score=120))
+            if _is_simple_ident(column):
+                quoted = _quote_ident(column)
+                quoted_key = quoted.casefold()
+                if quoted_key not in seen:
+                    seen.add(quoted_key)
+                    items.append(
+                        self._base_completion_item(
+                            quoted,
+                            "column",
+                            f"{self.column_types[column]} (quoted)",
+                            score=112,
+                        )
+                    )
+        self._column_completion_cache = items
         return items
 
     def _numeric_completion_items(self, values: list[int], detail: str = "") -> list[CompletionItem]:
@@ -891,11 +922,13 @@ class SqlExplorerEngine:
         return items
 
     def _aggregate_completion_items(self) -> list[CompletionItem]:
+        if self._aggregate_completion_cache is not None:
+            return self._aggregate_completion_cache
         numeric_col = next(
             (self._column_expr(c) for c in self.columns if _is_numeric_type(self.column_types[c])),
             "value",
         )
-        return [
+        items = [
             self._base_completion_item("COUNT(*) AS count", "snippet", "count rows", score=140),
             self._base_completion_item(f"SUM({numeric_col}) AS total", "snippet", "sum numeric values", score=135),
             self._base_completion_item(
@@ -907,9 +940,13 @@ class SqlExplorerEngine:
             self._base_completion_item(f"MIN({numeric_col}) AS min_value", "snippet", "minimum value", score=125),
             self._base_completion_item(f"MAX({numeric_col}) AS max_value", "snippet", "maximum value", score=125),
         ]
+        self._aggregate_completion_cache = items
+        return items
 
     def _predicate_completion_items(self) -> list[CompletionItem]:
-        items = self._column_completion_items()
+        if self._predicate_completion_cache is not None:
+            return self._predicate_completion_cache
+        items = list(self._column_completion_items())
         first_col = self._column_expr(self.columns[0]) if self.columns else "column_name"
         items.extend(
             [
@@ -919,6 +956,7 @@ class SqlExplorerEngine:
                 self._base_completion_item(f"{first_col} LIKE '%'", "snippet", "string pattern predicate", score=100),
             ]
         )
+        self._predicate_completion_cache = items
         return items
 
     def _complete_sample(self, args: str, trailing_space: bool) -> list[CompletionItem]:
@@ -931,7 +969,7 @@ class SqlExplorerEngine:
 
     def _complete_sort(self, args: str, trailing_space: bool) -> list[CompletionItem]:
         del args, trailing_space
-        items = self._column_completion_items()
+        items = list(self._column_completion_items())
         for column in self.columns[: min(8, len(self.columns))]:
             expr = self._column_expr(column)
             items.append(self._base_completion_item(f"{expr} DESC", "snippet", "descending sort", score=110))
@@ -1033,11 +1071,14 @@ class SqlExplorerEngine:
         return [self._base_completion_item(keyword, "sql_keyword", "SQL keyword", score=score) for keyword in keywords]
 
     def _with_direction_completion_items(self) -> list[CompletionItem]:
-        items = self._column_completion_items()
+        if self._direction_completion_cache is not None:
+            return self._direction_completion_cache
+        items = list(self._column_completion_items())
         for column in self.columns[: min(8, len(self.columns))]:
             expr = self._column_expr(column)
             items.append(self._base_completion_item(f"{expr} ASC", "snippet", "ascending sort", score=112))
             items.append(self._base_completion_item(f"{expr} DESC", "snippet", "descending sort", score=114))
+        self._direction_completion_cache = items
         return items
 
     @staticmethod
@@ -1072,6 +1113,9 @@ class SqlExplorerEngine:
 
     def sql_completion_items_for_clause(self, clause: SqlClause) -> list[CompletionItem]:
         clause_key = clause.casefold()
+        cached = self._sql_clause_completion_cache.get(clause_key)
+        if cached is not None:
+            return cached
         table_items = [self._base_completion_item(self.table_name, "table", "active table/view", score=150)]
         columns = self._column_completion_items()
         predicates = self._predicate_completion_items()
@@ -1079,41 +1123,55 @@ class SqlExplorerEngine:
         numeric_values = self._numeric_completion_items([10, 25, 50, 100], detail="row count")
 
         if clause_key == "select":
-            return self._merge_completion_items(
+            items = self._merge_completion_items(
                 columns,
                 aggregate_items,
                 self._sql_keyword_items(["DISTINCT", "AS", "FROM", "CASE", "WHEN", "THEN", "ELSE", "END"], score=120),
             )
+            self._sql_clause_completion_cache[clause_key] = items
+            return items
         if clause_key in {"from", "join"}:
-            return self._merge_completion_items(
+            items = self._merge_completion_items(
                 table_items,
                 self._sql_keyword_items(
                     ["JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "WHERE", "GROUP BY", "ORDER BY", "LIMIT"],
                     score=118,
                 ),
             )
+            self._sql_clause_completion_cache[clause_key] = items
+            return items
         if clause_key in {"where", "having", "join_on"}:
-            return self._merge_completion_items(
+            items = self._merge_completion_items(
                 predicates,
                 self._sql_keyword_items(["AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN"], score=116),
                 aggregate_items if clause_key == "having" else [],
             )
+            self._sql_clause_completion_cache[clause_key] = items
+            return items
         if clause_key == "group_by":
-            return self._merge_completion_items(
+            items = self._merge_completion_items(
                 columns,
                 self._sql_keyword_items(["HAVING", "ORDER BY", "LIMIT"], score=115),
             )
+            self._sql_clause_completion_cache[clause_key] = items
+            return items
         if clause_key == "order_by":
-            return self._merge_completion_items(
+            items = self._merge_completion_items(
                 self._with_direction_completion_items(),
                 self._sql_keyword_items(["ASC", "DESC", "LIMIT"], score=114),
             )
+            self._sql_clause_completion_cache[clause_key] = items
+            return items
         if clause_key == "limit":
-            return self._merge_completion_items(
+            items = self._merge_completion_items(
                 numeric_values,
                 self._sql_keyword_items(["OFFSET"], score=110),
             )
-        return self._default_sql_completion_items()
+            self._sql_clause_completion_cache[clause_key] = items
+            return items
+        items = self._default_sql_completion_items()
+        self._sql_clause_completion_cache[clause_key] = items
+        return items
 
     def sql_completion_items(self) -> list[CompletionItem]:
         return self.sql_completion_items_for_clause("unknown")
@@ -1133,11 +1191,27 @@ class SqlExplorerEngine:
     def completion_items(self, text: str, cursor_location: tuple[int, int]) -> list[CompletionItem]:
         return self._completion_engine.get_items(text, cursor_location)
 
+    def record_completion_acceptance(self, token: str) -> None:
+        self._completion_engine.record_acceptance(token)
+
 
 class CompletionEngine:
     def __init__(self, engine: SqlExplorerEngine) -> None:
         self._engine = engine
         self._sqlglot_tokenizer = SqlglotTokenizer()
+        self._completion_cache: dict[tuple[str, int, int, int], list[CompletionItem]] = {}
+        self._completion_cache_limit = 192
+        self._acceptance_counts: dict[str, int] = {}
+        self._acceptance_revision = 0
+
+    def clear_cache(self) -> None:
+        self._completion_cache.clear()
+
+    def record_acceptance(self, token: str) -> None:
+        key = token.casefold()
+        self._acceptance_counts[key] = self._acceptance_counts.get(key, 0) + 1
+        self._acceptance_revision += 1
+        self.clear_cache()
 
     def _line_before_cursor(self, text: str, cursor_location: tuple[int, int]) -> tuple[str, int, int]:
         lines = text.split("\n")
@@ -1213,6 +1287,22 @@ class CompletionEngine:
         return quote_count % 2 == 1
 
     @staticmethod
+    def _has_unclosed_double_quote(before: str) -> bool:
+        quote_count = 0
+        idx = 0
+        while idx < len(before):
+            char = before[idx]
+            if char != '"':
+                idx += 1
+                continue
+            if idx + 1 < len(before) and before[idx + 1] == '"':
+                idx += 2
+                continue
+            quote_count += 1
+            idx += 1
+        return quote_count % 2 == 1
+
+    @staticmethod
     def _detect_sql_clause_from_words(words: list[str]) -> SqlClause:
         clause: SqlClause = "unknown"
         for word in words:
@@ -1234,7 +1324,10 @@ class CompletionEngine:
         return clause
 
     def _detect_sql_clause(self, before: str) -> SqlClause:
-        tokens = self._sqlglot_tokenizer.tokenize(before)
+        normalized = before
+        if self._has_unclosed_double_quote(before):
+            normalized += '"'
+        tokens = self._sqlglot_tokenizer.tokenize(normalized)
         words = [token.text.upper() for token in tokens if token.text and token.text[0].isalpha()]
         if not words:
             return "unknown"
@@ -1268,15 +1361,15 @@ class CompletionEngine:
             return self._helper_context(text, row, col, before)
         return self._sql_context(text, row, col, before)
 
-    @staticmethod
     def _match_candidates(
+        self,
         candidates: list[CompletionItem],
         prefix: str,
         replacement_start: int,
         replacement_end: int,
     ) -> list[CompletionItem]:
         prefix_lower = prefix.casefold()
-        matches: list[CompletionItem] = []
+        ranked_matches: list[tuple[int, CompletionItem]] = []
         seen: set[str] = set()
         for candidate in candidates:
             token = candidate.insert_text
@@ -1293,25 +1386,46 @@ class CompletionEngine:
                 insert_text = token.lower()
             elif token.islower() and prefix.isupper():
                 insert_text = token.upper()
-            matches.append(
-                CompletionItem(
-                    label=insert_text,
-                    insert_text=insert_text,
-                    kind=candidate.kind,
-                    detail=candidate.detail,
-                    replacement_start=replacement_start,
-                    replacement_end=replacement_end,
-                    score=candidate.score,
-                )
+            dynamic_score = candidate.score
+            dynamic_score += min(self._acceptance_counts.get(key, 0) * 6, 36)
+            if prefix:
+                if token.startswith(prefix):
+                    dynamic_score += 26
+                else:
+                    dynamic_score += 18
+                dynamic_score -= min(max(len(token) - len(prefix), 0), 18)
+                if prefix.startswith('"') and token.startswith('"'):
+                    dynamic_score += 12
+            built = CompletionItem(
+                label=insert_text,
+                insert_text=insert_text,
+                kind=candidate.kind,
+                detail=candidate.detail,
+                replacement_start=replacement_start,
+                replacement_end=replacement_end,
+                score=dynamic_score,
             )
-        matches.sort(key=lambda item: (-item.score, item.insert_text.casefold()))
-        return matches
+            ranked_matches.append((dynamic_score, built))
+        ranked_matches.sort(
+            key=lambda pair: (
+                -pair[0],
+                len(pair[1].insert_text),
+                pair[1].insert_text.casefold(),
+            )
+        )
+        return [pair[1] for pair in ranked_matches[:64]]
 
     def get_items(self, text: str, cursor_location: tuple[int, int]) -> list[CompletionItem]:
+        cache_key = (text, cursor_location[0], cursor_location[1], self._acceptance_revision)
+        cached = self._completion_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         context = self._build_context(text, cursor_location)
         if context is None:
             return []
 
+        matched: list[CompletionItem]
         if context.mode == "helper":
             if context.completing_command_name:
                 candidates = self._engine.helper_command_completion_items()
@@ -1325,19 +1439,25 @@ class CompletionEngine:
                 )
                 if not candidates:
                     candidates = self._engine.helper_command_completion_items()
-            return self._match_candidates(
+            matched = self._match_candidates(
                 candidates,
                 context.prefix,
                 context.replacement_start,
                 context.replacement_end,
             )
+        else:
+            matched = self._match_candidates(
+                self._engine.sql_completion_items_for_clause(context.sql_clause),
+                context.prefix,
+                context.replacement_start,
+                context.replacement_end,
+            )
 
-        return self._match_candidates(
-            self._engine.sql_completion_items_for_clause(context.sql_clause),
-            context.prefix,
-            context.replacement_start,
-            context.replacement_end,
-        )
+        self._completion_cache[cache_key] = matched
+        if len(self._completion_cache) > self._completion_cache_limit:
+            oldest_key = next(iter(self._completion_cache))
+            self._completion_cache.pop(oldest_key)
+        return matched
 
 
 class SqlQueryEditor(TextArea):
@@ -1380,6 +1500,7 @@ class SqlQueryEditor(TextArea):
         self._completion_index = 0
         self._completion_open = False
         self._suspend_completion_refresh = False
+        self._last_completion_signature: tuple[str, tuple[int, int], bool] | None = None
         self._sql_syntax = Syntax(
             "",
             "sql",
@@ -1409,6 +1530,10 @@ class SqlQueryEditor(TextArea):
         if self._completion_provider is None:
             self.dismiss_completion_menu()
             return
+        signature = (self.text, self.cursor_location, self.has_focus)
+        if not force_open and signature == self._last_completion_signature:
+            return
+        self._last_completion_signature = signature
         completions = self._completion_provider(self.text, self.cursor_location)
         if not completions:
             self.dismiss_completion_menu()
@@ -1585,6 +1710,7 @@ class SqlQueryEditor(TextArea):
         self._apply_inline_suggestion_from_selected_completion()
 
     def on_blur(self, _event: Any) -> None:
+        self._last_completion_signature = None
         self.dismiss_completion_menu()
 
     def get_line(self, line_index: int) -> Text:
@@ -1765,7 +1891,8 @@ class SqlExplorerTui(App[None]):
         menu.highlighted = min(max(0, selected_index), len(visible_items) - 1)
         menu.display = True
 
-    def _on_editor_completion_accepted(self, _item: CompletionItem) -> None:
+    def _on_editor_completion_accepted(self, item: CompletionItem) -> None:
+        self.engine.record_completion_acceptance(item.insert_text)
         self._on_editor_completion_changed([], 0, False)
 
     def compose(self) -> ComposeResult:
