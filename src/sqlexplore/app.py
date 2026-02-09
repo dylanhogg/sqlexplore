@@ -499,9 +499,14 @@ class SqlExplorerEngine:
         if command.startswith("/group"):
             payload = command.removeprefix("/group").strip()
             parts = _split_pipe_sections(payload)
-            if len(parts) < 2:
+            if not parts:
                 return None
             group_cols = parts[0]
+            if len(parts) == 1:
+                return (
+                    f'SELECT {group_cols}, COUNT(*) AS count FROM "{self.table_name}" '
+                    f"GROUP BY {group_cols} ORDER BY count DESC, {group_cols}"
+                )
             aggs = parts[1]
             having = parts[2] if len(parts) > 2 else ""
             sql = f'SELECT {group_cols}, {aggs} FROM "{self.table_name}" GROUP BY {group_cols}'
