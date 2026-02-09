@@ -16,6 +16,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
+from sqlglot.tokens import Tokenizer as SqlglotTokenizer
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -37,6 +38,7 @@ CompletionKind = Literal[
     "snippet",
     "value",
 ]
+SqlClause = Literal["unknown", "select", "from", "join", "where", "group_by", "having", "order_by", "limit", "join_on"]
 SQL_KEYWORDS = [
     "SELECT",
     "FROM",
@@ -146,6 +148,7 @@ class CompletionContext:
     prefix: str
     replacement_start: int
     replacement_end: int
+    sql_clause: SqlClause = "unknown"
     helper_command: str | None = None
     helper_args: str = ""
     helper_has_trailing_space: bool = False
@@ -1024,7 +1027,31 @@ class SqlExplorerEngine:
             return []
         return spec.completer(args, trailing_space)
 
-    def sql_completion_items(self) -> list[CompletionItem]:
+    def _sql_keyword_items(self, keywords: list[str], score: int = 90) -> list[CompletionItem]:
+        return [self._base_completion_item(keyword, "sql_keyword", "SQL keyword", score=score) for keyword in keywords]
+
+    def _with_direction_completion_items(self) -> list[CompletionItem]:
+        items = self._column_completion_items()
+        for column in self.columns[: min(8, len(self.columns))]:
+            expr = self._column_expr(column)
+            items.append(self._base_completion_item(f"{expr} ASC", "snippet", "ascending sort", score=112))
+            items.append(self._base_completion_item(f"{expr} DESC", "snippet", "descending sort", score=114))
+        return items
+
+    @staticmethod
+    def _merge_completion_items(*groups: list[CompletionItem]) -> list[CompletionItem]:
+        merged: list[CompletionItem] = []
+        seen: set[str] = set()
+        for items in groups:
+            for item in items:
+                key = item.insert_text.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item)
+        return merged
+
+    def _default_sql_completion_items(self) -> list[CompletionItem]:
         items: list[CompletionItem] = []
         for keyword in SQL_KEYWORDS:
             items.append(self._base_completion_item(keyword, "sql_keyword", "SQL keyword", score=90))
@@ -1040,6 +1067,54 @@ class SqlExplorerEngine:
             seen.add(key)
             deduped.append(item)
         return deduped
+
+    def sql_completion_items_for_clause(self, clause: SqlClause) -> list[CompletionItem]:
+        clause_key = clause.casefold()
+        table_items = [self._base_completion_item(self.table_name, "table", "active table/view", score=150)]
+        columns = self._column_completion_items()
+        predicates = self._predicate_completion_items()
+        aggregate_items = self._aggregate_completion_items()
+        numeric_values = self._numeric_completion_items([10, 25, 50, 100], detail="row count")
+
+        if clause_key == "select":
+            return self._merge_completion_items(
+                columns,
+                aggregate_items,
+                self._sql_keyword_items(["DISTINCT", "AS", "FROM", "CASE", "WHEN", "THEN", "ELSE", "END"], score=120),
+            )
+        if clause_key in {"from", "join"}:
+            return self._merge_completion_items(
+                table_items,
+                self._sql_keyword_items(
+                    ["JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "WHERE", "GROUP BY", "ORDER BY", "LIMIT"],
+                    score=118,
+                ),
+            )
+        if clause_key in {"where", "having", "join_on"}:
+            return self._merge_completion_items(
+                predicates,
+                self._sql_keyword_items(["AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN"], score=116),
+                aggregate_items if clause_key == "having" else [],
+            )
+        if clause_key == "group_by":
+            return self._merge_completion_items(
+                columns,
+                self._sql_keyword_items(["HAVING", "ORDER BY", "LIMIT"], score=115),
+            )
+        if clause_key == "order_by":
+            return self._merge_completion_items(
+                self._with_direction_completion_items(),
+                self._sql_keyword_items(["ASC", "DESC", "LIMIT"], score=114),
+            )
+        if clause_key == "limit":
+            return self._merge_completion_items(
+                numeric_values,
+                self._sql_keyword_items(["OFFSET"], score=110),
+            )
+        return self._default_sql_completion_items()
+
+    def sql_completion_items(self) -> list[CompletionItem]:
+        return self.sql_completion_items_for_clause("unknown")
 
     def completion_tokens(self) -> list[str]:
         raw_items = [*self.helper_command_completion_items(), *self.sql_completion_items()]
@@ -1060,6 +1135,7 @@ class SqlExplorerEngine:
 class CompletionEngine:
     def __init__(self, engine: SqlExplorerEngine) -> None:
         self._engine = engine
+        self._sqlglot_tokenizer = SqlglotTokenizer()
 
     def _line_before_cursor(self, text: str, cursor_location: tuple[int, int]) -> tuple[str, int, int]:
         lines = text.split("\n")
@@ -1118,14 +1194,60 @@ class CompletionEngine:
             completing_command_name=False,
         )
 
+    @staticmethod
+    def _is_inside_single_quoted_literal(before: str) -> bool:
+        quote_count = 0
+        idx = 0
+        while idx < len(before):
+            char = before[idx]
+            if char != "'":
+                idx += 1
+                continue
+            if idx + 1 < len(before) and before[idx + 1] == "'":
+                idx += 2
+                continue
+            quote_count += 1
+            idx += 1
+        return quote_count % 2 == 1
+
+    @staticmethod
+    def _detect_sql_clause_from_words(words: list[str]) -> SqlClause:
+        clause: SqlClause = "unknown"
+        for word in words:
+            token = " ".join(word.split())
+            if token == "SELECT":
+                clause = "select"
+            elif token == "FROM":
+                clause = "from"
+            elif token in {"WHERE", "HAVING", "LIMIT"}:
+                clause = cast(SqlClause, token.lower())
+            elif token == "GROUP BY":
+                clause = "group_by"
+            elif token == "ORDER BY":
+                clause = "order_by"
+            elif token == "ON":
+                clause = "join_on"
+            elif token in {"JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN"}:
+                clause = "join"
+        return clause
+
+    def _detect_sql_clause(self, before: str) -> SqlClause:
+        tokens = self._sqlglot_tokenizer.tokenize(before)
+        words = [token.text.upper() for token in tokens if token.text and token.text[0].isalpha()]
+        if not words:
+            return "unknown"
+        return self._detect_sql_clause_from_words(words)
+
     def _sql_context(self, text: str, row: int, col: int, before: str) -> CompletionContext | None:
-        prefix_match = (
-            _HELPER_PREFIX_RE.search(before) or _QUOTED_PREFIX_RE.search(before) or _IDENT_PREFIX_RE.search(before)
-        )
-        if prefix_match is None:
+        if self._is_inside_single_quoted_literal(before):
             return None
-        prefix = prefix_match.group(1)
-        replacement_start = len(before) - len(prefix)
+        prefix_match = _QUOTED_PREFIX_RE.search(before) or _IDENT_PREFIX_RE.search(before)
+        if prefix_match is None:
+            prefix = ""
+            replacement_start = len(before)
+        else:
+            prefix = prefix_match.group(1)
+            replacement_start = len(before) - len(prefix)
         return CompletionContext(
             text=text,
             cursor_row=row,
@@ -1135,6 +1257,7 @@ class CompletionEngine:
             prefix=prefix,
             replacement_start=replacement_start,
             replacement_end=len(before),
+            sql_clause=self._detect_sql_clause(before),
         )
 
     def _build_context(self, text: str, cursor_location: tuple[int, int]) -> CompletionContext | None:
@@ -1208,7 +1331,7 @@ class CompletionEngine:
             )
 
         return self._match_candidates(
-            self._engine.sql_completion_items(),
+            self._engine.sql_completion_items_for_clause(context.sql_clause),
             context.prefix,
             context.replacement_start,
             context.replacement_end,
@@ -1308,6 +1431,9 @@ class SqlQueryEditor(TextArea):
                 return
             replacement_start = max(0, min(item.replacement_start, col))
             current_text = self.document[row][replacement_start:col]
+            if not current_text:
+                self.suggestion = ""
+                return
             if not item.insert_text.casefold().startswith(current_text.casefold()):
                 self.suggestion = ""
                 return
@@ -1667,7 +1793,7 @@ def main(
     ),
     table_name: str = typer.Option("data", "--table", "-t", help="Logical table/view name inside DuckDB."),
     limit: int = typer.Option(100, "--limit", "-l", min=1, help="Default helper query row limit."),
-    max_rows: int = typer.Option(400, "--max-rows", min=1, help="Maximum rows displayed in the result grid."),
+    max_rows: int = typer.Option(1000, "--max-rows", min=1, help="Maximum rows displayed in the result grid."),
     max_value_chars: int = typer.Option(
         160,
         "--max-value-chars",

@@ -87,3 +87,72 @@ def test_group_completion_suggests_aggregates_after_pipe(tmp_path: Path) -> None
         assert "COUNT(*) AS count" in completions
     finally:
         engine.close()
+
+
+def test_sql_select_context_suggests_columns_and_functions(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT ")
+        assert "col_name" in completions
+        assert "COUNT(*) AS count" in completions
+    finally:
+        engine.close()
+
+
+def test_sql_from_context_suggests_active_table(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT col_name FROM ")
+        assert "data" in completions
+        assert "JOIN" in completions
+    finally:
+        engine.close()
+
+
+def test_sql_where_context_suggests_predicates(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT * FROM data WHERE ")
+        assert "col_name IS NOT NULL" in completions
+        assert "AND" in completions
+    finally:
+        engine.close()
+
+
+def test_sql_group_by_context_suggests_having_and_columns(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT col_name FROM data GROUP BY ")
+        assert "col_name" in completions
+        assert "HAVING" in completions
+    finally:
+        engine.close()
+
+
+def test_sql_order_by_context_suggests_directional_snippets(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT * FROM data ORDER BY ")
+        assert "col_name DESC" in completions
+        assert "x ASC" in completions
+    finally:
+        engine.close()
+
+
+def test_sql_limit_context_suggests_numeric_values(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT * FROM data LIMIT ")
+        assert "10" in completions
+        assert "25" in completions
+    finally:
+        engine.close()
+
+
+def test_sql_inside_literal_does_not_suggest(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT 'unterminated")
+        assert completions == []
+    finally:
+        engine.close()
