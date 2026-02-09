@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -172,6 +173,19 @@ def _is_numeric_type(type_name: str) -> bool:
     return any(marker in upper for marker in ("INT", "DOUBLE", "FLOAT", "DECIMAL", "REAL", "NUMERIC"))
 
 
+def _sort_cell_key(value: Any) -> tuple[int, int, float | str]:
+    if value is None:
+        return (2, 0, "")
+    if isinstance(value, bool):
+        return (0, 0, float(int(value)))
+    if isinstance(value, int | float):
+        number = float(value)
+        if math.isnan(number):
+            return (1, 0, "")
+        return (0, 0, number)
+    return (0, 1, str(value).casefold())
+
+
 class SqlExplorerEngine:
     def __init__(
         self,
@@ -244,13 +258,14 @@ class SqlExplorerEngine:
             [
                 "",
                 "Shortcuts",
-                "Ctrl+Enter run query",
-                "Ctrl+J sample query",
-                "Ctrl+K clear editor",
+                "Ctrl+Enter or F5 run query",
+                "Ctrl+N or F6 sample query",
+                "Ctrl+L or F7 clear editor",
                 "Tab accept completion",
                 "Up/Down query history",
-                "Ctrl+H help",
-                "Ctrl+Q quit",
+                "Ctrl+1 editor, Ctrl+2 results",
+                "F1 (or Ctrl+Shift+P) help",
+                "F10 (or Ctrl+Q) quit",
                 "",
                 "Helper Commands",
                 "/sample [n]",
@@ -293,7 +308,11 @@ class SqlExplorerEngine:
             "/clear",
             "/exit or /quit",
             "",
-            "Editor: Tab completes; Up/Down cycles query history at first/last line.",
+            (
+                "Editor: Tab completes; Up/Down cycles query history at first/last line; "
+                "Ctrl+Enter/F5 runs; Ctrl+N/F6 loads sample; Ctrl+L/F7 clears."
+            ),
+            "Navigation: Ctrl+1 focuses query editor, Ctrl+2 focuses results. Help: F1 or Ctrl+Shift+P.",
             "",
             f"settings: limit={self.default_limit}, rows={self.max_rows_display}, values={self.max_value_chars}",
         ]
@@ -636,6 +655,21 @@ class SqlExplorerEngine:
 
 
 class SqlQueryEditor(TextArea):
+    BINDINGS = [
+        Binding("ctrl+enter", "app.run_query", "Run", priority=True),
+        Binding("f5", "app.run_query", "Run", show=False, priority=True),
+        Binding("ctrl+n", "app.load_sample", "Sample", priority=True),
+        Binding("f6", "app.load_sample", show=False, priority=True),
+        Binding("ctrl+l", "app.clear_editor", "Clear", priority=True),
+        Binding("f7", "app.clear_editor", show=False, priority=True),
+        Binding("ctrl+1", "app.focus_editor", "Editor", priority=True),
+        Binding("ctrl+2", "app.focus_results", "Results", priority=True),
+        Binding("f1", "app.show_help", "Help", priority=True),
+        Binding("ctrl+shift+p", "app.show_help", show=False, priority=True),
+        Binding("f10", "app.quit", "Quit", priority=True),
+        Binding("ctrl+q", "app.quit", show=False, priority=True),
+    ]
+
     def __init__(
         self,
         text: str,
@@ -766,18 +800,27 @@ class SqlExplorerTui(App[None]):
 
     BINDINGS = [
         Binding("ctrl+enter", "run_query", "Run", priority=True),
-        Binding("ctrl+j", "load_sample", "Sample", priority=True),
-        Binding("ctrl+k", "clear_editor", "Clear", priority=True),
-        Binding("ctrl+e", "focus_editor", "Editor", priority=True),
-        Binding("ctrl+r", "focus_results", "Results", priority=True),
-        Binding("ctrl+h", "show_help", "Help", priority=True),
-        Binding("ctrl+q", "quit", "Quit", priority=True),
+        Binding("f5", "run_query", "Run", show=False, priority=True),
+        Binding("ctrl+n", "load_sample", "Sample", priority=True),
+        Binding("f6", "load_sample", "Sample", show=False, priority=True),
+        Binding("ctrl+l", "clear_editor", "Clear", priority=True),
+        Binding("f7", "clear_editor", "Clear", show=False, priority=True),
+        Binding("ctrl+1", "focus_editor", "Editor", priority=True),
+        Binding("ctrl+2", "focus_results", "Results", priority=True),
+        Binding("f1", "show_help", "Help", priority=True),
+        Binding("ctrl+shift+p", "show_help", "Help", show=False, priority=True),
+        Binding("f10", "quit", "Quit", priority=True),
+        Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
     ]
 
     def __init__(self, engine: SqlExplorerEngine) -> None:
         super().__init__()
         self.engine = engine
         self._history_cursor: int | None = None
+        self._active_result: QueryResult | None = None
+        self._base_rows: list[tuple[Any, ...]] = []
+        self._sort_column_index: int | None = None
+        self._sort_reverse = False
 
     def _reset_history_cursor(self) -> None:
         self._history_cursor = None
@@ -831,7 +874,7 @@ class SqlExplorerTui(App[None]):
     def on_mount(self) -> None:
         table = self._results_table()
         table.zebra_stripes = True
-        self._log("Ready. Press Ctrl+Enter to run SQL, or Ctrl+H for command help.", "info")
+        self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
         boot = self.engine.run_sql(self.engine.default_query, remember=False)
         self._apply_response(boot)
         self._query_editor().focus()
@@ -891,9 +934,18 @@ class SqlExplorerTui(App[None]):
         sidebar.update(self.engine.schema_preview())
 
     def _render_table(self, result: QueryResult) -> None:
+        self._active_result = result
+        self._base_rows = list(result.rows)
+        self._sort_column_index = None
+        self._sort_reverse = False
+
+        self._redraw_results_table()
+
+    def _redraw_results_table(self) -> None:
+        result = self._active_result
         table = self._results_table()
         table.clear(columns=True)
-        if not result.columns:
+        if result is None or not result.columns:
             self.query_one("#results_header", Static).update("Results")
             return
 
@@ -904,7 +956,31 @@ class SqlExplorerTui(App[None]):
         header = f"Results ({len(result.rows):,}/{result.total_rows:,} rows, {result.elapsed_ms:.1f} ms)"
         if result.truncated:
             header += " [truncated]"
+        if self._sort_column_index is not None and self._sort_column_index < len(result.columns):
+            direction = "desc" if self._sort_reverse else "asc"
+            header += f" [sorted: {result.columns[self._sort_column_index]} {direction}]"
         self.query_one("#results_header", Static).update(header)
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        result = self._active_result
+        if result is None or not result.rows:
+            return
+
+        if self._sort_column_index == event.column_index:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_column_index = event.column_index
+            self._sort_reverse = False
+
+        column_index = event.column_index
+        result.rows = sorted(
+            self._base_rows,
+            key=lambda row: _sort_cell_key(row[column_index]) if column_index < len(row) else (2, 0, ""),
+            reverse=self._sort_reverse,
+        )
+        self._redraw_results_table()
+        direction = "DESC" if self._sort_reverse else "ASC"
+        self._log(f"Sorted results by {event.label.plain} {direction}", "info")
 
     def _log(self, message: str, status: ResultStatus) -> None:
         logger = self.query_one("#activity_log", RichLog)
