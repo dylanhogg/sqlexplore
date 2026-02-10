@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import re
 import time
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
@@ -392,6 +394,7 @@ class SqlExplorerEngine:
                 "Up/Down query history",
                 "Ctrl+1 editor, Ctrl+2 results",
                 "Ctrl+B toggle Data Explorer",
+                "F8 copy full result TSV",
                 "F1 (or Ctrl+Shift+P) help",
                 "F10 (or Ctrl+Q) quit",
                 "",
@@ -415,7 +418,8 @@ class SqlExplorerEngine:
                 ),
                 (
                     "Navigation: Ctrl+1 focuses query editor, Ctrl+2 focuses results, "
-                    "Ctrl+B toggles Data Explorer. Help: F1 or Ctrl+Shift+P."
+                    "Ctrl+B toggles Data Explorer; F8 copies full result TSV. "
+                    "Help: F1 or Ctrl+Shift+P."
                 ),
                 "",
                 f"settings: limit={self.default_limit}, rows={self.max_rows_display}, values={self.max_value_chars}",
@@ -1749,6 +1753,7 @@ class SqlQueryEditor(TextArea):
         Binding("ctrl+1", "app.focus_editor", "Editor", priority=True),
         Binding("ctrl+2", "app.focus_results", "Results", priority=True),
         Binding("ctrl+b", "app.toggle_sidebar", "Data Explorer", key_display="^b", priority=True),
+        Binding("f8", "app.copy_results_tsv", "Copy TSV", priority=True),
         Binding("f1", "app.show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "app.show_help", show=False, priority=True),
         Binding("f10", "app.quit", "Quit", priority=True),
@@ -2164,6 +2169,7 @@ class SqlExplorerTui(App[None]):
         Binding("ctrl+1", "focus_editor", "Editor", priority=True),
         Binding("ctrl+2", "focus_results", "Results", priority=True),
         Binding("ctrl+b", "toggle_sidebar", "Data Explorer", key_display="^b", priority=True),
+        Binding("f8", "copy_results_tsv", "Copy TSV", priority=True),
         Binding("f1", "show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "show_help", "Help", show=False, priority=True),
         Binding("f10", "quit", "Quit", priority=True),
@@ -2179,6 +2185,7 @@ class SqlExplorerTui(App[None]):
         self._base_rows: list[tuple[Any, ...]] = []
         self._sort_column_index: int | None = None
         self._sort_reverse = False
+        self._last_results_tsv = ""
 
     def _reset_history_cursor(self) -> None:
         self._history_cursor = None
@@ -2332,6 +2339,41 @@ class SqlExplorerTui(App[None]):
 
     def action_show_help(self) -> None:
         self._log(self.engine.help_text(), "info")
+
+    @staticmethod
+    def _rows_to_tsv(columns: list[str], rows: list[tuple[Any, ...]]) -> str:
+        output = StringIO(newline="")
+        writer = csv.writer(output, delimiter="\t", quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
+        writer.writerow(columns)
+        writer.writerows(rows)
+        return output.getvalue()
+
+    def action_copy_results_tsv(self) -> None:
+        sql = self.engine.last_result_sql
+        if sql is None:
+            self._log("No query result available to copy.", "error")
+            return
+
+        try:
+            relation = self.engine.conn.execute(sql)
+            rows = relation.fetchall()
+            columns = _result_columns(relation.description)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Copy failed: {exc}", "error")
+            return
+
+        if not columns:
+            self._log("No tabular query result available to copy.", "error")
+            return
+
+        tsv_text = self._rows_to_tsv(columns, rows)
+        self._last_results_tsv = tsv_text
+        self.copy_to_clipboard(tsv_text)
+
+        message = f"Copied {len(rows):,} rows x {len(columns)} cols as TSV (full query result). Paste into Excel."
+        if self._active_result is not None and self._active_result.truncated:
+            message += f" Results pane shows {len(self._active_result.rows):,}/{self._active_result.total_rows:,} rows."
+        self._log(message, "ok")
 
     def _apply_response(self, response: EngineResponse) -> None:
         if response.generated_sql:

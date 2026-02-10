@@ -9,7 +9,6 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## UI & UX (layout, navigation, keybindings)
 
-- Move ^b helper further left in status bar next to similar control keys
 - Include UI overview like HuggingFace datasets page (column lengths, sort by column, etc.)
 - [ ] Create a generic pop window that can run different custom functions against query and results panes (eg query gen, data analysis)
 
@@ -17,14 +16,12 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 - [ ] Enable loading multiple data files, aliased to table names for joins etc
 - Enable multiple SQL queries in editor, separated by `;`, ctrl-enter to run each query separately
-- Better autocomplete
-- Better guided SQL writing
+- Review autocomplete edge cases and UX
 - SQL syntax checking / parsing (e.g. https://github.com/andialbrecht/sqlparse or https://github.com/tobymao/sqlglot)
 - Expand SQL autocomplete to include more clauses and keywords (e.g. TRIM etc)
 - Ensure all "SQL keywords" are upper cased in autocomplete.
 - Always emit the exectuted SQL to the Activity panel.
 - Implement debounce to prevent recomputing completions on every keystroke (waits briefly 50ms) after typing stops, then runs once.
-- [ ] Crl and del clear query
 
 ## Data formatting & schema introspection
 
@@ -37,6 +34,9 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## Export, persistence & I/O
 
+- Open from URL
+    - https://github.com/rom1504/img2dataset/raw/refs/heads/main/tests/test_files/test_1000.parquet
+    - 
 - [ ] Optional pass pre-filled sql queries in text file at startup, F? Key to load and 1st is pre-filled in query 
 - [ ] Enable copy all results to clip board
 - Add save SQL results to file
