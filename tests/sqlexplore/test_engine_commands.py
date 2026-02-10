@@ -182,3 +182,122 @@ def test_accepted_completion_is_ranked_higher_on_next_lookup(tmp_path: Path) -> 
         assert after[0] == "/sort"
     finally:
         engine.close()
+
+
+def test_aggregate_argument_provider_prefers_numeric_for_sum(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = [item.insert_text for item in engine.sql_completion_items_for_function_args("SUM")]
+        assert "x" in completions
+        assert "col_name" in completions
+        assert completions.index("x") < completions.index("col_name")
+        assert "value" not in completions
+    finally:
+        engine.close()
+
+
+def test_aggregate_argument_provider_count_includes_star_and_distinct(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = [item.insert_text for item in engine.sql_completion_items_for_function_args("COUNT")]
+        assert "*" in completions
+        assert "col_name" in completions
+        assert "DISTINCT col_name" in completions
+    finally:
+        engine.close()
+
+
+def test_aggregate_snippets_use_schema_based_columns(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        items = engine.completion_items("/group col_name | ", (0, len("/group col_name | ")))
+        completions = [item.insert_text for item in items]
+        assert "COUNT(*) AS count" in completions
+        assert "SUM(x) AS sum_x" in completions
+        assert "AVG(x) AS avg_x" in completions
+        assert "MIN(x) AS min_x" in completions
+        assert "MAX(x) AS max_x" in completions
+        assert all("value" not in completion.casefold() for completion in completions)
+    finally:
+        engine.close()
+
+
+def test_aggregate_snippets_non_numeric_fallback_is_explicit(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path, csv_text="city,name\nseattle,alice\nmiami,bob\n")
+    try:
+        items = engine.completion_items("/group city | ", (0, len("/group city | ")))
+        sum_item = next(item for item in items if item.insert_text.startswith("SUM("))
+        avg_item = next(item for item in items if item.insert_text.startswith("AVG("))
+        assert sum_item.insert_text == "SUM(city) AS sum_city"
+        assert avg_item.insert_text == "AVG(city) AS avg_city"
+        assert "non-numeric fallback" in sum_item.detail
+        assert "non-numeric fallback" in avg_item.detail
+    finally:
+        engine.close()
+
+
+def test_sql_max_argument_context_routes_to_aggregate_argument_candidates(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT MAX(")
+        assert "x" in completions
+        assert "col_name" in completions
+        assert "MAX(value)" not in completions
+        assert "COUNT(*) AS count" not in completions
+        assert "SUM(x) AS sum_x" not in completions
+    finally:
+        engine.close()
+
+
+def test_sql_sum_argument_context_ranks_numeric_before_text(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT SUM(")
+        assert "x" in completions
+        assert "col_name" in completions
+        assert completions.index("x") < completions.index("col_name")
+    finally:
+        engine.close()
+
+
+def test_sql_count_argument_context_includes_star_and_distinct(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT COUNT(")
+        assert "*" in completions
+        assert "col_name" in completions
+        assert "DISTINCT col_name" in completions
+        assert "COUNT(*) AS count" not in completions
+    finally:
+        engine.close()
+
+
+def test_sql_max_argument_prefix_filters_to_matching_column(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT MAX(co")
+        assert "col_name" in completions
+        assert "x" not in completions
+    finally:
+        engine.close()
+
+
+def test_sql_max_argument_quoted_prefix_filters_to_matching_column(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, 'SELECT MAX("co')
+        assert '"col_name"' in completions
+        assert "x" not in completions
+    finally:
+        engine.close()
+
+
+def test_result_columns_strip_duckdb_function_schema_prefix(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path, csv_text="synthetic_address\n  123 Main St  \n")
+    try:
+        out = engine.run_sql('SELECT trim(synthetic_address), * FROM "data" LIMIT 1')
+        assert out.status == "ok"
+        assert out.result is not None
+        assert out.result.columns == ["trim(synthetic_address)", "synthetic_address"]
+    finally:
+        engine.close()

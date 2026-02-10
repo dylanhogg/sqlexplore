@@ -104,6 +104,11 @@ _HELPER_PREFIX_RE = re.compile(r"(?<!\S)(/[A-Za-z_]*)$")
 _IDENT_PREFIX_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_$]*)$")
 _QUOTED_PREFIX_RE = re.compile(r'("(?:""|[^"])*)$')
 _SIMPLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+_QUALIFIED_FUNCTION_LABEL_RE = re.compile(
+    r'^(?P<prefix>(?:"(?:""|[^"]+)"|[A-Za-z_][A-Za-z0-9_$]*)\.)+(?P<func>"(?:""|[^"]+)"|[A-Za-z_][A-Za-z0-9_$]*)\('
+)
+_QUOTED_FUNCTION_LABEL_RE = re.compile(r'^(?P<func>"(?:""|[^"]+)")\(')
+_AGGREGATE_FUNCTIONS = frozenset({"COUNT", "SUM", "AVG", "MIN", "MAX"})
 
 
 @dataclass(slots=True)
@@ -153,6 +158,8 @@ class CompletionContext:
     helper_args: str = ""
     helper_has_trailing_space: bool = False
     completing_command_name: bool = False
+    sql_function: str | None = None
+    inside_function_args: bool = False
 
 
 @dataclass(slots=True)
@@ -194,6 +201,33 @@ def _is_simple_ident(name: str) -> bool:
     return bool(_SIMPLE_IDENT_RE.fullmatch(name))
 
 
+def _normalize_function_ident(token: str) -> str:
+    if not (token.startswith('"') and token.endswith('"') and len(token) > 1):
+        return token
+    unquoted = token[1:-1].replace('""', '"')
+    return unquoted if _is_simple_ident(unquoted) else token
+
+
+def _normalize_result_column_label(name: str) -> str:
+    qualified_match = _QUALIFIED_FUNCTION_LABEL_RE.match(name)
+    if qualified_match is not None:
+        func_token = _normalize_function_ident(qualified_match.group("func"))
+        return f"{func_token}({name[qualified_match.end() :]}"
+
+    quoted_match = _QUOTED_FUNCTION_LABEL_RE.match(name)
+    if quoted_match is not None:
+        func_token = _normalize_function_ident(quoted_match.group("func"))
+        return f"{func_token}({name[quoted_match.end() :]}"
+
+    return name
+
+
+def _result_columns(description: list[tuple[Any, ...]] | None) -> list[str]:
+    if not description:
+        return []
+    return [_normalize_result_column_label(str(item[0])) for item in description]
+
+
 def _split_pipe_sections(raw: str) -> list[str]:
     return [part.strip() for part in raw.split("|") if part.strip()]
 
@@ -222,6 +256,16 @@ def _format_scalar(value: Any, max_chars: int | None = None) -> str:
 def _is_numeric_type(type_name: str) -> bool:
     upper = type_name.upper()
     return any(marker in upper for marker in ("INT", "DOUBLE", "FLOAT", "DECIMAL", "REAL", "NUMERIC"))
+
+
+def _is_temporal_type(type_name: str) -> bool:
+    upper = type_name.upper()
+    return any(marker in upper for marker in ("DATE", "TIME", "TIMESTAMP", "INTERVAL"))
+
+
+def _is_text_type(type_name: str) -> bool:
+    upper = type_name.upper()
+    return any(marker in upper for marker in ("CHAR", "TEXT", "STRING", "VARCHAR", "UUID", "JSON"))
 
 
 def _sort_cell_key(value: Any) -> tuple[int, int, float | str]:
@@ -270,6 +314,7 @@ class SqlExplorerEngine:
         self.column_lookup: dict[str, str] = {}
         self._column_completion_cache: list[CompletionItem] | None = None
         self._aggregate_completion_cache: list[CompletionItem] | None = None
+        self._aggregate_arg_completion_cache: dict[str, list[CompletionItem]] = {}
         self._predicate_completion_cache: list[CompletionItem] | None = None
         self._direction_completion_cache: list[CompletionItem] | None = None
         self._sql_clause_completion_cache: dict[str, list[CompletionItem]] = {}
@@ -296,6 +341,7 @@ class SqlExplorerEngine:
     def _invalidate_completion_caches(self) -> None:
         self._column_completion_cache = None
         self._aggregate_completion_cache = None
+        self._aggregate_arg_completion_cache = {}
         self._predicate_completion_cache = None
         self._direction_completion_cache = None
         self._sql_clause_completion_cache = {}
@@ -408,7 +454,7 @@ class SqlExplorerEngine:
         try:
             relation = self.conn.execute(sql)
             rows = relation.fetchall()
-            columns = [str(item[0]) for item in relation.description] if relation.description else []
+            columns = _result_columns(relation.description)
         except Exception as exc:  # noqa: BLE001
             return EngineResponse(status="error", message=str(exc))
 
@@ -861,7 +907,7 @@ class SqlExplorerEngine:
             elif suffix == ".json":
                 relation = self.conn.execute(self.last_result_sql)
                 rows = relation.fetchall()
-                columns = [str(item[0]) for item in relation.description] if relation.description else []
+                columns = _result_columns(relation.description)
                 records = [dict(zip(columns, row, strict=False)) for row in rows]
                 out_path.write_text(json.dumps(records, indent=2, default=str), encoding="utf-8")
             else:
@@ -921,25 +967,145 @@ class SqlExplorerEngine:
             items.append(self._base_completion_item(str(value), "value", detail=detail, score=80))
         return items
 
+    @staticmethod
+    def _aggregate_arg_score(func_name: str, type_name: str) -> int:
+        function = func_name.strip().upper()
+        score = 118
+
+        if function in {"SUM", "AVG"}:
+            if _is_numeric_type(type_name):
+                return score + 42
+            return score - 46
+        if function in {"MIN", "MAX"}:
+            if _is_numeric_type(type_name):
+                return score + 34
+            if _is_temporal_type(type_name):
+                return score + 30
+            if _is_text_type(type_name):
+                return score + 8
+            return score + 4
+        if function == "COUNT":
+            if _is_numeric_type(type_name):
+                return score + 18
+            if _is_temporal_type(type_name):
+                return score + 14
+            return score + 10
+        return score
+
+    def _column_completion_items_for_aggregate(self, func_name: str) -> list[CompletionItem]:
+        function = func_name.strip().upper()
+        cached = self._aggregate_arg_completion_cache.get(function)
+        if cached is not None:
+            return cached
+
+        items: list[CompletionItem] = []
+        seen: set[str] = set()
+
+        if function == "COUNT":
+            items.append(self._base_completion_item("*", "value", "count rows", score=170))
+            seen.add("*")
+
+        for column in self.columns:
+            expr = self._column_expr(column)
+            type_name = self.column_types[column]
+            base_score = self._aggregate_arg_score(function, type_name)
+
+            expr_key = expr.casefold()
+            if expr_key not in seen:
+                seen.add(expr_key)
+                items.append(self._base_completion_item(expr, "column", type_name, score=base_score))
+
+            if _is_simple_ident(column):
+                quoted = _quote_ident(column)
+                quoted_key = quoted.casefold()
+                if quoted_key not in seen:
+                    seen.add(quoted_key)
+                    items.append(
+                        self._base_completion_item(
+                            quoted,
+                            "column",
+                            f"{type_name} (quoted)",
+                            score=base_score - 8,
+                        )
+                    )
+
+            if function == "COUNT":
+                distinct_expr = f"DISTINCT {expr}"
+                distinct_key = distinct_expr.casefold()
+                if distinct_key not in seen:
+                    seen.add(distinct_key)
+                    items.append(
+                        self._base_completion_item(
+                            distinct_expr,
+                            "snippet",
+                            f"{type_name} (distinct)",
+                            score=base_score + 10,
+                        )
+                    )
+
+        items.sort(
+            key=lambda item: (
+                -item.score,
+                len(item.insert_text),
+                item.insert_text.casefold(),
+            )
+        )
+        self._aggregate_arg_completion_cache[function] = items
+        return items
+
+    def _ranked_columns_for_aggregate(self, func_name: str) -> list[str]:
+        function = func_name.strip().upper()
+        ranked = list(self.columns)
+        ranked.sort(
+            key=lambda column: (
+                -self._aggregate_arg_score(function, self.column_types[column]),
+                len(self._column_expr(column)),
+                self._column_expr(column).casefold(),
+            )
+        )
+        return ranked
+
+    @staticmethod
+    def _aggregate_alias_suffix(column: str) -> str:
+        suffix = re.sub(r"[^A-Za-z0-9_]+", "_", column).strip("_").lower()
+        if not suffix:
+            return "value"
+        if suffix[0].isdigit():
+            return f"col_{suffix}"
+        return suffix
+
+    def _aggregate_snippet_item(self, func_name: str, detail: str, score: int) -> CompletionItem | None:
+        ranked_columns = self._ranked_columns_for_aggregate(func_name)
+        if not ranked_columns:
+            return None
+        best_column = ranked_columns[0]
+        column_type = self.column_types[best_column]
+        expr = self._column_expr(best_column)
+        alias = f"{func_name.lower()}_{self._aggregate_alias_suffix(best_column)}"
+        suffix = " (non-numeric fallback)" if func_name in {"SUM", "AVG"} and not _is_numeric_type(column_type) else ""
+        return self._base_completion_item(
+            f"{func_name}({expr}) AS {alias}",
+            "snippet",
+            f"{detail}{suffix}",
+            score=score,
+        )
+
     def _aggregate_completion_items(self) -> list[CompletionItem]:
         if self._aggregate_completion_cache is not None:
             return self._aggregate_completion_cache
-        numeric_col = next(
-            (self._column_expr(c) for c in self.columns if _is_numeric_type(self.column_types[c])),
-            "value",
-        )
-        items = [
-            self._base_completion_item("COUNT(*) AS count", "snippet", "count rows", score=140),
-            self._base_completion_item(f"SUM({numeric_col}) AS total", "snippet", "sum numeric values", score=135),
-            self._base_completion_item(
-                f"AVG({numeric_col}) AS avg_value",
-                "snippet",
-                "average numeric values",
-                score=130,
-            ),
-            self._base_completion_item(f"MIN({numeric_col}) AS min_value", "snippet", "minimum value", score=125),
-            self._base_completion_item(f"MAX({numeric_col}) AS max_value", "snippet", "maximum value", score=125),
+        items: list[CompletionItem] = [
+            self._base_completion_item("COUNT(*) AS count", "snippet", "count rows", score=140)
         ]
+        aggregate_specs = [
+            ("SUM", "sum numeric values", 135),
+            ("AVG", "average numeric values", 130),
+            ("MIN", "minimum value", 125),
+            ("MAX", "maximum value", 125),
+        ]
+        for func_name, detail, score in aggregate_specs:
+            snippet = self._aggregate_snippet_item(func_name, detail, score)
+            if snippet is not None:
+                items.append(snippet)
         self._aggregate_completion_cache = items
         return items
 
@@ -1176,6 +1342,9 @@ class SqlExplorerEngine:
     def sql_completion_items(self) -> list[CompletionItem]:
         return self.sql_completion_items_for_clause("unknown")
 
+    def sql_completion_items_for_function_args(self, function_name: str) -> list[CompletionItem]:
+        return self._column_completion_items_for_aggregate(function_name)
+
     def completion_tokens(self) -> list[str]:
         raw_items = [*self.helper_command_completion_items(), *self.sql_completion_items()]
         seen: set[str] = set()
@@ -1327,15 +1496,116 @@ class CompletionEngine:
         normalized = before
         if self._has_unclosed_double_quote(before):
             normalized += '"'
-        tokens = self._sqlglot_tokenizer.tokenize(normalized)
+        try:
+            tokens = self._sqlglot_tokenizer.tokenize(normalized)
+        except Exception:
+            return "unknown"
         words = [token.text.upper() for token in tokens if token.text and token.text[0].isalpha()]
         if not words:
             return "unknown"
         return self._detect_sql_clause_from_words(words)
 
+    @staticmethod
+    def _nearest_unmatched_open_paren(before: str) -> int | None:
+        open_parens: list[int] = []
+        idx = 0
+        in_single_quote = False
+        in_double_quote = False
+        in_line_comment = False
+        block_comment_depth = 0
+
+        while idx < len(before):
+            char = before[idx]
+            next_char = before[idx + 1] if idx + 1 < len(before) else ""
+
+            if in_line_comment:
+                if char == "\n":
+                    in_line_comment = False
+                idx += 1
+                continue
+
+            if block_comment_depth > 0:
+                if char == "/" and next_char == "*":
+                    block_comment_depth += 1
+                    idx += 2
+                    continue
+                if char == "*" and next_char == "/":
+                    block_comment_depth -= 1
+                    idx += 2
+                    continue
+                idx += 1
+                continue
+
+            if in_single_quote:
+                if char == "'" and next_char == "'":
+                    idx += 2
+                    continue
+                if char == "'":
+                    in_single_quote = False
+                idx += 1
+                continue
+
+            if in_double_quote:
+                if char == '"' and next_char == '"':
+                    idx += 2
+                    continue
+                if char == '"':
+                    in_double_quote = False
+                idx += 1
+                continue
+
+            if char == "-" and next_char == "-":
+                in_line_comment = True
+                idx += 2
+                continue
+            if char == "/" and next_char == "*":
+                block_comment_depth = 1
+                idx += 2
+                continue
+            if char == "'":
+                in_single_quote = True
+                idx += 1
+                continue
+            if char == '"':
+                in_double_quote = True
+                idx += 1
+                continue
+            if char == "(":
+                open_parens.append(idx)
+            elif char == ")" and open_parens:
+                open_parens.pop()
+            idx += 1
+
+        if not open_parens:
+            return None
+        return open_parens[-1]
+
+    @staticmethod
+    def _aggregate_function_before_paren(before: str, open_paren_idx: int) -> str | None:
+        token_source = before[:open_paren_idx].rstrip()
+        if not token_source:
+            return None
+        match = _IDENT_PREFIX_RE.search(token_source)
+        if match is None:
+            return None
+        function_name = match.group(1).upper()
+        if function_name not in _AGGREGATE_FUNCTIONS:
+            return None
+        return function_name
+
+    def _function_argument_context(self, before: str) -> tuple[bool, str | None]:
+        open_paren_idx = self._nearest_unmatched_open_paren(before)
+        if open_paren_idx is None:
+            return False, None
+        function_name = self._aggregate_function_before_paren(before, open_paren_idx)
+        if function_name is None:
+            return False, None
+        return True, function_name
+
     def _sql_context(self, text: str, row: int, col: int, before: str) -> CompletionContext | None:
         if self._is_inside_single_quoted_literal(before):
             return None
+        inside_function_args, sql_function = self._function_argument_context(before)
         prefix_match = _QUOTED_PREFIX_RE.search(before) or _IDENT_PREFIX_RE.search(before)
         if prefix_match is None:
             prefix = ""
@@ -1353,6 +1623,8 @@ class CompletionEngine:
             replacement_start=replacement_start,
             replacement_end=len(before),
             sql_clause=self._detect_sql_clause(before),
+            sql_function=sql_function,
+            inside_function_args=inside_function_args,
         )
 
     def _build_context(self, text: str, cursor_location: tuple[int, int]) -> CompletionContext | None:
@@ -1446,8 +1718,13 @@ class CompletionEngine:
                 context.replacement_end,
             )
         else:
+            sql_candidates = self._engine.sql_completion_items_for_clause(context.sql_clause)
+            if context.inside_function_args and context.sql_function is not None:
+                function_candidates = self._engine.sql_completion_items_for_function_args(context.sql_function)
+                if function_candidates:
+                    sql_candidates = function_candidates
             matched = self._match_candidates(
-                self._engine.sql_completion_items_for_clause(context.sql_clause),
+                sql_candidates,
                 context.prefix,
                 context.replacement_start,
                 context.replacement_end,
@@ -1470,6 +1747,7 @@ class SqlQueryEditor(TextArea):
         Binding("f7", "app.clear_editor", show=False, priority=True),
         Binding("ctrl+1", "app.focus_editor", "Editor", priority=True),
         Binding("ctrl+2", "app.focus_results", "Results", priority=True),
+        Binding("ctrl+b", "app.toggle_sidebar", "Data Explorer", key_display="^b", priority=True),
         Binding("f1", "app.show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "app.show_help", show=False, priority=True),
         Binding("f10", "app.quit", "Quit", priority=True),

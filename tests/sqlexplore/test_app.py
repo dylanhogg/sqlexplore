@@ -35,6 +35,18 @@ def _column_values(table: DataTable[str], column_index: int) -> list[str]:
     return [str(table.get_row_at(row_index)[column_index]) for row_index in range(table.row_count)]
 
 
+def _visible_binding_order(bindings: list[Any]) -> list[tuple[str, str]]:
+    return [
+        (binding.key_display or binding.key, binding.description)
+        for binding in bindings
+        if binding.show and binding.description
+    ]
+
+
+def test_query_and_results_panes_share_status_key_order() -> None:
+    assert _visible_binding_order(SqlQueryEditor.BINDINGS) == _visible_binding_order(SqlExplorerTui.BINDINGS)
+
+
 def test_ctrl_shortcuts_work_in_editor_focus(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)
