@@ -162,6 +162,7 @@ class CompletionItem:
     insert_text: str
     kind: CompletionKind
     detail: str = ""
+    usage: str = ""
     replacement_start: int = 0
     replacement_end: int = 0
     score: int = 0
@@ -617,7 +618,7 @@ class SqlExplorerEngine:
             ),
             SqlHelperCommandSpec(
                 "/top",
-                "/top <column> [n]",
+                "/top <column> <n>",
                 "Top values by frequency for a column.",
                 self._sql_for_top,
                 self._complete_top,
@@ -876,17 +877,15 @@ class SqlExplorerEngine:
 
     def _sql_for_top(self, args: str) -> str | None:
         parts = args.strip().split()
-        if len(parts) < 1 or len(parts) > 2:
+        if len(parts) != 2:
             return None
         resolved = self._resolve_column(parts[0])
         if resolved is None:
             return None
-        top_n = 10
-        if len(parts) == 2:
-            try:
-                top_n = max(1, int(parts[1]))
-            except ValueError:
-                return None
+        try:
+            top_n = max(1, int(parts[1]))
+        except ValueError:
+            return None
         qcol = _quote_ident(resolved)
         return (
             f'SELECT {qcol} AS value, COUNT(*) AS count FROM "{self.table_name}" '
@@ -998,9 +997,10 @@ class SqlExplorerEngine:
         value: str,
         kind: CompletionKind,
         detail: str = "",
+        usage: str = "",
         score: int = 0,
     ) -> CompletionItem:
-        return CompletionItem(label=value, insert_text=value, kind=kind, detail=detail, score=score)
+        return CompletionItem(label=value, insert_text=value, kind=kind, detail=detail, usage=usage, score=score)
 
     def _column_completion_items(self) -> list[CompletionItem]:
         if self._column_completion_cache is not None:
@@ -1239,7 +1239,9 @@ class SqlExplorerEngine:
             return self._column_completion_items()
         if len(parts) == 1 and not trailing_space:
             return self._column_completion_items()
-        if len(parts) in {1, 2}:
+        if len(parts) == 1 and trailing_space:
+            return self._numeric_completion_items([10, self.default_limit, 25, 50], detail="top rows")
+        if len(parts) == 2:
             return self._numeric_completion_items([10, self.default_limit, 25, 50], detail="top rows")
         return []
 
@@ -1292,7 +1294,15 @@ class SqlExplorerEngine:
                 if key in seen:
                     continue
                 seen.add(key)
-                items.append(self._base_completion_item(raw_name, "helper_command", spec.description, score=180))
+                items.append(
+                    self._base_completion_item(
+                        raw_name,
+                        "helper_command",
+                        spec.description,
+                        usage=spec.usage,
+                        score=180,
+                    )
+                )
         return items
 
     def helper_argument_completion_items(
@@ -1749,6 +1759,7 @@ class CompletionEngine:
                 insert_text=insert_text,
                 kind=candidate.kind,
                 detail=candidate.detail,
+                usage=candidate.usage,
                 replacement_start=replacement_start,
                 replacement_end=replacement_end,
                 score=dynamic_score,

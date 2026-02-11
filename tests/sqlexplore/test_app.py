@@ -9,7 +9,7 @@ from typing import Any, cast
 from rich.text import Text
 from textual.widgets import DataTable, OptionList, RichLog, Static
 
-from sqlexplore.engine import SqlExplorerEngine, app_version
+from sqlexplore.engine import CompletionItem, SqlExplorerEngine, app_version
 from sqlexplore.tui import SqlExplorerTui, SqlQueryEditor
 
 
@@ -779,6 +779,33 @@ def test_completion_menu_highlight_then_select_uses_clicked_window_item(tmp_path
     asyncio.run(run())
 
 
+def test_completion_prompt_for_helper_shows_description_then_usage() -> None:
+    item = CompletionItem(
+        label="/top",
+        insert_text="/top",
+        kind="helper_command",
+        detail="Top values by frequency for a column.",
+        usage="/top <column> <n>",
+    )
+    prompt = SqlExplorerTui.completion_option_prompt(item)
+    assert prompt.startswith("/top  [helper command] Top values by frequency for a column.")
+    assert "Usage: /top <column> <n>" in prompt
+    assert prompt.index("Top values by frequency for a column.") < prompt.index("Usage: /top <column> <n>")
+
+
+def test_completion_prompt_for_helper_without_args_omits_usage() -> None:
+    item = CompletionItem(
+        label="/help",
+        insert_text="/help",
+        kind="helper_command",
+        detail="Show helper command reference.",
+        usage="/help",
+    )
+    prompt = SqlExplorerTui.completion_option_prompt(item)
+    assert prompt == "/help  [helper command] Show helper command reference."
+    assert "Usage:" not in prompt
+
+
 def test_query_editor_applies_sql_highlighting_to_single_line() -> None:
     editor = SqlQueryEditor("SELECT a FROM t", lambda: [], lambda: None, lambda: None)
     line = editor.get_line(0)
@@ -798,3 +825,9 @@ def test_query_editor_preserves_trailing_spaces() -> None:
     editor = SqlQueryEditor("SELECT ", lambda: [], lambda: None, lambda: None)
     line = editor.get_line(0)
     assert line.plain == "SELECT "
+
+
+def test_query_editor_preserves_trailing_spaces_for_helper_commands() -> None:
+    editor = SqlQueryEditor("/top ", lambda: [], lambda: None, lambda: None)
+    line = editor.get_line(0)
+    assert line.plain == "/top "

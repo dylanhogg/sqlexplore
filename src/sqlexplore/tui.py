@@ -479,15 +479,18 @@ class SqlQueryEditor(TextArea):
             rendered.append(command_line, style="bright_white")
             return rendered
 
-        parts = command_line.split(maxsplit=1)
-        command = parts[0]
-        args = parts[1] if len(parts) > 1 else ""
+        command_end = len(command_line)
+        for idx, char in enumerate(command_line):
+            if char.isspace():
+                command_end = idx
+                break
+        command = command_line[:command_end]
+        remainder = command_line[command_end:]
         helper_commands = {item.casefold() for item in self._helper_command_provider()}
         command_style = "bold cyan" if command.casefold() in helper_commands else "bold red"
         rendered.append(command, style=command_style)
-        if args:
-            rendered.append(" ")
-            rendered.append(args, style="bright_white")
+        if remainder:
+            rendered.append(remainder, style="bright_white")
         return rendered
 
 
@@ -604,11 +607,21 @@ class SqlExplorerTui(App[None]):
         return self.query_one("#completion_hint", Static)
 
     @staticmethod
-    def _completion_option_prompt(item: CompletionItem) -> str:
+    def completion_option_prompt(item: CompletionItem) -> str:
         kind = item.kind.replace("_", " ")
+        prompt = f"{item.insert_text}  [{kind}]"
+        if item.kind == "helper_command":
+            detail_parts: list[str] = []
+            if item.detail:
+                detail_parts.append(item.detail)
+            if item.usage and ("<" in item.usage or "[" in item.usage):
+                detail_parts.append(f"Usage: {item.usage}")
+            if detail_parts:
+                return f"{prompt} {' '.join(detail_parts)}"
+            return prompt
         if item.detail:
-            return f"{item.insert_text}  [{kind}] {item.detail}"
-        return f"{item.insert_text}  [{kind}]"
+            return f"{prompt} {item.detail}"
+        return prompt
 
     def _on_editor_completion_changed(
         self,
@@ -631,7 +644,7 @@ class SqlExplorerTui(App[None]):
         max_window_start = max(0, len(items) - window_size)
         self._completion_window_start = min(max(0, selected - window_size + 1), max_window_start)
         visible_items = items[self._completion_window_start : self._completion_window_start + window_size]
-        prompts = [self._completion_option_prompt(item) for item in visible_items]
+        prompts = [self.completion_option_prompt(item) for item in visible_items]
         menu.set_options(prompts)
         menu.highlighted = selected - self._completion_window_start
         menu.display = True

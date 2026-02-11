@@ -58,6 +58,7 @@ def test_help_text_is_generated_from_command_registry(tmp_path: Path) -> None:
     try:
         help_text = engine.help_text()
         assert "/sample [n]" in help_text
+        assert "/top <column> <n>" in help_text
         assert "/group <group cols> | <aggregates> [| having]" in help_text
         assert "/save <path.csv|path.parquet|path.json>" in help_text
         assert "/exit or /quit" in help_text
@@ -74,12 +75,46 @@ def test_helper_completion_suggests_command_names(tmp_path: Path) -> None:
         engine.close()
 
 
+def test_helper_completion_items_include_usage(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        items = engine.helper_command_completion_items()
+        top_item = next(item for item in items if item.insert_text == "/top")
+        assert top_item.detail == "Top values by frequency for a column."
+        assert top_item.usage == "/top <column> <n>"
+    finally:
+        engine.close()
+
+
 def test_top_completion_suggests_columns_after_command(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
         completions = _completion_values(engine, "/top ")
         assert "col_name" in completions
         assert "x" in completions
+    finally:
+        engine.close()
+
+
+def test_top_command_requires_explicit_n(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        out = engine.run_input("/top col_name")
+        assert out.status == "error"
+        assert out.message == "Usage: /top <column> <n>"
+    finally:
+        engine.close()
+
+
+def test_top_command_uses_supplied_n(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        out = engine.run_input("/top col_name 1")
+        assert out.status == "ok"
+        assert out.generated_sql is not None
+        assert "LIMIT 1" in out.generated_sql
+        assert out.result is not None
+        assert len(out.result.rows) == 1
     finally:
         engine.close()
 
