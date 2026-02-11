@@ -244,6 +244,10 @@ def _is_http_url(value: str) -> bool:
     return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
 
 
+def _default_download_dir() -> Path:
+    return Path(typer.get_app_dir("sqlexplore")) / "downloads"
+
+
 def _format_byte_count(size_bytes: int) -> str:
     if size_bytes < 1024:
         return f"{size_bytes} B"
@@ -293,14 +297,26 @@ def _remote_content_length(response: Any) -> int | None:
     return content_length if content_length > 0 else None
 
 
+def _ensure_download_dir(download_dir: Path) -> Path:
+    expanded = download_dir.expanduser()
+    if expanded.exists() and not expanded.is_dir():
+        raise typer.BadParameter(f"Download path is not a directory: {expanded}")
+    try:
+        expanded.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise typer.BadParameter(f"Download directory is not writable: {expanded}: {exc}") from exc
+    return expanded.resolve()
+
+
 def _download_remote_parquet(
     url: str,
     download_dir: Path,
     overwrite: bool = False,
     activity_messages: list[str] | None = None,
 ) -> Path:
+    destination_dir = _ensure_download_dir(download_dir)
     file_name = _remote_filename(url)
-    destination = (download_dir / file_name).resolve()
+    destination = (destination_dir / file_name).resolve()
 
     _emit_download_log(f"[download] remote={url}", activity_messages)
     _emit_download_log(f"[download] local={destination}", activity_messages)
@@ -319,7 +335,6 @@ def _download_remote_parquet(
         _emit_download_log(f"[download] Overwriting local download file {destination.name}", activity_messages)
 
     start = time.perf_counter()
-    download_dir.mkdir(parents=True, exist_ok=True)
     progress_bar: Any | None = None
     try:
         request = Request(url, headers={"User-Agent": "sqlexplore"})
@@ -342,7 +357,7 @@ def _download_remote_parquet(
                 progress_bar.update(len(chunk))
     except Exception as exc:
         destination.unlink(missing_ok=True)
-        raise typer.BadParameter(f"Failed to download data file from {url}: {exc}") from exc
+        raise typer.BadParameter(f"Failed to download data file from {url} to {destination}: {exc}") from exc
     finally:
         if progress_bar is not None:
             progress_bar.close()
@@ -362,6 +377,7 @@ def _download_remote_parquet(
 
 def _resolve_data_path(
     data: str,
+    download_dir: Path,
     overwrite: bool = False,
     startup_activity_messages: list[str] | None = None,
 ) -> Path:
@@ -369,9 +385,10 @@ def _resolve_data_path(
     if not value:
         raise typer.BadParameter("Data path cannot be empty.")
     if _is_http_url(value):
+        resolved_download_dir = download_dir.expanduser().resolve()
         return _download_remote_parquet(
             value,
-            Path("data/downloads"),
+            resolved_download_dir,
             overwrite=overwrite,
             activity_messages=startup_activity_messages,
         )
@@ -2831,6 +2848,11 @@ def main(
         "--overwrite",
         help="When data is an HTTP(S) URL, overwrite existing local download if present.",
     ),
+    download_dir: Path = typer.Option(
+        _default_download_dir(),
+        "--download-dir",
+        help="When data is an HTTP(S) URL, directory used for downloaded files.",
+    ),
     version: bool = typer.Option(
         False,
         "--version",
@@ -2843,7 +2865,12 @@ def main(
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
     startup_activity_messages: list[str] = []
-    file_path = _resolve_data_path(data, overwrite=overwrite, startup_activity_messages=startup_activity_messages)
+    file_path = _resolve_data_path(
+        data,
+        download_dir=download_dir,
+        overwrite=overwrite,
+        startup_activity_messages=startup_activity_messages,
+    )
     engine = SqlExplorerEngine(
         data_path=file_path,
         table_name=table_name,
