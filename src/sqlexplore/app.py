@@ -216,8 +216,8 @@ def _remote_filename(url: str) -> str:
     if not file_name:
         host_name = _REMOTE_FILENAME_SAFE_CHARS_RE.sub("-", parsed.netloc).strip("-")
         file_name = f"{host_name or 'download'}.parquet"
-    if Path(file_name).suffix.lower() not in {".parquet", ".pq"}:
-        raise typer.BadParameter("Remote URL must end with .parquet or .pq.")
+    if Path(file_name).suffix.lower() not in {".csv", ".tsv", ".parquet", ".pq"}:
+        raise typer.BadParameter("Remote URL must end with .csv, .tsv, .parquet, or .pq.")
     return file_name
 
 
@@ -250,7 +250,7 @@ def _download_remote_parquet(url: str, download_dir: Path) -> Path:
                 typer.echo(f"[download] downloaded={_format_byte_count(downloaded_bytes)}")
     except Exception as exc:
         destination.unlink(missing_ok=True)
-        raise typer.BadParameter(f"Failed to download parquet file from {url}: {exc}") from exc
+        raise typer.BadParameter(f"Failed to download data file from {url}: {exc}") from exc
 
     elapsed_seconds = time.perf_counter() - start
     file_size_bytes = destination.stat().st_size
@@ -2583,7 +2583,7 @@ def _render_console_response(console: Console, response: EngineResponse, max_val
 def main(
     data: str = typer.Argument(
         ...,
-        help="CSV/TSV/Parquet local file path, or HTTP(S) parquet URL.",
+        help="CSV/TSV/Parquet local file path, or HTTP(S) URL.",
     ),
     table_name: str = typer.Option("data", "--table", "-t", help="Logical table/view name inside DuckDB."),
     limit: int = typer.Option(100, "--limit", "-l", min=1, help="Default helper query row limit."),
