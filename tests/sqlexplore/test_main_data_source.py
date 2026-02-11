@@ -354,3 +354,33 @@ def test_main_keeps_local_path_behavior(tmp_path: Path, monkeypatch: pytest.Monk
     assert result.exit_code == 0
     assert captured["data_path"] == local_path.resolve()
     assert captured["closed"] is True
+
+
+def test_main_version_option_prints_version_without_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(app_module, "app_version", lambda: "9.9.9")
+    result = runner.invoke(app_module.app, ["--version"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "sqlexplore 9.9.9"
+
+
+def test_app_version_falls_back_to_pyproject_when_metadata_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "sqlexplore"\nversion = "1.2.3"\n', encoding="utf-8")
+    fake_app_file = tmp_path / "src" / "sqlexplore" / "app.py"
+    fake_app_file.parent.mkdir(parents=True)
+    fake_app_file.write_text("", encoding="utf-8")
+
+    def fake_importlib_version(_: str) -> str:
+        raise app_module.PackageNotFoundError
+
+    monkeypatch.setattr(app_module, "__file__", str(fake_app_file))
+    monkeypatch.setattr(app_module, "importlib_version", fake_importlib_version)
+
+    app_module.app_version.cache_clear()
+    try:
+        assert app_module.app_version() == "1.2.3"
+    finally:
+        app_module.app_version.cache_clear()

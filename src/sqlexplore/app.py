@@ -6,7 +6,11 @@ import math
 import re
 import sys
 import time
+import tomllib
 from dataclasses import dataclass
+from functools import cache
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as importlib_version
 from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
@@ -124,6 +128,36 @@ JSON_DETECTION_SAMPLE_SIZE = 12
 JSON_DETECTION_MIN_VALID = 3
 JSON_DETECTION_MIN_RATIO = 0.7
 JSON_CELL_MAX_PARSE_CHARS = 4_096
+UNKNOWN_VERSION = "0.0.0+unknown"
+
+
+@cache
+def app_version() -> str:
+    try:
+        return importlib_version("sqlexplore")
+    except PackageNotFoundError:
+        pyproject_version = _version_from_pyproject()
+        return pyproject_version or UNKNOWN_VERSION
+
+
+def _version_from_pyproject() -> str | None:
+    for parent in Path(__file__).resolve().parents:
+        pyproject_path = parent / "pyproject.toml"
+        if not pyproject_path.is_file():
+            continue
+        try:
+            with pyproject_path.open("rb") as pyproject_file:
+                pyproject = cast(dict[str, object], tomllib.load(pyproject_file))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        project = pyproject.get("project")
+        if not isinstance(project, dict):
+            continue
+        project_map = cast(dict[str, object], project)
+        version_value = project_map.get("version")
+        if isinstance(version_value, str) and version_value.strip():
+            return version_value.strip()
+    return None
 
 
 @dataclass(slots=True)
@@ -2477,6 +2511,7 @@ class SqlExplorerTui(App[None]):
         table = self._results_table()
         table.zebra_stripes = True
         self._completion_menu().display = False
+        self._log(f"sqlexplore {app_version()}", "info")
         for message in self._startup_activity_messages:
             self._log(message, "info")
         self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
@@ -2753,6 +2788,13 @@ def _render_console_response(console: Console, response: EngineResponse, max_val
     return 1 if response.status == "error" else 0
 
 
+def _version_callback(version: bool) -> None:
+    if not version:
+        return
+    typer.echo(f"sqlexplore {app_version()}")
+    raise typer.Exit()
+
+
 @app.command()
 def main(
     data: str = typer.Argument(
@@ -2788,6 +2830,13 @@ def main(
         False,
         "--overwrite",
         help="When data is an HTTP(S) URL, overwrite existing local download if present.",
+    ),
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show sqlexplore version and exit.",
     ),
 ) -> None:
     if execute and query_file:
