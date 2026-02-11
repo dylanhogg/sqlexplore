@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 
+from rich.text import Text
 from textual.widgets import DataTable, OptionList, RichLog
 
 from sqlexplore.app import SqlExplorerEngine, SqlExplorerTui, SqlQueryEditor
@@ -12,6 +15,7 @@ from sqlexplore.app import SqlExplorerEngine, SqlExplorerTui, SqlQueryEditor
 def _build_app(
     tmp_path: Path,
     csv_text: str = "a,b\n1,2\n3,4\n",
+    max_rows_display: int = 100,
 ) -> tuple[SqlExplorerTui, SqlExplorerEngine]:
     csv_path = tmp_path / "data.csv"
     csv_path.write_text(csv_text, encoding="utf-8")
@@ -20,7 +24,7 @@ def _build_app(
         table_name="data",
         database=":memory:",
         default_limit=10,
-        max_rows_display=100,
+        max_rows_display=max_rows_display,
         max_value_chars=80,
     )
     return SqlExplorerTui(engine), engine
@@ -33,6 +37,10 @@ def _log_text(app: SqlExplorerTui) -> str:
 
 def _column_values(table: DataTable[str], column_index: int) -> list[str]:
     return [str(table.get_row_at(row_index)[column_index]) for row_index in range(table.row_count)]
+
+
+def _parse_tsv(text: str) -> list[list[str]]:
+    return list(csv.reader(StringIO(text), delimiter="\t"))
 
 
 def _visible_binding_order(bindings: list[Any]) -> list[tuple[str, str]]:
@@ -134,6 +142,78 @@ def test_secondary_help_and_quit_shortcuts_work(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_copy_tsv_shortcut_copies_full_query_result_beyond_display_limit(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,x\n2,y\n3,z\n4,w\n5,v\n", max_rows_display=2)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+
+                results = cast(DataTable[str], app.query_one("#results_table", DataTable))
+                assert results.row_count == 2
+
+                await pilot.press("f8")
+                await pilot.pause()
+                copied_rows = _parse_tsv(app.clipboard)
+                assert copied_rows == [
+                    ["a", "b"],
+                    ["1", "x"],
+                    ["2", "y"],
+                    ["3", "z"],
+                    ["4", "w"],
+                    ["5", "v"],
+                ]
+                assert "full query result" in _log_text(app)
+
+                await pilot.press("ctrl+2")
+                await pilot.pause()
+                await pilot.press("f8")
+                await pilot.pause()
+                copied_rows = _parse_tsv(app.clipboard)
+                assert len(copied_rows) == 6
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_copy_tsv_shortcut_escapes_excel_sensitive_values(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = 'id,note\n1,"a,b"\n2,"he said ""ok"""\n3,"line1\nline2"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text, max_rows_display=2)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("f8")
+                await pilot.pause()
+                assert _parse_tsv(app.clipboard) == [
+                    ["id", "note"],
+                    ["1", "a,b"],
+                    ["2", 'he said "ok"'],
+                    ["3", "line1\nline2"],
+                ]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_copy_tsv_shortcut_shows_error_when_no_result_available(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app.engine.last_result_sql = None
+                await pilot.press("f8")
+                await pilot.pause()
+                assert "No query result available to copy." in _log_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_ctrl_b_toggles_data_explorer_sidebar(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)
@@ -173,6 +253,81 @@ def test_results_header_click_sorts_asc_desc(tmp_path: Path) -> None:
                 app.on_data_table_header_selected(click)
                 await pilot.pause()
                 assert _column_values(results, 1) == ["100", "20", "3"]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_applies_to_detected_varchar_json_column(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = 'id,j\n1,"{""a"":1}"\n2,"{""a"":2}"\n3,"{""a"":3}"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                cell = results.get_row_at(0)[1]
+                assert isinstance(cell, Text)
+                assert any("json.key" in str(span.style) for span in cell.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_skips_invalid_json_text(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = 'id,j\n1,{bad}\n2,[not-json]\n3,"{""a"":1"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                assert isinstance(results.get_row_at(0)[1], str)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_disables_when_total_rows_exceeds_threshold(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "SELECT '{\"a\":1}' AS j FROM range(100001)"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                assert isinstance(results.get_row_at(0)[0], str)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_keeps_sorting_behavior(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = 'id,j\n1,"{""name"":""z""}"\n2,"{""name"":""a""}"\n3,"{""name"":""m""}"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+
+                results = cast(DataTable[str], app.query_one("#results_table", DataTable))
+                json_column = results.ordered_columns[1]
+                click = DataTable.HeaderSelected(results, json_column.key, 1, json_column.label)
+
+                app.on_data_table_header_selected(click)
+                await pilot.pause()
+                assert _column_values(results, 1) == ['{"name":"a"}', '{"name":"m"}', '{"name":"z"}']
+
+                app.on_data_table_header_selected(click)
+                await pilot.pause()
+                assert _column_values(results, 1) == ['{"name":"z"}', '{"name":"m"}', '{"name":"a"}']
         finally:
             engine.close()
 

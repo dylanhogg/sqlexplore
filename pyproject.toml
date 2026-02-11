@@ -11,6 +11,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "sqlglot>=26.0.0",
     "textual>=7.5.0",
+    "tqdm>=4.67.3",
     "typer>=0.21.1",
 ]
 
@@ -23,7 +24,7 @@ dev = [
 ]
 
 [project.scripts]
-app = "sqlexplore.app:app"
+sqlexplore = "sqlexplore.app:app"
 
 [tool.ruff]
 line-length = 120

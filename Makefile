@@ -19,8 +19,11 @@ clean:
 run:
 	uv run python -m sqlexplore.app data/example.parquet
 
+run-http:
+	uv run python -m sqlexplore.app https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
+
 run-as-tool:
-	uv run app gnaf.parquet
+	uv run sqlexplore data/example.parquet
 
 run-as-docker:
 	docker compose run --rm app gnaf.parquet

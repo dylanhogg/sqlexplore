@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import re
+import sys
 import time
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import duckdb
 import typer
 from rich import box
 from rich.console import Console
+from rich.highlighter import JSONHighlighter
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -21,6 +28,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, OptionList, RichLog, Static, TextArea
+from tqdm import tqdm
 
 app = typer.Typer(
     help="Interactive DuckDB SQL explorer for CSV/TSV/Parquet files.",
@@ -104,17 +112,25 @@ _HELPER_PREFIX_RE = re.compile(r"(?<!\S)(/[A-Za-z_]*)$")
 _IDENT_PREFIX_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_$]*)$")
 _QUOTED_PREFIX_RE = re.compile(r'("(?:""|[^"])*)$')
 _SIMPLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+_REMOTE_FILENAME_SAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _QUALIFIED_FUNCTION_LABEL_RE = re.compile(
     r'^(?P<prefix>(?:"(?:""|[^"]+)"|[A-Za-z_][A-Za-z0-9_$]*)\.)+(?P<func>"(?:""|[^"]+)"|[A-Za-z_][A-Za-z0-9_$]*)\('
 )
 _QUOTED_FUNCTION_LABEL_RE = re.compile(r'^(?P<func>"(?:""|[^"]+)")\(')
 _AGGREGATE_FUNCTIONS = frozenset({"COUNT", "SUM", "AVG", "MIN", "MAX"})
+_REMOTE_DOWNLOAD_CHUNK_SIZE = 5 * 1024 * 1024
+JSON_HIGHLIGHT_MAX_TOTAL_ROWS = 100_000
+JSON_DETECTION_SAMPLE_SIZE = 12
+JSON_DETECTION_MIN_VALID = 3
+JSON_DETECTION_MIN_RATIO = 0.7
+JSON_CELL_MAX_PARSE_CHARS = 4_096
 
 
 @dataclass(slots=True)
 class QueryResult:
     sql: str
     columns: list[str]
+    column_types: list[str]
     rows: list[tuple[Any, ...]]
     elapsed_ms: float
     total_rows: int
@@ -189,6 +205,156 @@ def _detect_reader(file_path: Path) -> FileReader:
     raise typer.BadParameter("Only .csv, .tsv, and .parquet/.pq files are supported.")
 
 
+def _is_http_url(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def _format_byte_count(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    if size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
+def _remote_filename(url: str) -> str:
+    parsed = urlparse(url)
+    file_name = Path(parsed.path).name
+    if not file_name:
+        host_name = _REMOTE_FILENAME_SAFE_CHARS_RE.sub("-", parsed.netloc).strip("-")
+        file_name = f"{host_name or 'download'}.parquet"
+    if Path(file_name).suffix.lower() not in {".csv", ".tsv", ".parquet", ".pq"}:
+        raise typer.BadParameter("Remote URL must end with .csv, .tsv, .parquet, or .pq.")
+    return file_name
+
+
+def _emit_download_log(
+    message: str,
+    activity_messages: list[str] | None = None,
+    *,
+    err: bool = False,
+    echo: bool = True,
+    include_activity: bool = True,
+) -> None:
+    if echo:
+        typer.echo(message, err=err)
+    if include_activity and activity_messages is not None:
+        activity_messages.append(message)
+
+
+def _remote_content_length(response: Any) -> int | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    raw_value = headers.get("Content-Length")
+    if raw_value is None:
+        return None
+    try:
+        content_length = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    return content_length if content_length > 0 else None
+
+
+def _download_remote_parquet(
+    url: str,
+    download_dir: Path,
+    overwrite: bool = False,
+    activity_messages: list[str] | None = None,
+) -> Path:
+    file_name = _remote_filename(url)
+    destination = (download_dir / file_name).resolve()
+
+    _emit_download_log(f"[download] remote={url}", activity_messages)
+    _emit_download_log(f"[download] local={destination}", activity_messages)
+
+    if destination.exists() and not overwrite:
+        _emit_download_log(
+            (
+                f"[download] Warning: local download file {destination.name} already exists, stopping download. "
+                "Use --overwrite to replace it."
+            ),
+            activity_messages,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    elif destination.exists() and overwrite:
+        _emit_download_log(f"[download] Overwriting local download file {destination.name}", activity_messages)
+
+    start = time.perf_counter()
+    download_dir.mkdir(parents=True, exist_ok=True)
+    progress_bar: Any | None = None
+    try:
+        request = Request(url, headers={"User-Agent": "sqlexplore"})
+        with urlopen(request) as response, destination.open("wb") as file_handle:
+            total_bytes = _remote_content_length(response)
+            progress_bar = tqdm(
+                total=total_bytes,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc="download",
+                leave=False,
+                disable=not sys.stderr.isatty(),
+            )
+            while True:
+                chunk = response.read(_REMOTE_DOWNLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                file_handle.write(chunk)
+                progress_bar.update(len(chunk))
+    except Exception as exc:
+        destination.unlink(missing_ok=True)
+        raise typer.BadParameter(f"Failed to download data file from {url}: {exc}") from exc
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
+
+    elapsed_seconds = time.perf_counter() - start
+    file_size_bytes = destination.stat().st_size
+    _emit_download_log(
+        (
+            "[download] Complete "
+            f"elapsed={elapsed_seconds:.3f}s "
+            f"size={_format_byte_count(file_size_bytes)} ({file_size_bytes:,} bytes) "
+        ),
+        activity_messages,
+    )
+    return destination
+
+
+def _resolve_data_path(
+    data: str,
+    overwrite: bool = False,
+    startup_activity_messages: list[str] | None = None,
+) -> Path:
+    value = data.strip()
+    if not value:
+        raise typer.BadParameter("Data path cannot be empty.")
+    if _is_http_url(value):
+        return _download_remote_parquet(
+            value,
+            Path("data/downloads"),
+            overwrite=overwrite,
+            activity_messages=startup_activity_messages,
+        )
+
+    file_path = Path(value).expanduser().resolve()
+    if not file_path.exists():
+        raise typer.BadParameter(f"Data file not found: {file_path}")
+    if not file_path.is_file():
+        raise typer.BadParameter(f"Data path is not a file: {file_path}")
+    try:
+        with file_path.open("rb"):
+            pass
+    except OSError as exc:
+        raise typer.BadParameter(f"Data file is not readable: {file_path}: {exc}") from exc
+    return file_path
+
+
 def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -226,6 +392,12 @@ def _result_columns(description: list[tuple[Any, ...]] | None) -> list[str]:
     if not description:
         return []
     return [_normalize_result_column_label(str(item[0])) for item in description]
+
+
+def _result_column_types(description: list[tuple[Any, ...]] | None) -> list[str]:
+    if not description:
+        return []
+    return [str(item[1]) for item in description]
 
 
 def _split_pipe_sections(raw: str) -> list[str]:
@@ -266,6 +438,11 @@ def _is_temporal_type(type_name: str) -> bool:
 def _is_text_type(type_name: str) -> bool:
     upper = type_name.upper()
     return any(marker in upper for marker in ("CHAR", "TEXT", "STRING", "VARCHAR", "UUID", "JSON"))
+
+
+def _is_varchar_type(type_name: str) -> bool:
+    upper = type_name.upper()
+    return any(marker in upper for marker in ("CHAR", "TEXT", "STRING", "VARCHAR"))
 
 
 def _sort_cell_key(value: Any) -> tuple[int, int, float | str]:
@@ -392,6 +569,7 @@ class SqlExplorerEngine:
                 "Up/Down query history",
                 "Ctrl+1 editor, Ctrl+2 results",
                 "Ctrl+B toggle Data Explorer",
+                "F8 copy full result TSV",
                 "F1 (or Ctrl+Shift+P) help",
                 "F10 (or Ctrl+Q) quit",
                 "",
@@ -415,7 +593,8 @@ class SqlExplorerEngine:
                 ),
                 (
                     "Navigation: Ctrl+1 focuses query editor, Ctrl+2 focuses results, "
-                    "Ctrl+B toggles Data Explorer. Help: F1 or Ctrl+Shift+P."
+                    "Ctrl+B toggles Data Explorer; F8 copies full result TSV. "
+                    "Help: F1 or Ctrl+Shift+P."
                 ),
                 "",
                 f"settings: limit={self.default_limit}, rows={self.max_rows_display}, values={self.max_value_chars}",
@@ -439,6 +618,7 @@ class SqlExplorerEngine:
         result = QueryResult(
             sql="",
             columns=columns,
+            column_types=[],
             rows=shown,
             elapsed_ms=0.0,
             total_rows=len(rows),
@@ -456,6 +636,7 @@ class SqlExplorerEngine:
             relation = self.conn.execute(sql)
             rows = relation.fetchall()
             columns = _result_columns(relation.description)
+            column_types = _result_column_types(relation.description)
         except Exception as exc:  # noqa: BLE001
             return EngineResponse(status="error", message=str(exc))
 
@@ -472,6 +653,7 @@ class SqlExplorerEngine:
         result = QueryResult(
             sql=sql,
             columns=columns,
+            column_types=column_types,
             rows=shown,
             elapsed_ms=elapsed_ms,
             total_rows=len(rows),
@@ -1749,6 +1931,7 @@ class SqlQueryEditor(TextArea):
         Binding("ctrl+1", "app.focus_editor", "Editor", priority=True),
         Binding("ctrl+2", "app.focus_results", "Results", priority=True),
         Binding("ctrl+b", "app.toggle_sidebar", "Data Explorer", key_display="^b", priority=True),
+        Binding("f8", "app.copy_results_tsv", "Copy TSV", priority=True),
         Binding("f1", "app.show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "app.show_help", show=False, priority=True),
         Binding("f10", "app.quit", "Quit", priority=True),
@@ -2099,8 +2282,8 @@ class SqlQueryEditor(TextArea):
 
 
 class SqlExplorerTui(App[None]):
-    TITLE = "my-project SQL Explorer"
-    SUB_TITLE = "DuckDB + Textual"
+    TITLE = "sqlexplorer"
+    SUB_TITLE = "explore your data"
 
     CSS = """
     Screen {
@@ -2164,21 +2347,25 @@ class SqlExplorerTui(App[None]):
         Binding("ctrl+1", "focus_editor", "Editor", priority=True),
         Binding("ctrl+2", "focus_results", "Results", priority=True),
         Binding("ctrl+b", "toggle_sidebar", "Data Explorer", key_display="^b", priority=True),
+        Binding("f8", "copy_results_tsv", "Copy TSV", priority=True),
         Binding("f1", "show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "show_help", "Help", show=False, priority=True),
         Binding("f10", "quit", "Quit", priority=True),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
     ]
 
-    def __init__(self, engine: SqlExplorerEngine) -> None:
+    def __init__(self, engine: SqlExplorerEngine, startup_activity_messages: list[str] | None = None) -> None:
         super().__init__()
         self.engine = engine
+        self._startup_activity_messages = tuple(startup_activity_messages or [])
         self._history_cursor: int | None = None
         self._completion_window_start = 0
         self._active_result: QueryResult | None = None
         self._base_rows: list[tuple[Any, ...]] = []
         self._sort_column_index: int | None = None
         self._sort_reverse = False
+        self._last_results_tsv = ""
+        self._json_highlighter = JSONHighlighter()
 
     def _reset_history_cursor(self) -> None:
         self._history_cursor = None
@@ -2203,8 +2390,8 @@ class SqlExplorerTui(App[None]):
             self._history_cursor = (self._history_cursor + 1) % len(history)
         return history[self._history_cursor]
 
-    def _results_table(self) -> DataTable[str]:
-        return cast(DataTable[str], self.query_one("#results_table", DataTable))
+    def _results_table(self) -> DataTable[Any]:
+        return cast(DataTable[Any], self.query_one("#results_table", DataTable))
 
     def _query_editor(self) -> SqlQueryEditor:
         return self.query_one("#query_editor", SqlQueryEditor)
@@ -2290,6 +2477,8 @@ class SqlExplorerTui(App[None]):
         table = self._results_table()
         table.zebra_stripes = True
         self._completion_menu().display = False
+        for message in self._startup_activity_messages:
+            self._log(message, "info")
         self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
         boot = self.engine.run_sql(self.engine.default_query, remember=False)
         self._apply_response(boot)
@@ -2333,6 +2522,41 @@ class SqlExplorerTui(App[None]):
     def action_show_help(self) -> None:
         self._log(self.engine.help_text(), "info")
 
+    @staticmethod
+    def _rows_to_tsv(columns: list[str], rows: list[tuple[Any, ...]]) -> str:
+        output = StringIO(newline="")
+        writer = csv.writer(output, delimiter="\t", quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
+        writer.writerow(columns)
+        writer.writerows(rows)
+        return output.getvalue()
+
+    def action_copy_results_tsv(self) -> None:
+        sql = self.engine.last_result_sql
+        if sql is None:
+            self._log("No query result available to copy.", "error")
+            return
+
+        try:
+            relation = self.engine.conn.execute(sql)
+            rows = relation.fetchall()
+            columns = _result_columns(relation.description)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Copy failed: {exc}", "error")
+            return
+
+        if not columns:
+            self._log("No tabular query result available to copy.", "error")
+            return
+
+        tsv_text = self._rows_to_tsv(columns, rows)
+        self._last_results_tsv = tsv_text
+        self.copy_to_clipboard(tsv_text)
+
+        message = f"Copied {len(rows):,} rows x {len(columns)} cols as TSV (full query result). Paste into Excel."
+        if self._active_result is not None and self._active_result.truncated:
+            message += f" Results pane shows {len(self._active_result.rows):,}/{self._active_result.total_rows:,} rows."
+        self._log(message, "ok")
+
     def _apply_response(self, response: EngineResponse) -> None:
         if response.generated_sql:
             self._log(f"Generated SQL:\n{response.generated_sql}", "info")
@@ -2366,6 +2590,84 @@ class SqlExplorerTui(App[None]):
 
         self._redraw_results_table()
 
+    def _detect_json_columns(self, result: QueryResult) -> set[int]:
+        if result.total_rows > JSON_HIGHLIGHT_MAX_TOTAL_ROWS:
+            return set()
+        if not result.rows:
+            return set()
+        if len(result.column_types) != len(result.columns):
+            return set()
+
+        detected: set[int] = set()
+        for index, type_name in enumerate(result.column_types):
+            if not _is_varchar_type(type_name):
+                continue
+            if self._column_looks_like_json(result.rows, index):
+                detected.add(index)
+        return detected
+
+    @staticmethod
+    def _column_looks_like_json(rows: list[tuple[Any, ...]], column_index: int) -> bool:
+        sample_count = 0
+        valid_count = 0
+        for row in rows:
+            if column_index >= len(row):
+                continue
+            value = row[column_index]
+            if value is None:
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+
+            sample_count += 1
+            if len(text) <= JSON_CELL_MAX_PARSE_CHARS and SqlExplorerTui._looks_like_json_container(text):
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, ValueError):
+                    parsed = None
+                if isinstance(parsed, dict | list):
+                    valid_count += 1
+
+            if sample_count >= JSON_DETECTION_SAMPLE_SIZE:
+                break
+
+        if sample_count == 0:
+            return False
+        if valid_count < JSON_DETECTION_MIN_VALID:
+            return False
+        required = max(JSON_DETECTION_MIN_VALID, math.ceil(sample_count * JSON_DETECTION_MIN_RATIO))
+        return valid_count >= required
+
+    @staticmethod
+    def _looks_like_json_container(text: str) -> bool:
+        return (text[0] == "{" and text[-1] == "}") or (text[0] == "[" and text[-1] == "]")
+
+    @staticmethod
+    def _compact_json(value: Any) -> str | None:
+        text = str(value).strip()
+        if not text or len(text) > JSON_CELL_MAX_PARSE_CHARS:
+            return None
+        if not SqlExplorerTui._looks_like_json_container(text):
+            return None
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(parsed, dict | list):
+            return None
+        return json.dumps(parsed, separators=(",", ":"))
+
+    def _render_json_cell(self, value: Any) -> Any:
+        compact = self._compact_json(value)
+        if compact is None:
+            return _format_scalar(value, self.engine.max_value_chars)
+        if len(compact) > self.engine.max_value_chars:
+            return _format_scalar(compact, self.engine.max_value_chars)
+        text = Text(compact, end="", no_wrap=True)
+        self._json_highlighter.highlight(text)
+        return text
+
     def _redraw_results_table(self) -> None:
         result = self._active_result
         table = self._results_table()
@@ -2375,8 +2677,15 @@ class SqlExplorerTui(App[None]):
             return
 
         table.add_columns(*result.columns)
+        json_columns = self._detect_json_columns(result)
         for row in result.rows:
-            table.add_row(*[_format_scalar(value, self.engine.max_value_chars) for value in row])
+            rendered_row: list[Any] = []
+            for index, value in enumerate(row):
+                if index in json_columns:
+                    rendered_row.append(self._render_json_cell(value))
+                else:
+                    rendered_row.append(_format_scalar(value, self.engine.max_value_chars))
+            table.add_row(*rendered_row)
 
         header = f"Results ({len(result.rows):,}/{result.total_rows:,} rows, {result.elapsed_ms:.1f} ms)"
         if result.truncated:
@@ -2414,7 +2723,7 @@ class SqlExplorerTui(App[None]):
             "info": "[cyan]",
             "error": "[red]",
         }[status]
-        logger.write(f"{style_prefix}{message}[/]")
+        logger.write(f"{style_prefix}{rich_escape(message)}[/]")
 
 
 def _render_console_response(console: Console, response: EngineResponse, max_value_chars: int) -> int:
@@ -2446,12 +2755,9 @@ def _render_console_response(console: Console, response: EngineResponse, max_val
 
 @app.command()
 def main(
-    data: Path = typer.Argument(
+    data: str = typer.Argument(
         ...,
-        exists=True,
-        readable=True,
-        resolve_path=True,
-        help="CSV, TSV, or Parquet file path.",
+        help="CSV/TSV/Parquet local file path, or HTTP(S) URL.",
     ),
     table_name: str = typer.Option("data", "--table", "-t", help="Logical table/view name inside DuckDB."),
     limit: int = typer.Option(100, "--limit", "-l", min=1, help="Default helper query row limit."),
@@ -2478,11 +2784,17 @@ def main(
         help="Run SQL from file non-interactively and exit.",
     ),
     no_ui: bool = typer.Option(False, "--no-ui", help="Run once in standard terminal output mode."),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="When data is an HTTP(S) URL, overwrite existing local download if present.",
+    ),
 ) -> None:
     if execute and query_file:
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
-    file_path = data.expanduser().resolve()
+    startup_activity_messages: list[str] = []
+    file_path = _resolve_data_path(data, overwrite=overwrite, startup_activity_messages=startup_activity_messages)
     engine = SqlExplorerEngine(
         data_path=file_path,
         table_name=table_name,
@@ -2507,7 +2819,7 @@ def main(
             exit_code = _render_console_response(Console(), response, engine.max_value_chars)
             raise typer.Exit(code=exit_code)
 
-        SqlExplorerTui(engine).run()
+        SqlExplorerTui(engine, startup_activity_messages=startup_activity_messages).run()
     finally:
         engine.close()
 
