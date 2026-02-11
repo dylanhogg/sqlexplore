@@ -53,6 +53,14 @@ Result formatting:
 - Detection samples only a few visible rows (not full columns) to keep rendering fast.
 - Highlighting is disabled when query result row count is over `100,000`.
 
+Autocomplete behavior:
+
+- Completions auto-open from engine context for SQL clauses and helper command arguments (for example `SELECT ` and `/top `).
+- `Up/Down` navigates the completion menu whenever it is visible.
+- `Tab` accepts the selected completion when the menu is visible; otherwise it inserts editor indentation.
+- `Esc` closes the completion menu.
+- `Ctrl+Space` opens completion mode explicitly.
+
 ## Known limitations
 
 - Python 3.12 and below are not supported.

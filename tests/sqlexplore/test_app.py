@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from rich.text import Text
-from textual.widgets import DataTable, OptionList, RichLog
+from textual.widgets import DataTable, OptionList, RichLog, Static
 
 from sqlexplore.engine import SqlExplorerEngine, app_version
 from sqlexplore.tui import SqlExplorerTui, SqlQueryEditor
@@ -348,7 +348,7 @@ def test_json_highlighting_keeps_sorting_behavior(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_completion_menu_auto_opens_for_prefix_and_down_closes_it(tmp_path: Path) -> None:
+def test_completion_menu_auto_opens_for_prefix_and_down_navigates(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)
         try:
@@ -363,17 +363,20 @@ def test_completion_menu_auto_opens_for_prefix_and_down_closes_it(tmp_path: Path
                 await pilot.pause()
                 assert menu.display is True
                 assert menu.option_count > 0
+                initial_highlight = menu.highlighted
+                assert initial_highlight is not None
 
                 await pilot.press("down")
                 await pilot.pause()
-                assert menu.display is False
+                assert menu.display is True
+                assert menu.highlighted == (initial_highlight + 1) % menu.option_count
         finally:
             engine.close()
 
     asyncio.run(run())
 
 
-def test_completion_menu_opens_hides_and_reopens_with_ctrl_space(tmp_path: Path) -> None:
+def test_completion_menu_auto_opens_for_select_space_then_reopens_with_ctrl_space(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)
         try:
@@ -385,6 +388,11 @@ def test_completion_menu_opens_hides_and_reopens_with_ctrl_space(tmp_path: Path)
                 editor.focus()
                 await pilot.pause()
                 await pilot.press("s", "e", "l", "e", "c", "t", "space")
+                await pilot.pause()
+                assert menu.display is True
+                assert menu.option_count > 0
+
+                await pilot.press("escape")
                 await pilot.pause()
                 assert menu.display is False
 
@@ -400,6 +408,94 @@ def test_completion_menu_opens_hides_and_reopens_with_ctrl_space(tmp_path: Path)
                 await pilot.press("ctrl+space")
                 await pilot.pause()
                 assert menu.display is True
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_completion_menu_auto_opens_for_helper_argument_boundary(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                menu = app.query_one("#completion_menu", OptionList)
+
+                editor.text = ""
+                editor.focus()
+                await pilot.pause()
+                await pilot.press("/", "t", "o", "p", "space")
+                await pilot.pause()
+                assert menu.display is True
+                assert menu.option_count > 0
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_completion_up_uses_history_only_when_menu_hidden(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                menu = app.query_one("#completion_menu", OptionList)
+
+                editor.focus()
+                editor.text = "SELECT * FROM data LIMIT 1"
+                await pilot.pause()
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                editor.text = ""
+                editor.focus()
+                await pilot.pause()
+                await pilot.press("/", "s")
+                await pilot.pause()
+                assert menu.display is True
+
+                await pilot.press("up")
+                await pilot.pause()
+                assert menu.display is True
+                assert editor.text == "/s"
+
+                await pilot.press("escape")
+                await pilot.pause()
+                assert menu.display is False
+
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text != "/s"
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_completion_hint_visibility_tracks_menu_display(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                hint = app.query_one("#completion_hint", Static)
+                menu = app.query_one("#completion_menu", OptionList)
+
+                assert hint.display is False
+                editor.text = ""
+                editor.focus()
+                await pilot.pause()
+                await pilot.press("/", "s")
+                await pilot.pause()
+                assert menu.display is True
+                assert hint.display is True
+
+                await pilot.press("escape")
+                await pilot.pause()
+                assert menu.display is False
+                assert hint.display is False
         finally:
             engine.close()
 

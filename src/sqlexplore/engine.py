@@ -187,6 +187,14 @@ class CompletionContext:
 
 
 @dataclass(slots=True)
+class CompletionResult:
+    items: list[CompletionItem]
+    should_auto_open: bool
+    context_mode: Literal["sql", "helper"] | None
+    reason: str = ""
+
+
+@dataclass(slots=True)
 class CommandSpec:
     name: str
     usage: str
@@ -406,6 +414,9 @@ class SqlExplorerEngine:
             commands.extend(spec.aliases)
         return commands
 
+    def has_helper_command(self, raw_name: str) -> bool:
+        return self._lookup_command(raw_name) is not None
+
     def _command_usage_lines(self) -> list[str]:
         return [spec.usage for spec in self._command_specs]
 
@@ -460,9 +471,9 @@ class SqlExplorerEngine:
             [
                 "",
                 (
-                    "Editor: completions appear while typing; Ctrl+Space opens manual completion mode; "
+                    "Editor: completions appear while typing; Ctrl+Space opens completion mode; "
                     "Tab accepts completion; Esc closes completion menu; Up/Down navigates completion menu "
-                    "only in manual mode, otherwise moves cursor/history at first/last line; "
+                    "when visible, otherwise moves cursor/history at first/last line; "
                     "Ctrl+Enter/F5 runs; Ctrl+N/F6 loads sample; Ctrl+L/F7 clears."
                 ),
                 (
@@ -1420,7 +1431,10 @@ class SqlExplorerEngine:
         return tokens
 
     def completion_items(self, text: str, cursor_location: tuple[int, int]) -> list[CompletionItem]:
-        return self._completion_engine.get_items(text, cursor_location)
+        return self._completion_engine.get_result(text, cursor_location).items
+
+    def completion_result(self, text: str, cursor_location: tuple[int, int]) -> CompletionResult:
+        return self._completion_engine.get_result(text, cursor_location)
 
     def record_completion_acceptance(self, token: str) -> None:
         self._completion_engine.record_acceptance(token)
@@ -1430,7 +1444,7 @@ class CompletionEngine:
     def __init__(self, engine: SqlExplorerEngine) -> None:
         self._engine = engine
         self._sqlglot_tokenizer = SqlglotTokenizer()
-        self._completion_cache: dict[tuple[str, int, int, int], list[CompletionItem]] = {}
+        self._completion_cache: dict[tuple[str, int, int, int], CompletionResult] = {}
         self._completion_cache_limit = 192
         self._acceptance_counts: dict[str, int] = {}
         self._acceptance_revision = 0
@@ -1749,7 +1763,23 @@ class CompletionEngine:
         )
         return [pair[1] for pair in ranked_matches[:64]]
 
-    def get_items(self, text: str, cursor_location: tuple[int, int]) -> list[CompletionItem]:
+    @staticmethod
+    def _should_auto_open(context: CompletionContext, matched: list[CompletionItem]) -> tuple[bool, str]:
+        if not matched:
+            return False, "no-matches"
+        if context.mode == "helper":
+            if context.completing_command_name:
+                return True, "helper-command"
+            return True, "helper-args"
+        if context.inside_function_args:
+            return True, "sql-function-args"
+        if context.prefix:
+            return True, "sql-prefix"
+        if context.line_before_cursor.endswith((" ", "\t")):
+            return True, "sql-trailing-space"
+        return False, "sql-no-trigger"
+
+    def get_result(self, text: str, cursor_location: tuple[int, int]) -> CompletionResult:
         cache_key = (text, cursor_location[0], cursor_location[1], self._acceptance_revision)
         cached = self._completion_cache.get(cache_key)
         if cached is not None:
@@ -1757,7 +1787,9 @@ class CompletionEngine:
 
         context = self._build_context(text, cursor_location)
         if context is None:
-            return []
+            result = CompletionResult(items=[], should_auto_open=False, context_mode=None, reason="no-context")
+            self._completion_cache[cache_key] = result
+            return result
 
         matched: list[CompletionItem]
         if context.mode == "helper":
@@ -1765,13 +1797,20 @@ class CompletionEngine:
                 candidates = self._engine.helper_command_completion_items()
             else:
                 if context.helper_command is None:
-                    return []
+                    result = CompletionResult(
+                        items=[],
+                        should_auto_open=False,
+                        context_mode="helper",
+                        reason="missing-command",
+                    )
+                    self._completion_cache[cache_key] = result
+                    return result
                 candidates = self._engine.helper_argument_completion_items(
                     context.helper_command,
                     context.helper_args,
                     context.helper_has_trailing_space,
                 )
-                if not candidates:
+                if not candidates and not self._engine.has_helper_command(context.helper_command):
                     candidates = self._engine.helper_command_completion_items()
             matched = self._match_candidates(
                 candidates,
@@ -1792,8 +1831,18 @@ class CompletionEngine:
                 context.replacement_end,
             )
 
-        self._completion_cache[cache_key] = matched
+        should_auto_open, reason = self._should_auto_open(context, matched)
+        result = CompletionResult(
+            items=matched,
+            should_auto_open=should_auto_open,
+            context_mode=context.mode,
+            reason=reason,
+        )
+        self._completion_cache[cache_key] = result
         if len(self._completion_cache) > self._completion_cache_limit:
             oldest_key = next(iter(self._completion_cache))
             self._completion_cache.pop(oldest_key)
-        return matched
+        return result
+
+    def get_items(self, text: str, cursor_location: tuple[int, int]) -> list[CompletionItem]:
+        return self.get_result(text, cursor_location).items

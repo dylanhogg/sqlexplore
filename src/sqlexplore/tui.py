@@ -4,6 +4,7 @@ import csv
 import json
 import math
 from dataclasses import dataclass
+from enum import Enum
 from io import StringIO
 from typing import Any, Callable, cast
 
@@ -24,6 +25,7 @@ from sqlexplore.engine import (
     QUOTED_PREFIX_RE,
     STATUS_STYLE_BY_RESULT,
     CompletionItem,
+    CompletionResult,
     EngineResponse,
     QueryResult,
     ResultStatus,
@@ -37,6 +39,12 @@ from sqlexplore.engine import (
 
 CellValue = object
 RenderedCell = str | Text
+
+
+class CompletionMode(Enum):
+    CLOSED = "closed"
+    AUTO = "auto"
+    MANUAL = "manual"
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +159,7 @@ class SqlQueryEditor(TextArea):
         token_provider: Callable[[], list[str]],
         history_prev: Callable[[], str | None],
         history_next: Callable[[], str | None],
-        completion_provider: Callable[[str, tuple[int, int]], list[CompletionItem]] | None = None,
+        completion_provider: Callable[[str, tuple[int, int]], CompletionResult] | None = None,
         helper_command_provider: Callable[[], list[str]] | None = None,
         completion_changed: Callable[[list[CompletionItem], int, bool], None] | None = None,
         completion_accepted: Callable[[CompletionItem], None] | None = None,
@@ -167,10 +175,9 @@ class SqlQueryEditor(TextArea):
         self._completion_accepted = completion_accepted
         self._completion_items: list[CompletionItem] = []
         self._completion_index = 0
-        self._completion_open = False
-        self._completion_manual_open = False
+        self._completion_mode = CompletionMode.CLOSED
         self._suspend_completion_refresh = False
-        self._last_completion_signature: tuple[str, tuple[int, int], bool] | None = None
+        self._last_completion_signature: tuple[str, tuple[int, int], bool, CompletionMode] | None = None
         self._sql_syntax = Syntax(
             "",
             "sql",
@@ -185,52 +192,46 @@ class SqlQueryEditor(TextArea):
     def dismiss_completion_menu(self) -> None:
         self._completion_items = []
         self._completion_index = 0
-        self._completion_open = False
-        self._completion_manual_open = False
+        self._completion_mode = CompletionMode.CLOSED
         self.suggestion = ""
         self._notify_completion_change()
+
+    def _is_completion_open(self) -> bool:
+        return self._completion_mode is not CompletionMode.CLOSED
 
     def _notify_completion_change(self) -> None:
         if self._completion_changed is None:
             return
-        items = self._completion_items if self._completion_open else []
+        is_open = self._is_completion_open()
+        items = self._completion_items if is_open else []
         index = self._completion_index if items else 0
-        self._completion_changed(items, index, self._completion_open)
-
-    @staticmethod
-    def _has_auto_completion_prefix(line_before: str) -> bool:
-        prefix_match = (
-            HELPER_PREFIX_RE.search(line_before)
-            or QUOTED_PREFIX_RE.search(line_before)
-            or IDENT_PREFIX_RE.search(line_before)
-        )
-        if prefix_match is None:
-            return False
-        prefix = prefix_match.group(1)
-        if prefix.startswith("/"):
-            return len(prefix) >= 1
-        if prefix.startswith('"'):
-            return len(prefix) >= 2
-        return len(prefix) >= 1
+        self._completion_changed(items, index, is_open)
 
     def _refresh_completion_state(self, *, force_open: bool = False) -> None:
         if self._completion_provider is None:
             self.dismiss_completion_menu()
             return
-        signature = (self.text, self.cursor_location, self.has_focus)
+        signature = (self.text, self.cursor_location, self.has_focus, self._completion_mode)
         if not force_open and signature == self._last_completion_signature:
             return
         self._last_completion_signature = signature
-        completions = self._completion_provider(self.text, self.cursor_location)
+        result = self._completion_provider(self.text, self.cursor_location)
+        completions = result.items
         if not completions:
             self.dismiss_completion_menu()
             return
-        row, col = self.cursor_location
-        line_before = self.document[row][:col]
-        should_open = (force_open or self._has_auto_completion_prefix(line_before)) and self.has_focus
         self._completion_items = completions
         self._completion_index = max(0, min(self._completion_index, len(self._completion_items) - 1))
-        self._completion_open = should_open
+        if not self.has_focus:
+            self._completion_mode = CompletionMode.CLOSED
+        elif force_open:
+            self._completion_mode = CompletionMode.MANUAL
+        elif self._completion_mode is CompletionMode.MANUAL:
+            self._completion_mode = CompletionMode.MANUAL
+        elif result.should_auto_open:
+            self._completion_mode = CompletionMode.AUTO
+        else:
+            self._completion_mode = CompletionMode.CLOSED
         self._notify_completion_change()
 
     def _apply_inline_suggestion_from_selected_completion(self) -> None:
@@ -253,15 +254,14 @@ class SqlQueryEditor(TextArea):
         self.suggestion = item.insert_text[len(current_text) :]
 
     def _move_completion_selection(self, delta: int) -> None:
-        if not self._completion_open or not self._completion_items:
+        if not self._is_completion_open() or not self._completion_items:
             return
         self._completion_index = (self._completion_index + delta) % len(self._completion_items)
         self._notify_completion_change()
         self._apply_inline_suggestion_from_selected_completion()
 
     def _prepare_for_cursor_motion(self) -> None:
-        self._completion_manual_open = False
-        if self._completion_open:
+        if self._is_completion_open():
             self.dismiss_completion_menu()
 
     def accept_completion_at_index(self, index: int) -> bool:
@@ -298,7 +298,7 @@ class SqlQueryEditor(TextArea):
         self._apply_inline_suggestion_from_selected_completion()
 
     def _accept_selected_completion(self) -> bool:
-        if not self._completion_open or not self._completion_items:
+        if not self._is_completion_open() or not self._completion_items:
             return False
         return self.accept_completion_at_index(self._completion_index)
 
@@ -306,36 +306,31 @@ class SqlQueryEditor(TextArea):
         if event.key == "ctrl+space":
             event.stop()
             event.prevent_default()
-            self._completion_manual_open = True
             self._refresh_completion_state(force_open=True)
             self._apply_inline_suggestion_from_selected_completion()
             return
-        if event.key not in {"up", "down", "tab"}:
-            self._completion_manual_open = False
-        if event.key == "escape" and self._completion_open:
+        if event.key == "escape" and self._is_completion_open():
             event.stop()
             event.prevent_default()
             self.dismiss_completion_menu()
             return
-        if event.key == "up" and self._completion_open:
-            if self._completion_manual_open:
-                event.stop()
-                event.prevent_default()
-                self._move_completion_selection(-1)
-                return
+        if event.key == "enter" and self._is_completion_open():
             self.dismiss_completion_menu()
-        if event.key == "down" and self._completion_open:
-            if self._completion_manual_open:
-                event.stop()
-                event.prevent_default()
-                self._move_completion_selection(1)
-                return
-            self.dismiss_completion_menu()
+        if event.key == "up" and self._is_completion_open():
+            event.stop()
+            event.prevent_default()
+            self._move_completion_selection(-1)
+            return
+        if event.key == "down" and self._is_completion_open():
+            event.stop()
+            event.prevent_default()
+            self._move_completion_selection(1)
+            return
         if event.key == "tab":
             event.stop()
             event.prevent_default()
-            if self._completion_open:
-                self._refresh_completion_state(force_open=self._completion_manual_open)
+            if self._is_completion_open():
+                self._refresh_completion_state(force_open=self._completion_mode is CompletionMode.MANUAL)
                 self._apply_inline_suggestion_from_selected_completion()
                 if self._accept_selected_completion():
                     return
@@ -409,8 +404,8 @@ class SqlQueryEditor(TextArea):
             self.suggestion = ""
             return
         if self._completion_provider is not None:
-            self._refresh_completion_state(force_open=self._completion_manual_open)
-            if not self._completion_open:
+            self._refresh_completion_state()
+            if not self._is_completion_open():
                 self.suggestion = ""
                 return
             self._apply_inline_suggestion_from_selected_completion()
@@ -444,7 +439,6 @@ class SqlQueryEditor(TextArea):
 
     def on_focus(self, _event: Focus) -> None:
         self.suggestion = ""
-        self._completion_manual_open = False
 
     def on_blur(self, _event: Blur) -> None:
         self._last_completion_signature = None
@@ -538,8 +532,14 @@ class SqlExplorerTui(App[None]):
         display: none;
         max-height: 8;
         border: round #4d7ea8;
-        margin-bottom: 1;
+        margin-bottom: 0;
         background: #0f1b22;
+    }
+
+    #completion_hint {
+        display: none;
+        color: #9abed8;
+        margin: 0 0 1 1;
     }
 
     #results_table {
@@ -600,6 +600,9 @@ class SqlExplorerTui(App[None]):
     def _completion_menu(self) -> OptionList:
         return self.query_one("#completion_menu", OptionList)
 
+    def _completion_hint(self) -> Static:
+        return self.query_one("#completion_hint", Static)
+
     @staticmethod
     def _completion_option_prompt(item: CompletionItem) -> str:
         kind = item.kind.replace("_", " ")
@@ -616,9 +619,11 @@ class SqlExplorerTui(App[None]):
         if not self.screen.is_mounted:
             return
         menu = self._completion_menu()
+        hint = self._completion_hint()
         if not is_open or not items:
             menu.display = False
             menu.clear_options()
+            hint.display = False
             self._completion_window_start = 0
             return
         selected = min(max(0, selected_index), len(items) - 1)
@@ -630,6 +635,7 @@ class SqlExplorerTui(App[None]):
         menu.set_options(prompts)
         menu.highlighted = selected - self._completion_window_start
         menu.display = True
+        hint.display = True
 
     def _on_editor_completion_accepted(self, item: CompletionItem) -> None:
         self.engine.record_completion_acceptance(item.insert_text)
@@ -672,13 +678,14 @@ class SqlExplorerTui(App[None]):
                     self.engine.completion_tokens,
                     self._history_prev,
                     self._history_next,
-                    completion_provider=self.engine.completion_items,
+                    completion_provider=self.engine.completion_result,
                     helper_command_provider=self.engine.helper_commands,
                     completion_changed=self._on_editor_completion_changed,
                     completion_accepted=self._on_editor_completion_accepted,
                     id="query_editor",
                 )
                 yield OptionList(id="completion_menu")
+                yield Static("Tab accept | Esc close | Up/Down navigate", id="completion_hint")
                 yield Static("Results", id="results_header", classes="section-title")
                 yield DataTable(id="results_table")
                 yield Static("Activity", classes="section-title")
@@ -689,6 +696,7 @@ class SqlExplorerTui(App[None]):
         table = self._results_table()
         table.zebra_stripes = True
         self._completion_menu().display = False
+        self._completion_hint().display = False
         self._log(f"sqlexplore {app_version()}", "info")
         for message in self._startup_activity_messages:
             self._log(message, "info")

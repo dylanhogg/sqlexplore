@@ -23,6 +23,10 @@ def _completion_values(engine: SqlExplorerEngine, text: str) -> list[str]:
     return [item.insert_text for item in items]
 
 
+def _completion_result(engine: SqlExplorerEngine, text: str):
+    return engine.completion_result(text, (0, len(text)))
+
+
 def test_group_shorthand_generates_count_query(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
@@ -76,6 +80,28 @@ def test_top_completion_suggests_columns_after_command(tmp_path: Path) -> None:
         completions = _completion_values(engine, "/top ")
         assert "col_name" in completions
         assert "x" in completions
+    finally:
+        engine.close()
+
+
+def test_completion_result_auto_opens_for_sql_clause_boundary(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        result = _completion_result(engine, "SELECT ")
+        assert result.should_auto_open is True
+        assert result.context_mode == "sql"
+        assert any(item.insert_text == "col_name" for item in result.items)
+    finally:
+        engine.close()
+
+
+def test_completion_result_auto_opens_for_helper_argument_boundary(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        result = _completion_result(engine, "/top ")
+        assert result.should_auto_open is True
+        assert result.context_mode == "helper"
+        assert any(item.insert_text == "col_name" for item in result.items)
     finally:
         engine.close()
 
@@ -158,11 +184,43 @@ def test_sql_inside_literal_does_not_suggest(tmp_path: Path) -> None:
         engine.close()
 
 
+def test_completion_result_inside_literal_does_not_auto_open(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        result = _completion_result(engine, "SELECT 'unterminated")
+        assert result.items == []
+        assert result.should_auto_open is False
+        assert result.context_mode is None
+    finally:
+        engine.close()
+
+
 def test_sql_quoted_prefix_suggests_quoted_simple_identifier(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
         completions = _completion_values(engine, 'SELECT "co')
         assert '"col_name"' in completions
+    finally:
+        engine.close()
+
+
+def test_known_helper_argument_context_does_not_fallback_to_command_names(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        result = _completion_result(engine, "/top zzz")
+        assert result.items == []
+        assert result.should_auto_open is False
+    finally:
+        engine.close()
+
+
+def test_unknown_helper_command_with_space_falls_back_to_command_names(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        result = _completion_result(engine, "/unknown ")
+        completions = [item.insert_text for item in result.items]
+        assert "/help" in completions
+        assert result.should_auto_open is True
     finally:
         engine.close()
 
