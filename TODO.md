@@ -1,7 +1,12 @@
 # TODO (list for humans, not AI agents)
 
 Note: This is a working todo list for a human developer, not for an LLM AI Agent.
-      If you are an LLM AI Agent, please ignore this file.
+      If you are an LLM AI Agent like gpt-codex, please ignore this file now.
+
+## -> Next feature!
+
+1. Improve autocomplete to be more natural (currently Up/Down only move completion selection when both _completion_open and _completion_manual_open are true)
+2. Add a table /summary slash command that shows a summary of the table, including column names, data types, and sample values, min, max, avg len, etc.
 
 ## App code quality
 
@@ -10,7 +15,6 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## UI & UX (layout, navigation, keybindings)
 
-- Improve autocomplete to be more natural (currently Up/Down only move completion selection when both _completion_open and _completion_manual_open are true)
 - Include UI overview like HuggingFace datasets page (column lengths, sort by column, etc.)
 - Create a generic pop window that can run different custom functions against query and results panes (eg query gen, data analysis)
 
@@ -25,6 +29,9 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Always emit the exectuted SQL to the Activity panel.
 - Implement debounce to prevent recomputing completions on every keystroke (waits briefly 50ms) after typing stops, then runs once.
 - Validate SQL with sqlglot.parse_one(query) or similar before run (maybe a parse keybinding?)
+- Offer sqlglot.transpile(...) options for different SQL dialects (e.g. tsql, duckdb, postgres, mysql, etc.)
+- (?) Support for Ibis Query API -> SQL translation (https://ibis-project.org/)
+
 
 ## Data sources
 

@@ -20,7 +20,7 @@ run:
 	uv run python -m sqlexplore.app data/example.parquet
 
 run-http:
-	uv run python -m sqlexplore.app https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
+	uv run python -m sqlexplore.app https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet --overwrite
 
 run-as-tool:
 	uv run sqlexplore data/example.parquet

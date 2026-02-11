@@ -619,6 +619,70 @@ def test_completion_menu_option_events_sync_and_accept(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_completion_menu_focus_keeps_options_for_click_selection(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                menu = app.query_one("#completion_menu", OptionList)
+
+                editor.text = ""
+                editor.focus()
+                await pilot.pause()
+                await pilot.press("/", "s")
+                await pilot.pause()
+                assert menu.display is True
+                assert menu.option_count > 0
+
+                menu.focus()
+                await pilot.pause()
+                assert menu.display is True
+                assert menu.option_count > 0
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_completion_menu_highlight_then_select_uses_clicked_window_item(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                menu = app.query_one("#completion_menu", OptionList)
+
+                editor.text = ""
+                editor.focus()
+                await pilot.pause()
+                await pilot.press("/")
+                await pilot.pause()
+                assert menu.display is True
+                assert menu.option_count == 8
+
+                await pilot.press("ctrl+space")
+                await pilot.pause()
+                for _ in range(10):
+                    await pilot.press("down")
+                    await pilot.pause()
+
+                clicked_index = 2
+                option = menu.get_option_at_index(clicked_index)
+                expected = str(option.prompt).split("  [", 1)[0]
+                app.on_option_list_option_highlighted(OptionList.OptionHighlighted(menu, option, clicked_index))
+                await pilot.pause()
+                app.on_option_list_option_selected(OptionList.OptionSelected(menu, option, clicked_index))
+                await pilot.pause()
+
+                assert editor.text == expected
+                assert menu.display is False
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_query_editor_applies_sql_highlighting_to_single_line() -> None:
     editor = SqlQueryEditor("SELECT a FROM t", lambda: [], lambda: None, lambda: None)
     line = editor.get_line(0)

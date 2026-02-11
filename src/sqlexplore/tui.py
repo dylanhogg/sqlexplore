@@ -286,14 +286,15 @@ class SqlQueryEditor(TextArea):
             self._completion_accepted(item)
         return True
 
-    def set_completion_index(self, index: int) -> None:
+    def set_completion_index(self, index: int, *, notify: bool = True) -> None:
         if not self._completion_items:
             return
         target_index = max(0, min(index, len(self._completion_items) - 1))
         if target_index == self._completion_index:
             return
         self._completion_index = target_index
-        self._notify_completion_change()
+        if notify:
+            self._notify_completion_change()
         self._apply_inline_suggestion_from_selected_completion()
 
     def _accept_selected_completion(self) -> bool:
@@ -447,6 +448,14 @@ class SqlQueryEditor(TextArea):
 
     def on_blur(self, _event: Blur) -> None:
         self._last_completion_signature = None
+        self.call_after_refresh(self._dismiss_completion_after_blur)
+
+    def _dismiss_completion_after_blur(self) -> None:
+        focused = self.screen.focused
+        if focused is self:
+            return
+        if focused is not None and focused.id == "completion_menu":
+            return
         self.dismiss_completion_menu()
 
     def get_line(self, line_index: int) -> Text:
@@ -629,16 +638,27 @@ class SqlExplorerTui(App[None]):
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option_list.id != "completion_menu":
             return
-        index = self._completion_window_start + event.option_index
-        self._query_editor().set_completion_index(index)
+        index = self._completion_index_from_menu_option(event.option_index)
+        if index is None:
+            return
+        # Avoid re-windowing the menu during mouse highlight/select event chains.
+        self._query_editor().set_completion_index(index, notify=False)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id != "completion_menu":
             return
-        index = self._completion_window_start + event.option_index
+        index = self._completion_index_from_menu_option(event.option_index)
+        if index is None:
+            return
         editor = self._query_editor()
         if editor.accept_completion_at_index(index):
             editor.focus()
+
+    def _completion_index_from_menu_option(self, option_index: int) -> int | None:
+        menu = self._completion_menu()
+        if option_index < 0 or option_index >= menu.option_count:
+            return None
+        return self._completion_window_start + option_index
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
