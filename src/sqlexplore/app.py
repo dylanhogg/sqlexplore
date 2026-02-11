@@ -4,6 +4,7 @@ import csv
 import json
 import math
 import re
+import sys
 import time
 from dataclasses import dataclass
 from io import StringIO
@@ -16,6 +17,7 @@ import duckdb
 import typer
 from rich import box
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -25,6 +27,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, OptionList, RichLog, Static, TextArea
+from tqdm import tqdm
 
 app = typer.Typer(
     help="Interactive DuckDB SQL explorer for CSV/TSV/Parquet files.",
@@ -114,7 +117,7 @@ _QUALIFIED_FUNCTION_LABEL_RE = re.compile(
 )
 _QUOTED_FUNCTION_LABEL_RE = re.compile(r'^(?P<func>"(?:""|[^"]+)")\(')
 _AGGREGATE_FUNCTIONS = frozenset({"COUNT", "SUM", "AVG", "MIN", "MAX"})
-_REMOTE_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+_REMOTE_DOWNLOAD_CHUNK_SIZE = 5 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -221,60 +224,116 @@ def _remote_filename(url: str) -> str:
     return file_name
 
 
-def _download_remote_parquet(url: str, download_dir: Path, overwrite: bool = False) -> Path:
+def _emit_download_log(
+    message: str,
+    activity_messages: list[str] | None = None,
+    *,
+    err: bool = False,
+    echo: bool = True,
+    include_activity: bool = True,
+) -> None:
+    if echo:
+        typer.echo(message, err=err)
+    if include_activity and activity_messages is not None:
+        activity_messages.append(message)
+
+
+def _remote_content_length(response: Any) -> int | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    raw_value = headers.get("Content-Length")
+    if raw_value is None:
+        return None
+    try:
+        content_length = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    return content_length if content_length > 0 else None
+
+
+def _download_remote_parquet(
+    url: str,
+    download_dir: Path,
+    overwrite: bool = False,
+    activity_messages: list[str] | None = None,
+) -> Path:
     file_name = _remote_filename(url)
     destination = (download_dir / file_name).resolve()
 
-    typer.echo(f"[download] remote={url}")
-    typer.echo(f"[download] local={destination}")
+    _emit_download_log(f"[download] remote={url}", activity_messages)
+    _emit_download_log(f"[download] local={destination}", activity_messages)
 
     if destination.exists() and not overwrite:
-        typer.echo(
+        _emit_download_log(
             (
                 f"[download] Warning: local download file {destination.name} already exists, stopping download. "
                 "Use --overwrite to replace it."
             ),
+            activity_messages,
             err=True,
         )
         raise typer.Exit(code=1)
     elif destination.exists() and overwrite:
-        typer.echo(f"[download] Overwriting local download file {destination.name}")
+        _emit_download_log(f"[download] Overwriting local download file {destination.name}", activity_messages)
 
     start = time.perf_counter()
     download_dir.mkdir(parents=True, exist_ok=True)
-    downloaded_bytes = 0
+    progress_bar: Any | None = None
     try:
         request = Request(url, headers={"User-Agent": "sqlexplore"})
         with urlopen(request) as response, destination.open("wb") as file_handle:
+            total_bytes = _remote_content_length(response)
+            progress_bar = tqdm(
+                total=total_bytes,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc="download",
+                leave=False,
+                disable=not sys.stderr.isatty(),
+            )
             while True:
                 chunk = response.read(_REMOTE_DOWNLOAD_CHUNK_SIZE)
                 if not chunk:
                     break
                 file_handle.write(chunk)
-                downloaded_bytes += len(chunk)
-                typer.echo(f"[download] downloaded={_format_byte_count(downloaded_bytes)}")
+                progress_bar.update(len(chunk))
     except Exception as exc:
         destination.unlink(missing_ok=True)
         raise typer.BadParameter(f"Failed to download data file from {url}: {exc}") from exc
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
 
     elapsed_seconds = time.perf_counter() - start
     file_size_bytes = destination.stat().st_size
-    typer.echo(
+    _emit_download_log(
         (
-            "[download] complete "
+            "[download] Complete "
             f"elapsed={elapsed_seconds:.3f}s "
-            f"size={_format_byte_count(file_size_bytes)} ({file_size_bytes} bytes) "
-        )
+            f"size={_format_byte_count(file_size_bytes)} ({file_size_bytes:,} bytes) "
+        ),
+        activity_messages,
     )
     return destination
 
 
-def _resolve_data_path(data: str, overwrite: bool = False) -> Path:
+def _resolve_data_path(
+    data: str,
+    overwrite: bool = False,
+    startup_activity_messages: list[str] | None = None,
+) -> Path:
     value = data.strip()
     if not value:
         raise typer.BadParameter("Data path cannot be empty.")
     if _is_http_url(value):
-        return _download_remote_parquet(value, Path("data/downloads"), overwrite=overwrite)
+        return _download_remote_parquet(
+            value,
+            Path("data/downloads"),
+            overwrite=overwrite,
+            activity_messages=startup_activity_messages,
+        )
 
     file_path = Path(value).expanduser().resolve()
     if not file_path.exists():
@@ -2202,8 +2261,8 @@ class SqlQueryEditor(TextArea):
 
 
 class SqlExplorerTui(App[None]):
-    TITLE = "my-project SQL Explorer"
-    SUB_TITLE = "DuckDB + Textual"
+    TITLE = "sqlexplorer"
+    SUB_TITLE = "explore your data"
 
     CSS = """
     Screen {
@@ -2274,9 +2333,10 @@ class SqlExplorerTui(App[None]):
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
     ]
 
-    def __init__(self, engine: SqlExplorerEngine) -> None:
+    def __init__(self, engine: SqlExplorerEngine, startup_activity_messages: list[str] | None = None) -> None:
         super().__init__()
         self.engine = engine
+        self._startup_activity_messages = tuple(startup_activity_messages or [])
         self._history_cursor: int | None = None
         self._completion_window_start = 0
         self._active_result: QueryResult | None = None
@@ -2395,6 +2455,8 @@ class SqlExplorerTui(App[None]):
         table = self._results_table()
         table.zebra_stripes = True
         self._completion_menu().display = False
+        for message in self._startup_activity_messages:
+            self._log(message, "info")
         self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
         boot = self.engine.run_sql(self.engine.default_query, remember=False)
         self._apply_response(boot)
@@ -2554,7 +2616,7 @@ class SqlExplorerTui(App[None]):
             "info": "[cyan]",
             "error": "[red]",
         }[status]
-        logger.write(f"{style_prefix}{message}[/]")
+        logger.write(f"{style_prefix}{rich_escape(message)}[/]")
 
 
 def _render_console_response(console: Console, response: EngineResponse, max_value_chars: int) -> int:
@@ -2624,7 +2686,8 @@ def main(
     if execute and query_file:
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
-    file_path = _resolve_data_path(data, overwrite=overwrite)
+    startup_activity_messages: list[str] = []
+    file_path = _resolve_data_path(data, overwrite=overwrite, startup_activity_messages=startup_activity_messages)
     engine = SqlExplorerEngine(
         data_path=file_path,
         table_name=table_name,
@@ -2649,7 +2712,7 @@ def main(
             exit_code = _render_console_response(Console(), response, engine.max_value_chars)
             raise typer.Exit(code=exit_code)
 
-        SqlExplorerTui(engine).run()
+        SqlExplorerTui(engine, startup_activity_messages=startup_activity_messages).run()
     finally:
         engine.close()
 

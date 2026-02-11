@@ -12,10 +12,22 @@ import sqlexplore.app as app_module
 
 
 class _FakeHttpResponse:
-    def __init__(self, payload: bytes) -> None:
+    def __init__(
+        self,
+        payload: bytes,
+        *,
+        read_chunk_size: int | None = None,
+        content_length: int | None = None,
+    ) -> None:
         self._buffer = BytesIO(payload)
+        self._read_chunk_size = read_chunk_size
+        self.headers: dict[str, str] = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
 
     def read(self, size: int = -1) -> bytes:
+        if size >= 0 and self._read_chunk_size is not None:
+            size = min(size, self._read_chunk_size)
         return self._buffer.read(size)
 
     def __enter__(self) -> "_FakeHttpResponse":
@@ -30,6 +42,7 @@ def test_download_remote_parquet_writes_file_and_logs(
 ) -> None:
     payload = b"PAR1....test-bytes...."
     url = "https://example.com/data.parquet"
+    startup_activity_messages: list[str] = []
 
     def fake_urlopen(request: Any) -> _FakeHttpResponse:
         assert request.full_url == url
@@ -38,14 +51,36 @@ def test_download_remote_parquet_writes_file_and_logs(
     monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
 
     download_remote = getattr(app_module, "_download_remote_parquet")
-    out_path = download_remote(url, tmp_path)
+    out_path = download_remote(url, tmp_path, activity_messages=startup_activity_messages)
 
     assert out_path.read_bytes() == payload
     out = capsys.readouterr().out
     assert f"remote={url}" in out
     assert f"local={out_path}" in out
-    assert "[download] downloaded=" in out
-    assert "[download] complete" in out
+    assert "[download] Complete" in out
+    assert startup_activity_messages == [line for line in out.splitlines() if line]
+
+
+def test_download_remote_parquet_does_not_log_progress_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    payload = b"1234567890"
+    url = "https://example.com/data.parquet"
+    startup_activity_messages: list[str] = []
+
+    def fake_urlopen(request: Any) -> _FakeHttpResponse:
+        assert request.full_url == url
+        return _FakeHttpResponse(payload, read_chunk_size=5, content_length=len(payload))
+
+    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
+
+    download_remote = getattr(app_module, "_download_remote_parquet")
+    out_path = download_remote(url, tmp_path, activity_messages=startup_activity_messages)
+
+    assert out_path.read_bytes() == payload
+    out = capsys.readouterr().out
+    assert all(not line.startswith("[download] progress=") for line in startup_activity_messages)
+    assert "[download] progress=" not in out
 
 
 def test_download_remote_parquet_refuses_overwrite(tmp_path: Path, capsys: Any) -> None:
@@ -80,7 +115,7 @@ def test_download_remote_parquet_overwrites_when_enabled(
     assert out_path == existing.resolve()
     assert existing.read_bytes() == payload
     out = capsys.readouterr().out
-    assert "[download] complete" in out
+    assert "[download] Complete" in out
 
 
 @pytest.mark.parametrize(
@@ -108,10 +143,16 @@ def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkey
     downloaded.write_bytes(b"PAR1")
     captured: dict[str, Any] = {}
 
-    def fake_download(url: str, download_dir: Path, overwrite: bool = False) -> Path:
+    def fake_download(
+        url: str,
+        download_dir: Path,
+        overwrite: bool = False,
+        activity_messages: list[str] | None = None,
+    ) -> Path:
         captured["download_url"] = url
         captured["download_dir"] = download_dir
         captured["overwrite"] = overwrite
+        captured["activity_messages"] = activity_messages
         return downloaded
 
     class FakeEngine:
@@ -149,6 +190,7 @@ def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkey
     assert captured["download_url"] == remote_url
     assert captured["download_dir"] == Path("data/downloads")
     assert captured["overwrite"] is False
+    assert isinstance(captured["activity_messages"], list)
     assert captured["data_path"] == downloaded
     assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
     assert captured["closed"] is True
@@ -161,10 +203,16 @@ def test_main_passes_overwrite_flag_for_remote_url(tmp_path: Path, monkeypatch: 
     downloaded.write_bytes(b"PAR1")
     captured: dict[str, Any] = {}
 
-    def fake_download(url: str, download_dir: Path, overwrite: bool = False) -> Path:
+    def fake_download(
+        url: str,
+        download_dir: Path,
+        overwrite: bool = False,
+        activity_messages: list[str] | None = None,
+    ) -> Path:
         captured["download_url"] = url
         captured["download_dir"] = download_dir
         captured["overwrite"] = overwrite
+        captured["activity_messages"] = activity_messages
         return downloaded
 
     class FakeEngine:
@@ -196,7 +244,71 @@ def test_main_passes_overwrite_flag_for_remote_url(tmp_path: Path, monkeypatch: 
     assert captured["download_url"] == remote_url
     assert captured["download_dir"] == Path("data/downloads")
     assert captured["overwrite"] is True
+    assert isinstance(captured["activity_messages"], list)
     assert captured["data_path"] == downloaded
+    assert captured["closed"] is True
+
+
+def test_main_passes_download_logs_to_tui_on_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    remote_url = "https://example.com/data.parquet"
+    downloaded = tmp_path / "from-remote.parquet"
+    downloaded.write_bytes(b"PAR1")
+    captured: dict[str, Any] = {}
+
+    def fake_download(
+        url: str,
+        download_dir: Path,
+        overwrite: bool = False,
+        activity_messages: list[str] | None = None,
+    ) -> Path:
+        assert activity_messages is not None
+        activity_messages.extend(
+            [
+                f"[download] remote={url}",
+                f"[download] local={downloaded}",
+                "[download] Complete elapsed=0.001s size=4 B (4 bytes)",
+            ]
+        )
+        return downloaded
+
+    class FakeEngine:
+        def __init__(
+            self,
+            data_path: Path,
+            table_name: str,
+            database: str,
+            default_limit: int,
+            max_rows_display: int,
+            max_value_chars: int,
+        ) -> None:
+            captured["data_path"] = data_path
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    class FakeTui:
+        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+            captured["engine"] = engine
+            captured["startup_activity_messages"] = list(startup_activity_messages or [])
+
+        def run(self) -> None:
+            captured["run"] = True
+
+    monkeypatch.setattr(app_module, "_download_remote_parquet", fake_download)
+    monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
+    monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
+
+    result = runner.invoke(app_module.app, [remote_url])
+
+    assert result.exit_code == 0
+    assert captured["data_path"] == downloaded
+    assert captured["run"] is True
+    assert captured["startup_activity_messages"] == [
+        f"[download] remote={remote_url}",
+        f"[download] local={downloaded}",
+        "[download] Complete elapsed=0.001s size=4 B (4 bytes)",
+    ]
     assert captured["closed"] is True
 
 
@@ -206,7 +318,12 @@ def test_main_keeps_local_path_behavior(tmp_path: Path, monkeypatch: pytest.Monk
     local_path.write_bytes(b"PAR1")
     captured: dict[str, Any] = {}
 
-    def fail_download(url: str, download_dir: Path) -> Path:
+    def fail_download(
+        url: str,
+        download_dir: Path,
+        overwrite: bool = False,
+        activity_messages: list[str] | None = None,
+    ) -> Path:
         raise AssertionError("download should not be called for local file path")
 
     class FakeEngine:
