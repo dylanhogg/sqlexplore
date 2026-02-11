@@ -6,6 +6,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 
+from rich.text import Text
 from textual.widgets import DataTable, OptionList, RichLog
 
 from sqlexplore.app import SqlExplorerEngine, SqlExplorerTui, SqlQueryEditor
@@ -252,6 +253,81 @@ def test_results_header_click_sorts_asc_desc(tmp_path: Path) -> None:
                 app.on_data_table_header_selected(click)
                 await pilot.pause()
                 assert _column_values(results, 1) == ["100", "20", "3"]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_applies_to_detected_varchar_json_column(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = 'id,j\n1,"{""a"":1}"\n2,"{""a"":2}"\n3,"{""a"":3}"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                cell = results.get_row_at(0)[1]
+                assert isinstance(cell, Text)
+                assert any("json.key" in str(span.style) for span in cell.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_skips_invalid_json_text(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = 'id,j\n1,{bad}\n2,[not-json]\n3,"{""a"":1"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                assert isinstance(results.get_row_at(0)[1], str)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_disables_when_total_rows_exceeds_threshold(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "SELECT '{\"a\":1}' AS j FROM range(100001)"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                assert isinstance(results.get_row_at(0)[0], str)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_keeps_sorting_behavior(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = 'id,j\n1,"{""name"":""z""}"\n2,"{""name"":""a""}"\n3,"{""name"":""m""}"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+
+                results = cast(DataTable[str], app.query_one("#results_table", DataTable))
+                json_column = results.ordered_columns[1]
+                click = DataTable.HeaderSelected(results, json_column.key, 1, json_column.label)
+
+                app.on_data_table_header_selected(click)
+                await pilot.pause()
+                assert _column_values(results, 1) == ['{"name":"a"}', '{"name":"m"}', '{"name":"z"}']
+
+                app.on_data_table_header_selected(click)
+                await pilot.pause()
+                assert _column_values(results, 1) == ['{"name":"z"}', '{"name":"m"}', '{"name":"a"}']
         finally:
             engine.close()
 

@@ -6,6 +6,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 ## Code quality
 
 - Run key binding clean up and review task
+- Show version in app, sync with pypi and pyproject.toml
 
 ## UI & UX (layout, navigation, keybindings)
 

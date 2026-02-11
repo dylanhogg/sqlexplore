@@ -17,6 +17,7 @@ import duckdb
 import typer
 from rich import box
 from rich.console import Console
+from rich.highlighter import JSONHighlighter
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -118,12 +119,18 @@ _QUALIFIED_FUNCTION_LABEL_RE = re.compile(
 _QUOTED_FUNCTION_LABEL_RE = re.compile(r'^(?P<func>"(?:""|[^"]+)")\(')
 _AGGREGATE_FUNCTIONS = frozenset({"COUNT", "SUM", "AVG", "MIN", "MAX"})
 _REMOTE_DOWNLOAD_CHUNK_SIZE = 5 * 1024 * 1024
+JSON_HIGHLIGHT_MAX_TOTAL_ROWS = 100_000
+JSON_DETECTION_SAMPLE_SIZE = 12
+JSON_DETECTION_MIN_VALID = 3
+JSON_DETECTION_MIN_RATIO = 0.7
+JSON_CELL_MAX_PARSE_CHARS = 4_096
 
 
 @dataclass(slots=True)
 class QueryResult:
     sql: str
     columns: list[str]
+    column_types: list[str]
     rows: list[tuple[Any, ...]]
     elapsed_ms: float
     total_rows: int
@@ -387,6 +394,12 @@ def _result_columns(description: list[tuple[Any, ...]] | None) -> list[str]:
     return [_normalize_result_column_label(str(item[0])) for item in description]
 
 
+def _result_column_types(description: list[tuple[Any, ...]] | None) -> list[str]:
+    if not description:
+        return []
+    return [str(item[1]) for item in description]
+
+
 def _split_pipe_sections(raw: str) -> list[str]:
     return [part.strip() for part in raw.split("|") if part.strip()]
 
@@ -425,6 +438,11 @@ def _is_temporal_type(type_name: str) -> bool:
 def _is_text_type(type_name: str) -> bool:
     upper = type_name.upper()
     return any(marker in upper for marker in ("CHAR", "TEXT", "STRING", "VARCHAR", "UUID", "JSON"))
+
+
+def _is_varchar_type(type_name: str) -> bool:
+    upper = type_name.upper()
+    return any(marker in upper for marker in ("CHAR", "TEXT", "STRING", "VARCHAR"))
 
 
 def _sort_cell_key(value: Any) -> tuple[int, int, float | str]:
@@ -600,6 +618,7 @@ class SqlExplorerEngine:
         result = QueryResult(
             sql="",
             columns=columns,
+            column_types=[],
             rows=shown,
             elapsed_ms=0.0,
             total_rows=len(rows),
@@ -617,6 +636,7 @@ class SqlExplorerEngine:
             relation = self.conn.execute(sql)
             rows = relation.fetchall()
             columns = _result_columns(relation.description)
+            column_types = _result_column_types(relation.description)
         except Exception as exc:  # noqa: BLE001
             return EngineResponse(status="error", message=str(exc))
 
@@ -633,6 +653,7 @@ class SqlExplorerEngine:
         result = QueryResult(
             sql=sql,
             columns=columns,
+            column_types=column_types,
             rows=shown,
             elapsed_ms=elapsed_ms,
             total_rows=len(rows),
@@ -2344,6 +2365,7 @@ class SqlExplorerTui(App[None]):
         self._sort_column_index: int | None = None
         self._sort_reverse = False
         self._last_results_tsv = ""
+        self._json_highlighter = JSONHighlighter()
 
     def _reset_history_cursor(self) -> None:
         self._history_cursor = None
@@ -2368,8 +2390,8 @@ class SqlExplorerTui(App[None]):
             self._history_cursor = (self._history_cursor + 1) % len(history)
         return history[self._history_cursor]
 
-    def _results_table(self) -> DataTable[str]:
-        return cast(DataTable[str], self.query_one("#results_table", DataTable))
+    def _results_table(self) -> DataTable[Any]:
+        return cast(DataTable[Any], self.query_one("#results_table", DataTable))
 
     def _query_editor(self) -> SqlQueryEditor:
         return self.query_one("#query_editor", SqlQueryEditor)
@@ -2568,6 +2590,84 @@ class SqlExplorerTui(App[None]):
 
         self._redraw_results_table()
 
+    def _detect_json_columns(self, result: QueryResult) -> set[int]:
+        if result.total_rows > JSON_HIGHLIGHT_MAX_TOTAL_ROWS:
+            return set()
+        if not result.rows:
+            return set()
+        if len(result.column_types) != len(result.columns):
+            return set()
+
+        detected: set[int] = set()
+        for index, type_name in enumerate(result.column_types):
+            if not _is_varchar_type(type_name):
+                continue
+            if self._column_looks_like_json(result.rows, index):
+                detected.add(index)
+        return detected
+
+    @staticmethod
+    def _column_looks_like_json(rows: list[tuple[Any, ...]], column_index: int) -> bool:
+        sample_count = 0
+        valid_count = 0
+        for row in rows:
+            if column_index >= len(row):
+                continue
+            value = row[column_index]
+            if value is None:
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+
+            sample_count += 1
+            if len(text) <= JSON_CELL_MAX_PARSE_CHARS and SqlExplorerTui._looks_like_json_container(text):
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, ValueError):
+                    parsed = None
+                if isinstance(parsed, dict | list):
+                    valid_count += 1
+
+            if sample_count >= JSON_DETECTION_SAMPLE_SIZE:
+                break
+
+        if sample_count == 0:
+            return False
+        if valid_count < JSON_DETECTION_MIN_VALID:
+            return False
+        required = max(JSON_DETECTION_MIN_VALID, math.ceil(sample_count * JSON_DETECTION_MIN_RATIO))
+        return valid_count >= required
+
+    @staticmethod
+    def _looks_like_json_container(text: str) -> bool:
+        return (text[0] == "{" and text[-1] == "}") or (text[0] == "[" and text[-1] == "]")
+
+    @staticmethod
+    def _compact_json(value: Any) -> str | None:
+        text = str(value).strip()
+        if not text or len(text) > JSON_CELL_MAX_PARSE_CHARS:
+            return None
+        if not SqlExplorerTui._looks_like_json_container(text):
+            return None
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(parsed, dict | list):
+            return None
+        return json.dumps(parsed, separators=(",", ":"))
+
+    def _render_json_cell(self, value: Any) -> Any:
+        compact = self._compact_json(value)
+        if compact is None:
+            return _format_scalar(value, self.engine.max_value_chars)
+        if len(compact) > self.engine.max_value_chars:
+            return _format_scalar(compact, self.engine.max_value_chars)
+        text = Text(compact, end="", no_wrap=True)
+        self._json_highlighter.highlight(text)
+        return text
+
     def _redraw_results_table(self) -> None:
         result = self._active_result
         table = self._results_table()
@@ -2577,8 +2677,15 @@ class SqlExplorerTui(App[None]):
             return
 
         table.add_columns(*result.columns)
+        json_columns = self._detect_json_columns(result)
         for row in result.rows:
-            table.add_row(*[_format_scalar(value, self.engine.max_value_chars) for value in row])
+            rendered_row: list[Any] = []
+            for index, value in enumerate(row):
+                if index in json_columns:
+                    rendered_row.append(self._render_json_cell(value))
+                else:
+                    rendered_row.append(_format_scalar(value, self.engine.max_value_chars))
+            table.add_row(*rendered_row)
 
         header = f"Results ({len(result.rows):,}/{result.total_rows:,} rows, {result.elapsed_ms:.1f} ms)"
         if result.truncated:
