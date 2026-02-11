@@ -9,7 +9,7 @@ from typing import Any, cast
 from rich.text import Text
 from textual.widgets import DataTable, OptionList, RichLog
 
-from sqlexplore.app import SqlExplorerEngine, SqlExplorerTui, SqlQueryEditor
+from sqlexplore.app import SqlExplorerEngine, SqlExplorerTui, SqlQueryEditor, app_version
 
 
 def _build_app(
@@ -136,6 +136,19 @@ def test_secondary_help_and_quit_shortcuts_work(tmp_path: Path) -> None:
                 await pilot.press("ctrl+q")
                 await pilot.pause()
                 assert app.is_running is False
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_activity_log_shows_version_on_mount(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert f"sqlexplore {app_version()}" in _log_text(app)
         finally:
             engine.close()
 

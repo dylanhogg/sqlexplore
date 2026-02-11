@@ -1,19 +1,39 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "sqlexplore"
-version = "0.1.0"
+version = "0.2.0"
 description = "SQL exploration over data files with your CLI"
 readme = "README.md"
+license = "MIT"
+authors = [{ name = "Dylan Hogg" }]
+keywords = ["sql", "duckdb", "cli", "tui", "csv", "parquet"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Environment :: Console",
+    "Topic :: Database",
+]
 requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.4.4",
-    "loguru>=0.7.3",
-    "pydantic>=2.12.5",
-    "python-dotenv>=1.2.1",
+    "rich>=14.0.0",
     "sqlglot>=26.0.0",
     "textual>=7.5.0",
     "tqdm>=4.67.3",
     "typer>=0.21.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/dylanhogg/sqlexplore"
+Repository = "https://github.com/dylanhogg/sqlexplore"
+Issues = "https://github.com/dylanhogg/sqlexplore/issues"
 
 [dependency-groups]
 dev = [

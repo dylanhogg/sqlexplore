@@ -11,6 +11,10 @@ from typer.testing import CliRunner
 import sqlexplore.app as app_module
 
 
+def _expected_default_download_dir() -> Path:
+    return (Path(typer.get_app_dir("sqlexplore")) / "downloads").resolve()
+
+
 class _FakeHttpResponse:
     def __init__(
         self,
@@ -118,6 +122,14 @@ def test_download_remote_parquet_overwrites_when_enabled(
     assert "[download] Complete" in out
 
 
+def test_download_remote_parquet_rejects_file_path_as_download_dir(tmp_path: Path) -> None:
+    occupied_path = tmp_path / "occupied"
+    occupied_path.write_text("not-a-directory", encoding="utf-8")
+    download_remote = getattr(app_module, "_download_remote_parquet")
+    with pytest.raises(typer.BadParameter, match=r"Download path is not a directory"):
+        download_remote("https://example.com/data.parquet", occupied_path)
+
+
 @pytest.mark.parametrize(
     "url,expected",
     [
@@ -133,7 +145,7 @@ def test_remote_filename_accepts_csv_and_tsv(url: str, expected: str) -> None:
 def test_resolve_data_path_rejects_remote_unsupported_extension() -> None:
     resolve_data_path = getattr(app_module, "_resolve_data_path")
     with pytest.raises(typer.BadParameter, match=r"Remote URL must end with \.csv, \.tsv, \.parquet, or \.pq\."):
-        resolve_data_path("https://example.com/data.json")
+        resolve_data_path("https://example.com/data.json", download_dir=Path("/tmp"))
 
 
 def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,7 +200,7 @@ def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkey
 
     assert result.exit_code == 0
     assert captured["download_url"] == remote_url
-    assert captured["download_dir"] == Path("data/downloads")
+    assert captured["download_dir"] == _expected_default_download_dir()
     assert captured["overwrite"] is False
     assert isinstance(captured["activity_messages"], list)
     assert captured["data_path"] == downloaded
@@ -242,8 +254,65 @@ def test_main_passes_overwrite_flag_for_remote_url(tmp_path: Path, monkeypatch: 
 
     assert result.exit_code == 0
     assert captured["download_url"] == remote_url
-    assert captured["download_dir"] == Path("data/downloads")
+    assert captured["download_dir"] == _expected_default_download_dir()
     assert captured["overwrite"] is True
+    assert isinstance(captured["activity_messages"], list)
+    assert captured["data_path"] == downloaded
+    assert captured["closed"] is True
+
+
+def test_main_passes_custom_download_dir_for_remote_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    remote_url = "https://example.com/data.parquet"
+    custom_download_dir = tmp_path / "downloads"
+    downloaded = tmp_path / "from-remote.parquet"
+    downloaded.write_bytes(b"PAR1")
+    captured: dict[str, Any] = {}
+
+    def fake_download(
+        url: str,
+        download_dir: Path,
+        overwrite: bool = False,
+        activity_messages: list[str] | None = None,
+    ) -> Path:
+        captured["download_url"] = url
+        captured["download_dir"] = download_dir
+        captured["overwrite"] = overwrite
+        captured["activity_messages"] = activity_messages
+        return downloaded
+
+    class FakeEngine:
+        def __init__(
+            self,
+            data_path: Path,
+            table_name: str,
+            database: str,
+            default_limit: int,
+            max_rows_display: int,
+            max_value_chars: int,
+        ) -> None:
+            captured["data_path"] = data_path
+            self.default_query = 'SELECT * FROM "data" LIMIT 100'
+            self.max_value_chars = max_value_chars
+
+        def run_sql(self, sql_text: str, remember: bool = True) -> app_module.EngineResponse:
+            return app_module.EngineResponse(status="ok", message="ok")
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    monkeypatch.setattr(app_module, "_download_remote_parquet", fake_download)
+    monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
+
+    result = runner.invoke(
+        app_module.app,
+        [remote_url, "--download-dir", str(custom_download_dir), "--no-ui"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["download_url"] == remote_url
+    assert captured["download_dir"] == custom_download_dir.resolve()
+    assert captured["overwrite"] is False
     assert isinstance(captured["activity_messages"], list)
     assert captured["data_path"] == downloaded
     assert captured["closed"] is True
@@ -354,3 +423,33 @@ def test_main_keeps_local_path_behavior(tmp_path: Path, monkeypatch: pytest.Monk
     assert result.exit_code == 0
     assert captured["data_path"] == local_path.resolve()
     assert captured["closed"] is True
+
+
+def test_main_version_option_prints_version_without_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(app_module, "app_version", lambda: "9.9.9")
+    result = runner.invoke(app_module.app, ["--version"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "sqlexplore 9.9.9"
+
+
+def test_app_version_falls_back_to_pyproject_when_metadata_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "sqlexplore"\nversion = "1.2.3"\n', encoding="utf-8")
+    fake_app_file = tmp_path / "src" / "sqlexplore" / "app.py"
+    fake_app_file.parent.mkdir(parents=True)
+    fake_app_file.write_text("", encoding="utf-8")
+
+    def fake_importlib_version(_: str) -> str:
+        raise app_module.PackageNotFoundError
+
+    monkeypatch.setattr(app_module, "__file__", str(fake_app_file))
+    monkeypatch.setattr(app_module, "importlib_version", fake_importlib_version)
+
+    app_module.app_version.cache_clear()
+    try:
+        assert app_module.app_version() == "1.2.3"
+    finally:
+        app_module.app_version.cache_clear()
