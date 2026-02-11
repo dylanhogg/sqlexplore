@@ -23,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-app = "sqlexplore.app:app"
+sqlexplore = "sqlexplore.app:app"
 
 [tool.ruff]
 line-length = 120

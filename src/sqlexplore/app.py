@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import duckdb
 import typer
@@ -106,11 +108,13 @@ _HELPER_PREFIX_RE = re.compile(r"(?<!\S)(/[A-Za-z_]*)$")
 _IDENT_PREFIX_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_$]*)$")
 _QUOTED_PREFIX_RE = re.compile(r'("(?:""|[^"])*)$')
 _SIMPLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+_REMOTE_FILENAME_SAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _QUALIFIED_FUNCTION_LABEL_RE = re.compile(
     r'^(?P<prefix>(?:"(?:""|[^"]+)"|[A-Za-z_][A-Za-z0-9_$]*)\.)+(?P<func>"(?:""|[^"]+)"|[A-Za-z_][A-Za-z0-9_$]*)\('
 )
 _QUOTED_FUNCTION_LABEL_RE = re.compile(r'^(?P<func>"(?:""|[^"]+)")\(')
 _AGGREGATE_FUNCTIONS = frozenset({"COUNT", "SUM", "AVG", "MIN", "MAX"})
+_REMOTE_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -189,6 +193,95 @@ def _detect_reader(file_path: Path) -> FileReader:
     if suffix in {".parquet", ".pq"}:
         return FileReader(function_name="read_parquet", args="")
     raise typer.BadParameter("Only .csv, .tsv, and .parquet/.pq files are supported.")
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def _format_byte_count(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    if size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
+def _remote_filename(url: str) -> str:
+    parsed = urlparse(url)
+    file_name = Path(parsed.path).name
+    if not file_name:
+        host_name = _REMOTE_FILENAME_SAFE_CHARS_RE.sub("-", parsed.netloc).strip("-")
+        file_name = f"{host_name or 'download'}.parquet"
+    if Path(file_name).suffix.lower() not in {".parquet", ".pq"}:
+        raise typer.BadParameter("Remote URL must end with .parquet or .pq.")
+    return file_name
+
+
+def _download_remote_parquet(url: str, download_dir: Path) -> Path:
+    file_name = _remote_filename(url)
+    destination = (download_dir / file_name).resolve()
+
+    typer.echo(f"[download] remote={url}")
+    typer.echo(f"[download] local={destination}")
+
+    if destination.exists():
+        typer.echo(
+            (f"[download] Warning: local download file {destination.name} already exists, stopping download."),
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    start = time.perf_counter()
+    download_dir.mkdir(parents=True, exist_ok=True)
+    downloaded_bytes = 0
+    try:
+        request = Request(url, headers={"User-Agent": "sqlexplore"})
+        with urlopen(request) as response, destination.open("wb") as file_handle:
+            while True:
+                chunk = response.read(_REMOTE_DOWNLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                file_handle.write(chunk)
+                downloaded_bytes += len(chunk)
+                typer.echo(f"[download] downloaded={_format_byte_count(downloaded_bytes)}")
+    except Exception as exc:
+        destination.unlink(missing_ok=True)
+        raise typer.BadParameter(f"Failed to download parquet file from {url}: {exc}") from exc
+
+    elapsed_seconds = time.perf_counter() - start
+    file_size_bytes = destination.stat().st_size
+    typer.echo(
+        (
+            "[download] complete "
+            f"elapsed={elapsed_seconds:.3f}s "
+            f"size={_format_byte_count(file_size_bytes)} ({file_size_bytes} bytes) "
+        )
+    )
+    return destination
+
+
+def _resolve_data_path(data: str) -> Path:
+    value = data.strip()
+    if not value:
+        raise typer.BadParameter("Data path cannot be empty.")
+    if _is_http_url(value):
+        return _download_remote_parquet(value, Path("data/downloads"))
+
+    file_path = Path(value).expanduser().resolve()
+    if not file_path.exists():
+        raise typer.BadParameter(f"Data file not found: {file_path}")
+    if not file_path.is_file():
+        raise typer.BadParameter(f"Data path is not a file: {file_path}")
+    try:
+        with file_path.open("rb"):
+            pass
+    except OSError as exc:
+        raise typer.BadParameter(f"Data file is not readable: {file_path}: {exc}") from exc
+    return file_path
 
 
 def _sql_literal(value: str) -> str:
@@ -2488,12 +2581,9 @@ def _render_console_response(console: Console, response: EngineResponse, max_val
 
 @app.command()
 def main(
-    data: Path = typer.Argument(
+    data: str = typer.Argument(
         ...,
-        exists=True,
-        readable=True,
-        resolve_path=True,
-        help="CSV, TSV, or Parquet file path.",
+        help="CSV/TSV/Parquet local file path, or HTTP(S) parquet URL.",
     ),
     table_name: str = typer.Option("data", "--table", "-t", help="Logical table/view name inside DuckDB."),
     limit: int = typer.Option(100, "--limit", "-l", min=1, help="Default helper query row limit."),
@@ -2524,7 +2614,7 @@ def main(
     if execute and query_file:
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
-    file_path = data.expanduser().resolve()
+    file_path = _resolve_data_path(data)
     engine = SqlExplorerEngine(
         data_path=file_path,
         table_name=table_name,

@@ -34,12 +34,13 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## Export, persistence & I/O
 
-- Open from URL
+- Open data from URL
     - https://github.com/rom1504/img2dataset/raw/refs/heads/main/tests/test_files/test_1000.parquet
-    - 
+    - https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.csv
+    - https://huggingface.co/datasets/dylanhogg/gnaf-2022-structured-training-100000-v0-instruct/resolve/main/data/train-00000-of-00001.parquet
 - [ ] Optional pass pre-filled sql queries in text file at startup, F? Key to load and 1st is pre-filled in query 
 - [ ] Enable copy all results to clip board
-- Add save SQL results to file
+- Add save SQL results to file (and also write python that applies the sql to the data for reproducibility)
 - Add file open
 
 ## Integrations / “open in …”
@@ -58,7 +59,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - LLM “talk to data” mode
 - [ ] Enable synthetic gen data as table from LLM statement (eg list of sample user searches). Create in memory as table for interacting, and optionally save to parquet/csv/excel
 - Enable magic SQL gen on load, silmilar to `marimo new "Load parquet file: data/hf/gnaf-2022-structured-training-100000-v0/data/train-00000-of-00001.parquet"`
-
+- Embed LLM prompt for SQL writing: https://github.com/anthropics/knowledge-work-plugins/blob/main/data/skills/sql-queries/SKILL.md
+- Embed LLM prompt for data exploration/analysis: https://github.com/anthropics/knowledge-work-plugins/blob/main/data/skills/data-exploration/SKILL.md
 
 ## Advanced ML workflows
 
