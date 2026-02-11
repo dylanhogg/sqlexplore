@@ -10,6 +10,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## UI & UX (layout, navigation, keybindings)
 
+- Improve autocomplete to be more natural (currently Up/Down only move completion selection when both _completion_open and _completion_manual_open are true)
 - Include UI overview like HuggingFace datasets page (column lengths, sort by column, etc.)
 - Create a generic pop window that can run different custom functions against query and results panes (eg query gen, data analysis)
 
@@ -39,6 +40,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Enable copy all results to clip board
 - Add save SQL results to file (and also write python that applies the sql to the data for reproducibility)
 - Add file open
+- Add open from huggingface datasets
+- Support s3, gcs (?)
 
 ## Integrations / “open in …”
 
@@ -49,7 +52,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 ## LLM features (generation, summarisation, chat)
 
 - Detect openai key for LLM, enable/disable key and show in footer. Enable allows model selection
-- Enable LLM command on results via /llm <text>. Support apply text to data for analysis; and also support auto-write new sql query (perhaps based on schema and maybe first few rows?)
+- Enable LLM command on results via /llm <text>. Support apply text to data for analysis; and also support text2sql / auto-write new sql query (perhaps based on schema and maybe first few rows?)
+- Download webpage (maybe with llm prompt for focus) -> Parse LLM for table data -> Open in sqlexplore
 - Add LLM auto-complete (combine existing AC with LLM prediction)
 - LLM: hook in gpt5-mini for SQL generation from natural language
 - Add LLM summarise results
@@ -62,6 +66,9 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 ## Advanced ML workflows
 
 - ML: train classifier or time series function (write file perhaps, spec-driven using codex?)
+- TabML modelling (?):
+    - https://github.com/soda-inria/tabicl
+    - https://github.com/PriorLabs/TabPFN
 
 ## Storage / engine support
 

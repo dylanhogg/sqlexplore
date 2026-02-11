@@ -29,7 +29,7 @@ from rich.table import Table
 from rich.text import Text
 from sqlglot.tokens import Tokenizer as SqlglotTokenizer
 from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, OptionList, RichLog, Static, TextArea
 from tqdm import tqdm
@@ -51,6 +51,11 @@ CompletionKind = Literal[
     "value",
 ]
 SqlClause = Literal["unknown", "select", "from", "join", "where", "group_by", "having", "order_by", "limit", "join_on"]
+STATUS_STYLE_BY_RESULT: dict[ResultStatus, str] = {
+    "ok": "green",
+    "info": "cyan",
+    "error": "red",
+}
 SQL_KEYWORDS = [
     "SELECT",
     "FROM",
@@ -222,10 +227,54 @@ class CommandSpec:
     aliases: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class ShortcutSpec:
+    key: str
+    action: str
+    description: str
+    show: bool = True
+    key_display: str | None = None
+
+
 @dataclass(slots=True)
 class FileReader:
     function_name: str
     args: str
+
+
+SHORTCUT_SPECS: tuple[ShortcutSpec, ...] = (
+    ShortcutSpec("ctrl+enter", "run_query", "Run"),
+    ShortcutSpec("f5", "run_query", "Run", show=False),
+    ShortcutSpec("ctrl+n", "load_sample", "Sample"),
+    ShortcutSpec("f6", "load_sample", "Sample", show=False),
+    ShortcutSpec("ctrl+l", "clear_editor", "Clear"),
+    ShortcutSpec("f7", "clear_editor", "Clear", show=False),
+    ShortcutSpec("ctrl+1", "focus_editor", "Editor"),
+    ShortcutSpec("ctrl+2", "focus_results", "Results"),
+    ShortcutSpec("ctrl+b", "toggle_sidebar", "Data Explorer", key_display="^b"),
+    ShortcutSpec("f8", "copy_results_tsv", "Copy TSV"),
+    ShortcutSpec("f1", "show_help", "Help"),
+    ShortcutSpec("ctrl+shift+p", "show_help", "Help", show=False),
+    ShortcutSpec("f10", "quit", "Quit"),
+    ShortcutSpec("ctrl+q", "quit", "Quit", show=False),
+)
+
+
+def _build_shortcuts(*, for_editor: bool) -> list[BindingType]:
+    bindings: list[BindingType] = []
+    for shortcut in SHORTCUT_SPECS:
+        action = f"app.{shortcut.action}" if for_editor else shortcut.action
+        bindings.append(
+            Binding(
+                shortcut.key,
+                action,
+                shortcut.description,
+                show=shortcut.show,
+                key_display=shortcut.key_display,
+                priority=True,
+            )
+        )
+    return bindings
 
 
 def _detect_reader(file_path: Path) -> FileReader:
@@ -465,6 +514,13 @@ def _parse_optional_positive_int(raw: str) -> int | None:
         return None
 
 
+def _parse_single_positive_int_arg(raw: str) -> int | None:
+    parts = raw.strip().split()
+    if len(parts) != 1:
+        return None
+    return _parse_optional_positive_int(parts[0])
+
+
 def _format_scalar(value: Any, max_chars: int | None = None) -> str:
     if value is None:
         return "NULL"
@@ -507,6 +563,58 @@ def _sort_cell_key(value: Any) -> tuple[int, int, float | str]:
             return (1, 0, "")
         return (0, 0, number)
     return (0, 1, str(value).casefold())
+
+
+def _looks_like_json_container(text: str) -> bool:
+    return (text[0] == "{" and text[-1] == "}") or (text[0] == "[" and text[-1] == "]")
+
+
+def _column_looks_like_json(rows: list[tuple[Any, ...]], column_index: int) -> bool:
+    sample_count = 0
+    valid_count = 0
+    for row in rows:
+        if column_index >= len(row):
+            continue
+        value = row[column_index]
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+
+        sample_count += 1
+        if len(text) <= JSON_CELL_MAX_PARSE_CHARS and _looks_like_json_container(text):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict | list):
+                valid_count += 1
+
+        if sample_count >= JSON_DETECTION_SAMPLE_SIZE:
+            break
+
+    if sample_count == 0:
+        return False
+    if valid_count < JSON_DETECTION_MIN_VALID:
+        return False
+    required = max(JSON_DETECTION_MIN_VALID, math.ceil(sample_count * JSON_DETECTION_MIN_RATIO))
+    return valid_count >= required
+
+
+def _compact_json_cell(value: Any) -> str | None:
+    text = str(value).strip()
+    if not text or len(text) > JSON_CELL_MAX_PARSE_CHARS:
+        return None
+    if not _looks_like_json_container(text):
+        return None
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict | list):
+        return None
+    return json.dumps(parsed, separators=(",", ":"))
 
 
 class SqlExplorerEngine:
@@ -734,6 +842,16 @@ class SqlExplorerEngine:
     def _lookup_command(self, raw_name: str) -> CommandSpec | None:
         return self._command_lookup.get(raw_name.casefold())
 
+    def _build_sql_helper_handler(
+        self,
+        usage: str,
+        sql_builder: Callable[[str], str | None],
+    ) -> Callable[[str], EngineResponse]:
+        def handler(args: str) -> EngineResponse:
+            return self._run_sql_helper(sql_builder(args), usage)
+
+        return handler
+
     def _build_command_specs(self) -> list[CommandSpec]:
         return [
             CommandSpec("/help", "/help", "Show helper command reference.", self._cmd_help),
@@ -742,42 +860,42 @@ class SqlExplorerEngine:
                 "/sample",
                 "/sample [n]",
                 "Select sample rows.",
-                self._cmd_sample,
+                self._build_sql_helper_handler("/sample [n]", self._sql_for_sample),
                 self._complete_sample,
             ),
             CommandSpec(
                 "/filter",
                 "/filter <where condition>",
                 "Filter rows with a WHERE condition.",
-                self._cmd_filter,
+                self._build_sql_helper_handler("/filter <where condition>", self._sql_for_filter),
                 self._complete_filter,
             ),
             CommandSpec(
                 "/sort",
                 "/sort <order expressions>",
                 "Sort rows by expression(s).",
-                self._cmd_sort,
+                self._build_sql_helper_handler("/sort <order expressions>", self._sql_for_sort),
                 self._complete_sort,
             ),
             CommandSpec(
                 "/group",
                 "/group <group cols> | <aggregates> [| having]",
                 "Aggregate by group columns.",
-                self._cmd_group,
+                self._build_sql_helper_handler("/group <group cols> | <aggregates> [| having]", self._sql_for_group),
                 self._complete_group,
             ),
             CommandSpec(
                 "/agg",
                 "/agg <aggregates> [| where]",
                 "Run aggregate expression(s).",
-                self._cmd_agg,
+                self._build_sql_helper_handler("/agg <aggregates> [| where]", self._sql_for_agg),
                 self._complete_agg,
             ),
             CommandSpec(
                 "/top",
                 "/top <column> [n]",
                 "Top values by frequency for a column.",
-                self._cmd_top,
+                self._build_sql_helper_handler("/top <column> [n]", self._sql_for_top),
                 self._complete_top,
             ),
             CommandSpec(
@@ -863,24 +981,6 @@ class SqlExplorerEngine:
         rows = [(str(r[0]), str(r[1]), str(r[2])) for r in self._schema_rows]
         return self._table_response(["column", "type", "nullable"], rows, "Schema")
 
-    def _cmd_sample(self, args: str) -> EngineResponse:
-        return self._run_sql_helper(self._sql_for_sample(args), "/sample [n]")
-
-    def _cmd_filter(self, args: str) -> EngineResponse:
-        return self._run_sql_helper(self._sql_for_filter(args), "/filter <where condition>")
-
-    def _cmd_sort(self, args: str) -> EngineResponse:
-        return self._run_sql_helper(self._sql_for_sort(args), "/sort <order expressions>")
-
-    def _cmd_group(self, args: str) -> EngineResponse:
-        return self._run_sql_helper(self._sql_for_group(args), "/group <group cols> | <aggregates> [| having]")
-
-    def _cmd_agg(self, args: str) -> EngineResponse:
-        return self._run_sql_helper(self._sql_for_agg(args), "/agg <aggregates> [| where]")
-
-    def _cmd_top(self, args: str) -> EngineResponse:
-        return self._run_sql_helper(self._sql_for_top(args), "/top <column> [n]")
-
     def _cmd_profile(self, args: str) -> EngineResponse:
         payload = args.strip()
         if not payload:
@@ -897,13 +997,10 @@ class SqlExplorerEngine:
         payload = args.strip()
         count = 20
         if payload:
-            parts = payload.split()
-            if len(parts) != 1:
+            parsed = _parse_single_positive_int_arg(payload)
+            if parsed is None:
                 return self._usage_error("/history [n]")
-            try:
-                count = max(1, int(parts[0]))
-            except ValueError:
-                return self._usage_error("/history [n]")
+            count = parsed
         history = self.executed_sql[-count:]
         start_idx = max(1, len(self.executed_sql) - len(history) + 1)
         rows = [(idx, sql) for idx, sql in enumerate(history, start=start_idx)]
@@ -926,30 +1023,21 @@ class SqlExplorerEngine:
         return out
 
     def _cmd_rows(self, args: str) -> EngineResponse:
-        payload = args.strip()
-        if len(payload.split()) != 1:
-            return self._usage_error("/rows <n>")
-        parsed = _parse_optional_positive_int(payload)
+        parsed = _parse_single_positive_int_arg(args)
         if parsed is None:
             return self._usage_error("/rows <n>")
         self.max_rows_display = parsed
         return EngineResponse(status="ok", message=f"Row display limit set to {self.max_rows_display}")
 
     def _cmd_values(self, args: str) -> EngineResponse:
-        payload = args.strip()
-        if len(payload.split()) != 1:
-            return self._usage_error("/values <n>")
-        parsed = _parse_optional_positive_int(payload)
+        parsed = _parse_single_positive_int_arg(args)
         if parsed is None:
             return self._usage_error("/values <n>")
         self.max_value_chars = parsed
         return EngineResponse(status="ok", message=f"Value display limit set to {self.max_value_chars}")
 
     def _cmd_limit(self, args: str) -> EngineResponse:
-        payload = args.strip()
-        if len(payload.split()) != 1:
-            return self._usage_error("/limit <n>")
-        parsed = _parse_optional_positive_int(payload)
+        parsed = _parse_single_positive_int_arg(args)
         if parsed is None:
             return self._usage_error("/limit <n>")
         self.default_limit = parsed
@@ -1972,22 +2060,7 @@ class CompletionEngine:
 
 
 class SqlQueryEditor(TextArea):
-    BINDINGS = [
-        Binding("ctrl+enter", "app.run_query", "Run", priority=True),
-        Binding("f5", "app.run_query", "Run", show=False, priority=True),
-        Binding("ctrl+n", "app.load_sample", "Sample", priority=True),
-        Binding("f6", "app.load_sample", show=False, priority=True),
-        Binding("ctrl+l", "app.clear_editor", "Clear", priority=True),
-        Binding("f7", "app.clear_editor", show=False, priority=True),
-        Binding("ctrl+1", "app.focus_editor", "Editor", priority=True),
-        Binding("ctrl+2", "app.focus_results", "Results", priority=True),
-        Binding("ctrl+b", "app.toggle_sidebar", "Data Explorer", key_display="^b", priority=True),
-        Binding("f8", "app.copy_results_tsv", "Copy TSV", priority=True),
-        Binding("f1", "app.show_help", "Help", priority=True),
-        Binding("ctrl+shift+p", "app.show_help", show=False, priority=True),
-        Binding("f10", "app.quit", "Quit", priority=True),
-        Binding("ctrl+q", "app.quit", show=False, priority=True),
-    ]
+    BINDINGS = _build_shortcuts(for_editor=True)
 
     def __init__(
         self,
@@ -2388,22 +2461,7 @@ class SqlExplorerTui(App[None]):
     }
     """
 
-    BINDINGS = [
-        Binding("ctrl+enter", "run_query", "Run", priority=True),
-        Binding("f5", "run_query", "Run", show=False, priority=True),
-        Binding("ctrl+n", "load_sample", "Sample", priority=True),
-        Binding("f6", "load_sample", "Sample", show=False, priority=True),
-        Binding("ctrl+l", "clear_editor", "Clear", priority=True),
-        Binding("f7", "clear_editor", "Clear", show=False, priority=True),
-        Binding("ctrl+1", "focus_editor", "Editor", priority=True),
-        Binding("ctrl+2", "focus_results", "Results", priority=True),
-        Binding("ctrl+b", "toggle_sidebar", "Data Explorer", key_display="^b", priority=True),
-        Binding("f8", "copy_results_tsv", "Copy TSV", priority=True),
-        Binding("f1", "show_help", "Help", priority=True),
-        Binding("ctrl+shift+p", "show_help", "Help", show=False, priority=True),
-        Binding("f10", "quit", "Quit", priority=True),
-        Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
-    ]
+    BINDINGS = _build_shortcuts(for_editor=False)
 
     def __init__(self, engine: SqlExplorerEngine, startup_activity_messages: list[str] | None = None) -> None:
         super().__init__()
@@ -2536,6 +2594,15 @@ class SqlExplorerTui(App[None]):
         self._apply_response(boot)
         self._query_editor().focus()
 
+    def _set_editor_text(self, text: str, *, log_message: str | None = None) -> None:
+        editor = self._query_editor()
+        editor.dismiss_completion_menu()
+        editor.text = text
+        self._reset_history_cursor()
+        editor.focus()
+        if log_message is not None:
+            self._log(log_message, "info")
+
     def action_run_query(self) -> None:
         editor = self._query_editor()
         editor.dismiss_completion_menu()
@@ -2545,19 +2612,10 @@ class SqlExplorerTui(App[None]):
         self._apply_response(response)
 
     def action_load_sample(self) -> None:
-        editor = self._query_editor()
-        editor.dismiss_completion_menu()
-        editor.text = self.engine.default_query
-        self._reset_history_cursor()
-        editor.focus()
-        self._log("Loaded sample query.", "info")
+        self._set_editor_text(self.engine.default_query, log_message="Loaded sample query.")
 
     def action_clear_editor(self) -> None:
-        editor = self._query_editor()
-        editor.dismiss_completion_menu()
-        editor.text = ""
-        self._reset_history_cursor()
-        editor.focus()
+        self._set_editor_text("")
 
     def action_focus_editor(self) -> None:
         self._query_editor().focus()
@@ -2620,10 +2678,7 @@ class SqlExplorerTui(App[None]):
             self._log(response.message, response.status)
 
         if response.load_query is not None:
-            editor = self._query_editor()
-            editor.text = response.load_query
-            self._reset_history_cursor()
-            editor.focus()
+            self._set_editor_text(response.load_query)
 
         if response.clear_editor:
             self.action_clear_editor()
@@ -2654,64 +2709,12 @@ class SqlExplorerTui(App[None]):
         for index, type_name in enumerate(result.column_types):
             if not _is_varchar_type(type_name):
                 continue
-            if self._column_looks_like_json(result.rows, index):
+            if _column_looks_like_json(result.rows, index):
                 detected.add(index)
         return detected
 
-    @staticmethod
-    def _column_looks_like_json(rows: list[tuple[Any, ...]], column_index: int) -> bool:
-        sample_count = 0
-        valid_count = 0
-        for row in rows:
-            if column_index >= len(row):
-                continue
-            value = row[column_index]
-            if value is None:
-                continue
-            text = str(value).strip()
-            if not text:
-                continue
-
-            sample_count += 1
-            if len(text) <= JSON_CELL_MAX_PARSE_CHARS and SqlExplorerTui._looks_like_json_container(text):
-                try:
-                    parsed = json.loads(text)
-                except (TypeError, ValueError):
-                    parsed = None
-                if isinstance(parsed, dict | list):
-                    valid_count += 1
-
-            if sample_count >= JSON_DETECTION_SAMPLE_SIZE:
-                break
-
-        if sample_count == 0:
-            return False
-        if valid_count < JSON_DETECTION_MIN_VALID:
-            return False
-        required = max(JSON_DETECTION_MIN_VALID, math.ceil(sample_count * JSON_DETECTION_MIN_RATIO))
-        return valid_count >= required
-
-    @staticmethod
-    def _looks_like_json_container(text: str) -> bool:
-        return (text[0] == "{" and text[-1] == "}") or (text[0] == "[" and text[-1] == "]")
-
-    @staticmethod
-    def _compact_json(value: Any) -> str | None:
-        text = str(value).strip()
-        if not text or len(text) > JSON_CELL_MAX_PARSE_CHARS:
-            return None
-        if not SqlExplorerTui._looks_like_json_container(text):
-            return None
-        try:
-            parsed = json.loads(text)
-        except (TypeError, ValueError):
-            return None
-        if not isinstance(parsed, dict | list):
-            return None
-        return json.dumps(parsed, separators=(",", ":"))
-
     def _render_json_cell(self, value: Any) -> Any:
-        compact = self._compact_json(value)
+        compact = _compact_json_cell(value)
         if compact is None:
             return _format_scalar(value, self.engine.max_value_chars)
         if len(compact) > self.engine.max_value_chars:
@@ -2770,11 +2773,7 @@ class SqlExplorerTui(App[None]):
 
     def _log(self, message: str, status: ResultStatus) -> None:
         logger = self.query_one("#activity_log", RichLog)
-        style_prefix = {
-            "ok": "[green]",
-            "info": "[cyan]",
-            "error": "[red]",
-        }[status]
+        style_prefix = f"[{STATUS_STYLE_BY_RESULT[status]}]"
         logger.write(f"{style_prefix}{rich_escape(message)}[/]")
 
 
@@ -2795,11 +2794,7 @@ def _render_console_response(console: Console, response: EngineResponse, max_val
         console.print(table)
 
     if response.message:
-        border_style = "green"
-        if response.status == "error":
-            border_style = "red"
-        elif response.status == "info":
-            border_style = "cyan"
+        border_style = STATUS_STYLE_BY_RESULT[response.status]
         console.print(Panel(response.message, border_style=border_style))
 
     return 1 if response.status == "error" else 0
