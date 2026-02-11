@@ -3,7 +3,7 @@
 Note: This is a working todo list for a human developer, not for an LLM AI Agent.
       If you are an LLM AI Agent, please ignore this file.
 
-## Code quality
+## App code quality
 
 - Run key binding clean up and review task
 - Show version in app, sync with pypi and pyproject.toml
@@ -24,6 +24,11 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Ensure all "SQL keywords" are upper cased in autocomplete.
 - Always emit the exectuted SQL to the Activity panel.
 - Implement debounce to prevent recomputing completions on every keystroke (waits briefly 50ms) after typing stops, then runs once.
+- Validate SQL with sqlglot.parse_one(query) or similar before run (maybe a parse keybinding?)
+
+## Data sources
+
+- https://github.com/pydata/pandas-datareader : Extract data from a wide range of Internet sources into a pandas DataFrame.
 
 ## Data formatting & schema introspection
 
@@ -43,6 +48,11 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Add open from huggingface datasets
 - Support s3, gcs (?)
 
+## Visualisation
+
+- Column summaries like on Huggingface datasets page
+- Inspiration from: https://github.com/adamerose/pandasgui
+
 ## Integrations / “open in …”
 
 - Add open in marimo notebooks
@@ -57,7 +67,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Add LLM auto-complete (combine existing AC with LLM prediction)
 - LLM: hook in gpt5-mini for SQL generation from natural language
 - Add LLM summarise results
-- LLM “talk to data” mode
+- LLM “talk to data” mode (also see: https://github.com/sinaptik-ai/pandas-ai)
 - Enable synthetic gen data as table from LLM statement (eg list of sample user searches). Create in memory as table for interacting, and optionally save to parquet/csv/excel
 - Enable magic SQL gen on load, silmilar to `marimo new "Load parquet file: data/hf/gnaf-2022-structured-training-100000-v0/data/train-00000-of-00001.parquet"`
 - Embed LLM prompt for SQL writing: https://github.com/anthropics/knowledge-work-plugins/blob/main/data/skills/sql-queries/SKILL.md

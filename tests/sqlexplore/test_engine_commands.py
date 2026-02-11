@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlexplore.app import SqlExplorerEngine
+from sqlexplore.engine import SqlExplorerEngine
 
 
 def _build_engine(tmp_path: Path, csv_text: str = "col_name,x\na,1\nb,2\na,3\n") -> SqlExplorerEngine:

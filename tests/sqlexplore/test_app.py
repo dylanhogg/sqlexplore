@@ -9,7 +9,8 @@ from typing import Any, cast
 from rich.text import Text
 from textual.widgets import DataTable, OptionList, RichLog
 
-from sqlexplore.app import SqlExplorerEngine, SqlExplorerTui, SqlQueryEditor, app_version
+from sqlexplore.engine import SqlExplorerEngine, app_version
+from sqlexplore.tui import SqlExplorerTui, SqlQueryEditor
 
 
 def _build_app(
