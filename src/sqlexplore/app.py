@@ -221,19 +221,24 @@ def _remote_filename(url: str) -> str:
     return file_name
 
 
-def _download_remote_parquet(url: str, download_dir: Path) -> Path:
+def _download_remote_parquet(url: str, download_dir: Path, overwrite: bool = False) -> Path:
     file_name = _remote_filename(url)
     destination = (download_dir / file_name).resolve()
 
     typer.echo(f"[download] remote={url}")
     typer.echo(f"[download] local={destination}")
 
-    if destination.exists():
+    if destination.exists() and not overwrite:
         typer.echo(
-            (f"[download] Warning: local download file {destination.name} already exists, stopping download."),
+            (
+                f"[download] Warning: local download file {destination.name} already exists, stopping download. "
+                "Use --overwrite to replace it."
+            ),
             err=True,
         )
         raise typer.Exit(code=1)
+    elif destination.exists() and overwrite:
+        typer.echo(f"[download] Overwriting local download file {destination.name}")
 
     start = time.perf_counter()
     download_dir.mkdir(parents=True, exist_ok=True)
@@ -264,12 +269,12 @@ def _download_remote_parquet(url: str, download_dir: Path) -> Path:
     return destination
 
 
-def _resolve_data_path(data: str) -> Path:
+def _resolve_data_path(data: str, overwrite: bool = False) -> Path:
     value = data.strip()
     if not value:
         raise typer.BadParameter("Data path cannot be empty.")
     if _is_http_url(value):
-        return _download_remote_parquet(value, Path("data/downloads"))
+        return _download_remote_parquet(value, Path("data/downloads"), overwrite=overwrite)
 
     file_path = Path(value).expanduser().resolve()
     if not file_path.exists():
@@ -2610,11 +2615,16 @@ def main(
         help="Run SQL from file non-interactively and exit.",
     ),
     no_ui: bool = typer.Option(False, "--no-ui", help="Run once in standard terminal output mode."),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="When data is an HTTP(S) URL, overwrite existing local download if present.",
+    ),
 ) -> None:
     if execute and query_file:
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
-    file_path = _resolve_data_path(data)
+    file_path = _resolve_data_path(data, overwrite=overwrite)
     engine = SqlExplorerEngine(
         data_path=file_path,
         table_name=table_name,

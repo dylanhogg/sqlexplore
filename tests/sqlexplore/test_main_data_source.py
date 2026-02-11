@@ -57,7 +57,30 @@ def test_download_remote_parquet_refuses_overwrite(tmp_path: Path, capsys: Any) 
     assert out.value.exit_code == 1
     err = capsys.readouterr().err
     assert "stopping download" in err
+    assert "--overwrite" in err
     assert f"{existing.name}" in err
+
+
+def test_download_remote_parquet_overwrites_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    existing = tmp_path / "data.parquet"
+    existing.write_bytes(b"old")
+    payload = b"new-data"
+    url = "https://example.com/data.parquet"
+
+    def fake_urlopen(request: Any) -> _FakeHttpResponse:
+        assert request.full_url == url
+        return _FakeHttpResponse(payload)
+
+    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
+    download_remote = getattr(app_module, "_download_remote_parquet")
+    out_path = download_remote(url, tmp_path, overwrite=True)
+
+    assert out_path == existing.resolve()
+    assert existing.read_bytes() == payload
+    out = capsys.readouterr().out
+    assert "[download] complete" in out
 
 
 @pytest.mark.parametrize(
@@ -85,9 +108,10 @@ def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkey
     downloaded.write_bytes(b"PAR1")
     captured: dict[str, Any] = {}
 
-    def fake_download(url: str, download_dir: Path) -> Path:
+    def fake_download(url: str, download_dir: Path, overwrite: bool = False) -> Path:
         captured["download_url"] = url
         captured["download_dir"] = download_dir
+        captured["overwrite"] = overwrite
         return downloaded
 
     class FakeEngine:
@@ -124,8 +148,55 @@ def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkey
     assert result.exit_code == 0
     assert captured["download_url"] == remote_url
     assert captured["download_dir"] == Path("data/downloads")
+    assert captured["overwrite"] is False
     assert captured["data_path"] == downloaded
     assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
+    assert captured["closed"] is True
+
+
+def test_main_passes_overwrite_flag_for_remote_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    remote_url = "https://example.com/data.parquet"
+    downloaded = tmp_path / "from-remote.parquet"
+    downloaded.write_bytes(b"PAR1")
+    captured: dict[str, Any] = {}
+
+    def fake_download(url: str, download_dir: Path, overwrite: bool = False) -> Path:
+        captured["download_url"] = url
+        captured["download_dir"] = download_dir
+        captured["overwrite"] = overwrite
+        return downloaded
+
+    class FakeEngine:
+        def __init__(
+            self,
+            data_path: Path,
+            table_name: str,
+            database: str,
+            default_limit: int,
+            max_rows_display: int,
+            max_value_chars: int,
+        ) -> None:
+            captured["data_path"] = data_path
+            self.default_query = 'SELECT * FROM "data" LIMIT 100'
+            self.max_value_chars = max_value_chars
+
+        def run_sql(self, sql_text: str, remember: bool = True) -> app_module.EngineResponse:
+            return app_module.EngineResponse(status="ok", message="ok")
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    monkeypatch.setattr(app_module, "_download_remote_parquet", fake_download)
+    monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
+
+    result = runner.invoke(app_module.app, [remote_url, "--overwrite", "--no-ui"])
+
+    assert result.exit_code == 0
+    assert captured["download_url"] == remote_url
+    assert captured["download_dir"] == Path("data/downloads")
+    assert captured["overwrite"] is True
+    assert captured["data_path"] == downloaded
     assert captured["closed"] is True
 
 
