@@ -80,8 +80,13 @@ DEFAULT_HELPER_COMMANDS = (
     "/group",
     "/agg",
     "/top",
+    "/dupes",
+    "/hist",
+    "/crosstab",
+    "/corr",
     "/profile",
     "/describe",
+    "/summary",
     "/history",
     "/rerun",
     "/rows",
@@ -162,6 +167,7 @@ class CompletionItem:
     insert_text: str
     kind: CompletionKind
     detail: str = ""
+    usage: str = ""
     replacement_start: int = 0
     replacement_end: int = 0
     score: int = 0
@@ -184,6 +190,14 @@ class CompletionContext:
     completing_command_name: bool = False
     sql_function: str | None = None
     inside_function_args: bool = False
+
+
+@dataclass(slots=True)
+class CompletionResult:
+    items: list[CompletionItem]
+    should_auto_open: bool
+    context_mode: Literal["sql", "helper"] | None
+    reason: str = ""
 
 
 @dataclass(slots=True)
@@ -269,6 +283,17 @@ def _result_column_types(description: list[tuple[Any, ...]] | None) -> list[str]
 
 def _split_pipe_sections(raw: str) -> list[str]:
     return [part.strip() for part in raw.split("|") if part.strip()]
+
+
+def _split_optional_where(raw: str) -> tuple[str, str] | None:
+    payload = raw.strip()
+    if "|" not in payload:
+        return payload, ""
+    before, after = payload.split("|", maxsplit=1)
+    where_clause = after.strip()
+    if not where_clause:
+        return None
+    return before.strip(), where_clause
 
 
 def _parse_optional_positive_int(raw: str) -> int | None:
@@ -406,6 +431,9 @@ class SqlExplorerEngine:
             commands.extend(spec.aliases)
         return commands
 
+    def has_helper_command(self, raw_name: str) -> bool:
+        return self._lookup_command(raw_name) is not None
+
     def _command_usage_lines(self) -> list[str]:
         return [spec.usage for spec in self._command_specs]
 
@@ -460,9 +488,9 @@ class SqlExplorerEngine:
             [
                 "",
                 (
-                    "Editor: completions appear while typing; Ctrl+Space opens manual completion mode; "
+                    "Editor: completions appear while typing; Ctrl+Space opens completion mode; "
                     "Tab accepts completion; Esc closes completion menu; Up/Down navigates completion menu "
-                    "only in manual mode, otherwise moves cursor/history at first/last line; "
+                    "when visible, otherwise moves cursor/history at first/last line; "
                     "Ctrl+Enter/F5 runs; Ctrl+N/F6 loads sample; Ctrl+L/F7 clears."
                 ),
                 (
@@ -606,10 +634,17 @@ class SqlExplorerEngine:
             ),
             SqlHelperCommandSpec(
                 "/top",
-                "/top <column> [n]",
+                "/top <column> <n>",
                 "Top values by frequency for a column.",
                 self._sql_for_top,
                 self._complete_top,
+            ),
+            SqlHelperCommandSpec(
+                "/dupes",
+                "/dupes <key_cols_csv> [n] [| where]",
+                "Find duplicate key combinations.",
+                self._sql_for_dupes,
+                self._complete_dupes,
             ),
         ]
         return [
@@ -629,6 +664,27 @@ class SqlExplorerEngine:
             CommandSpec("/schema", "/schema", "Show dataset schema.", self._cmd_schema),
             *self._sql_helper_command_specs(),
             CommandSpec(
+                "/hist",
+                "/hist <numeric_col> [bins] [| where]",
+                "Histogram bins for a numeric column.",
+                self._cmd_hist,
+                self._complete_hist,
+            ),
+            CommandSpec(
+                "/crosstab",
+                "/crosstab <col_a> <col_b> [n] [| where]",
+                "Top value pairs by frequency.",
+                self._cmd_crosstab,
+                self._complete_crosstab,
+            ),
+            CommandSpec(
+                "/corr",
+                "/corr <numeric_x> <numeric_y> [| where]",
+                "Correlation and non-null pair count.",
+                self._cmd_corr,
+                self._complete_corr,
+            ),
+            CommandSpec(
                 "/profile",
                 "/profile <column>",
                 "Profile a single column.",
@@ -636,6 +692,13 @@ class SqlExplorerEngine:
                 self._complete_profile,
             ),
             CommandSpec("/describe", "/describe", "Describe columns and nulls.", self._cmd_describe),
+            CommandSpec(
+                "/summary",
+                "/summary [n_cols] [| where]",
+                "Show per-column summary statistics.",
+                self._cmd_summary,
+                self._complete_summary,
+            ),
             CommandSpec(
                 "/history",
                 "/history [n]",
@@ -698,6 +761,11 @@ class SqlExplorerEngine:
         out.generated_sql = sql
         return out
 
+    def _run_generated_sql(self, sql: str) -> EngineResponse:
+        out = self.run_sql(sql)
+        out.generated_sql = sql
+        return out
+
     def _cmd_help(self, args: str) -> EngineResponse:
         err = self._require_no_args(args, "/help")
         if err is not None:
@@ -722,6 +790,58 @@ class SqlExplorerEngine:
         if err is not None:
             return err
         return self._describe_dataset()
+
+    def _cmd_summary(self, args: str) -> EngineResponse:
+        parsed = self._parse_summary_args(args)
+        if parsed is None:
+            return self._usage_error("/summary [n_cols] [| where]")
+        column_limit, where_clause = parsed
+        return self._summarize_dataset(column_limit, where_clause)
+
+    def _cmd_hist(self, args: str) -> EngineResponse:
+        parsed = self._parse_hist_args(args)
+        if parsed is None:
+            return self._usage_error("/hist <numeric_col> [bins] [| where]")
+        column, bins, where_clause = parsed
+        resolved_column = self._resolve_column(column)
+        if resolved_column is None:
+            return EngineResponse(status="error", message=f"Unknown column: {column}")
+        type_name = self.column_types[resolved_column]
+        if not _is_numeric_type(type_name):
+            return EngineResponse(status="error", message=f"/hist requires numeric column: {resolved_column}")
+        return self._run_generated_sql(self._sql_for_hist(resolved_column, bins, where_clause))
+
+    def _cmd_crosstab(self, args: str) -> EngineResponse:
+        parsed = self._parse_crosstab_args(args)
+        if parsed is None:
+            return self._usage_error("/crosstab <col_a> <col_b> [n] [| where]")
+        raw_a, raw_b, limit, where_clause = parsed
+        col_a = self._resolve_column(raw_a)
+        if col_a is None:
+            return EngineResponse(status="error", message=f"Unknown column: {raw_a}")
+        col_b = self._resolve_column(raw_b)
+        if col_b is None:
+            return EngineResponse(status="error", message=f"Unknown column: {raw_b}")
+        return self._run_generated_sql(self._sql_for_crosstab(col_a, col_b, limit, where_clause))
+
+    def _cmd_corr(self, args: str) -> EngineResponse:
+        parsed = self._parse_corr_args(args)
+        if parsed is None:
+            return self._usage_error("/corr <numeric_x> <numeric_y> [| where]")
+        raw_x, raw_y, where_clause = parsed
+        col_x = self._resolve_column(raw_x)
+        if col_x is None:
+            return EngineResponse(status="error", message=f"Unknown column: {raw_x}")
+        col_y = self._resolve_column(raw_y)
+        if col_y is None:
+            return EngineResponse(status="error", message=f"Unknown column: {raw_y}")
+        type_x = self.column_types[col_x]
+        if not _is_numeric_type(type_x):
+            return EngineResponse(status="error", message=f"/corr requires numeric column: {col_x}")
+        type_y = self.column_types[col_y]
+        if not _is_numeric_type(type_y):
+            return EngineResponse(status="error", message=f"/corr requires numeric column: {col_y}")
+        return self._run_generated_sql(self._sql_for_corr(col_x, col_y, where_clause))
 
     def _cmd_history(self, args: str) -> EngineResponse:
         payload = args.strip()
@@ -865,22 +985,191 @@ class SqlExplorerEngine:
 
     def _sql_for_top(self, args: str) -> str | None:
         parts = args.strip().split()
-        if len(parts) < 1 or len(parts) > 2:
+        if len(parts) != 2:
             return None
         resolved = self._resolve_column(parts[0])
         if resolved is None:
             return None
-        top_n = 10
-        if len(parts) == 2:
-            try:
-                top_n = max(1, int(parts[1]))
-            except ValueError:
-                return None
+        try:
+            top_n = max(1, int(parts[1]))
+        except ValueError:
+            return None
         qcol = _quote_ident(resolved)
         return (
             f'SELECT {qcol} AS value, COUNT(*) AS count FROM "{self.table_name}" '
             f"GROUP BY {qcol} ORDER BY count DESC, value LIMIT {top_n}"
         )
+
+    def _sql_for_dupes(self, args: str) -> str | None:
+        split = _split_optional_where(args)
+        if split is None:
+            return None
+        base, where_clause = split
+        if not base:
+            return None
+
+        tokens = base.split()
+        key_columns_raw = base
+        limit = self.default_limit
+        if len(tokens) > 1:
+            parsed_limit = _parse_optional_positive_int(tokens[-1])
+            if parsed_limit is not None:
+                limit = parsed_limit
+                key_columns_raw = " ".join(tokens[:-1]).strip()
+                if not key_columns_raw:
+                    return None
+
+        if "," not in key_columns_raw and len(key_columns_raw.split()) > 1:
+            trimmed = key_columns_raw.strip()
+            if not (trimmed.startswith('"') and trimmed.endswith('"')):
+                return None
+
+        raw_columns = [part.strip() for part in key_columns_raw.split(",") if part.strip()]
+        if not raw_columns:
+            return None
+
+        resolved_columns: list[str] = []
+        seen: set[str] = set()
+        for raw_column in raw_columns:
+            resolved = self._resolve_column(raw_column)
+            if resolved is None:
+                return None
+            key = resolved.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved_columns.append(resolved)
+        if not resolved_columns:
+            return None
+
+        group_expr = ", ".join(_quote_ident(column) for column in resolved_columns)
+        sql = f'SELECT {group_expr}, COUNT(*) AS count FROM "{self.table_name}"'
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        sql += f" GROUP BY {group_expr} HAVING COUNT(*) > 1 ORDER BY count DESC, {group_expr} LIMIT {limit}"
+        return sql
+
+    def _parse_hist_args(self, args: str) -> tuple[str, int, str] | None:
+        split = _split_optional_where(args)
+        if split is None:
+            return None
+        base, where_clause = split
+        parts = base.split()
+        if len(parts) == 1:
+            return parts[0], 10, where_clause
+        if len(parts) == 2:
+            bins = _parse_optional_positive_int(parts[1])
+            if bins is None:
+                return None
+            return parts[0], bins, where_clause
+        return None
+
+    def _parse_crosstab_args(self, args: str) -> tuple[str, str, int, str] | None:
+        split = _split_optional_where(args)
+        if split is None:
+            return None
+        base, where_clause = split
+        parts = base.split()
+        if len(parts) == 2:
+            return parts[0], parts[1], self.default_limit, where_clause
+        if len(parts) == 3:
+            limit = _parse_optional_positive_int(parts[2])
+            if limit is None:
+                return None
+            return parts[0], parts[1], limit, where_clause
+        return None
+
+    def _parse_corr_args(self, args: str) -> tuple[str, str, str] | None:
+        split = _split_optional_where(args)
+        if split is None:
+            return None
+        base, where_clause = split
+        parts = base.split()
+        if len(parts) != 2:
+            return None
+        return parts[0], parts[1], where_clause
+
+    def _sql_for_hist(self, column: str, bins: int, where_clause: str) -> str:
+        qcol = _quote_ident(column)
+        predicate = f"({where_clause}) AND " if where_clause else ""
+        return f'''WITH filtered AS (
+    SELECT CAST({qcol} AS DOUBLE) AS value
+    FROM "{self.table_name}"
+    WHERE {predicate}{qcol} IS NOT NULL
+),
+stats AS (
+    SELECT
+        MIN(value) AS min_value,
+        MAX(value) AS max_value,
+        COUNT(*) AS total_count
+    FROM filtered
+),
+binned AS (
+    SELECT
+        CASE
+            WHEN stats.max_value = stats.min_value THEN 1
+            ELSE LEAST(
+                {bins},
+                CAST(
+                    FLOOR(((value - stats.min_value) / NULLIF(stats.max_value - stats.min_value, 0)) * {bins})
+                    AS BIGINT
+                ) + 1
+            )
+        END AS bin_index
+    FROM filtered
+    CROSS JOIN stats
+),
+counts AS (
+    SELECT
+        bin_index,
+        COUNT(*) AS count
+    FROM binned
+    GROUP BY bin_index
+)
+SELECT
+    stats.min_value + ((bin_index - 1) * (stats.max_value - stats.min_value) / {bins}) AS bin_start,
+    CASE
+        WHEN bin_index = {bins} THEN stats.max_value
+        ELSE stats.min_value + (bin_index * (stats.max_value - stats.min_value) / {bins})
+    END AS bin_end,
+    count,
+    ROUND(100.0 * count / NULLIF(stats.total_count, 0), 2) AS pct
+FROM counts
+CROSS JOIN stats
+ORDER BY bin_start'''
+
+    def _sql_for_crosstab(self, col_a: str, col_b: str, limit: int, where_clause: str) -> str:
+        qcol_a = _quote_ident(col_a)
+        qcol_b = _quote_ident(col_b)
+        sql = f'SELECT {qcol_a}, {qcol_b}, COUNT(*) AS count FROM "{self.table_name}"'
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        sql += f" GROUP BY {qcol_a}, {qcol_b} ORDER BY count DESC, {qcol_a}, {qcol_b} LIMIT {limit}"
+        return sql
+
+    def _sql_for_corr(self, col_x: str, col_y: str, where_clause: str) -> str:
+        qcol_x = _quote_ident(col_x)
+        qcol_y = _quote_ident(col_y)
+        sql = (
+            f"SELECT CORR({qcol_x}, {qcol_y}) AS corr, "
+            f"COUNT(*) FILTER (WHERE {qcol_x} IS NOT NULL AND {qcol_y} IS NOT NULL) AS n_non_null "
+            f'FROM "{self.table_name}"'
+        )
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        return sql
+
+    def _parse_summary_args(self, args: str) -> tuple[int, str] | None:
+        split = _split_optional_where(args)
+        if split is None:
+            return None
+        count_part, where_clause = split
+        if not count_part:
+            return len(self.columns), where_clause
+        parsed_count = _parse_single_positive_int_arg(count_part)
+        if parsed_count is None:
+            return None
+        return min(parsed_count, len(self.columns)), where_clause
 
     def _describe_dataset(self) -> EngineResponse:
         total_rows = self.row_count()
@@ -906,6 +1195,62 @@ class SqlExplorerEngine:
 
         message = f"Dataset: {total_rows:,} rows x {total_columns} columns"
         return self._table_response(["column", "type", "distinct", "nulls", "null_%"], column_rows, message)
+
+    def _summarize_dataset(self, column_limit: int, where_clause: str) -> EngineResponse:
+        limited_columns = self.columns[: max(1, column_limit)]
+        where_sql = f" WHERE {where_clause}" if where_clause else ""
+        try:
+            row_out = self.conn.execute(f'SELECT COUNT(*) FROM "{self.table_name}"{where_sql}').fetchone()
+        except Exception as exc:  # noqa: BLE001
+            return EngineResponse(status="error", message=f"Summary failed: {exc}")
+        total_rows = int(row_out[0]) if row_out is not None else 0
+
+        summary_rows: list[tuple[Any, ...]] = []
+        for column in limited_columns:
+            qcol = _quote_ident(column)
+            try:
+                out = self.conn.execute(
+                    f'''SELECT
+                        COUNT({qcol}) AS non_null,
+                        COUNT(DISTINCT {qcol}) AS distinct_count,
+                        ANY_VALUE(CAST({qcol} AS VARCHAR)) FILTER (WHERE {qcol} IS NOT NULL) AS sample_value,
+                        MIN(CAST({qcol} AS VARCHAR)) AS min_value,
+                        MAX(CAST({qcol} AS VARCHAR)) AS max_value,
+                        AVG(LENGTH(CAST({qcol} AS VARCHAR))) FILTER (WHERE {qcol} IS NOT NULL) AS avg_len
+                    FROM "{self.table_name}"{where_sql}'''
+                ).fetchone()
+            except Exception as exc:  # noqa: BLE001
+                return EngineResponse(status="error", message=f"Summary failed for column {column}: {exc}")
+            if out is None:
+                continue
+
+            non_null = int(out[0])
+            distinct_count = int(out[1])
+            nulls = max(total_rows - non_null, 0)
+            null_pct = (100.0 * nulls / total_rows) if total_rows else 0.0
+            avg_len = "NULL" if out[5] is None else f"{float(out[5]):.2f}"
+            summary_rows.append(
+                (
+                    column,
+                    self.column_types[column],
+                    format_scalar(out[2], self.max_value_chars),
+                    format_scalar(out[3], self.max_value_chars),
+                    format_scalar(out[4], self.max_value_chars),
+                    avg_len,
+                    distinct_count,
+                    nulls,
+                    f"{null_pct:.2f}%",
+                )
+            )
+
+        message = f"Summary ({total_rows:,} rows x {len(summary_rows)} columns)"
+        if where_clause:
+            message += " with filter"
+        return self._table_response(
+            ["column", "type", "sample", "min", "max", "avg_len", "distinct", "nulls", "null_%"],
+            summary_rows,
+            message,
+        )
 
     def _profile_column(self, raw_column: str) -> EngineResponse:
         column = self._resolve_column(raw_column)
@@ -987,9 +1332,10 @@ class SqlExplorerEngine:
         value: str,
         kind: CompletionKind,
         detail: str = "",
+        usage: str = "",
         score: int = 0,
     ) -> CompletionItem:
-        return CompletionItem(label=value, insert_text=value, kind=kind, detail=detail, score=score)
+        return CompletionItem(label=value, insert_text=value, kind=kind, detail=detail, usage=usage, score=score)
 
     def _column_completion_items(self) -> list[CompletionItem]:
         if self._column_completion_cache is not None:
@@ -1017,6 +1363,34 @@ class SqlExplorerEngine:
                         )
                     )
         self._column_completion_cache = items
+        return items
+
+    def _numeric_column_completion_items(self) -> list[CompletionItem]:
+        items: list[CompletionItem] = []
+        seen: set[str] = set()
+        for column in self.columns:
+            type_name = self.column_types[column]
+            if not _is_numeric_type(type_name):
+                continue
+            expr = self._column_expr(column)
+            key = expr.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(self._base_completion_item(expr, "column", type_name, score=125))
+            if _is_simple_ident(column):
+                quoted = _quote_ident(column)
+                quoted_key = quoted.casefold()
+                if quoted_key not in seen:
+                    seen.add(quoted_key)
+                    items.append(
+                        self._base_completion_item(
+                            quoted,
+                            "column",
+                            f"{type_name} (quoted)",
+                            score=117,
+                        )
+                    )
         return items
 
     def _numeric_completion_items(self, values: list[int], detail: str = "") -> list[CompletionItem]:
@@ -1228,8 +1602,122 @@ class SqlExplorerEngine:
             return self._column_completion_items()
         if len(parts) == 1 and not trailing_space:
             return self._column_completion_items()
-        if len(parts) in {1, 2}:
+        if len(parts) == 1 and trailing_space:
             return self._numeric_completion_items([10, self.default_limit, 25, 50], detail="top rows")
+        if len(parts) == 2:
+            return self._numeric_completion_items([10, self.default_limit, 25, 50], detail="top rows")
+        return []
+
+    def _complete_dupes(self, args: str, trailing_space: bool) -> list[CompletionItem]:
+        if "|" in args:
+            return self._predicate_completion_items()
+
+        base = args.strip()
+        if not base.strip():
+            return self._column_completion_items()
+
+        if trailing_space:
+            return self._merge_completion_items(
+                self._numeric_completion_items([self.default_limit, 10, 25, 50], detail="duplicate rows"),
+                [self._base_completion_item("| ", "snippet", "add where filter", score=82)],
+            )
+
+        tokens = base.split()
+        if len(tokens) >= 2:
+            return self._numeric_completion_items([self.default_limit, 10, 25, 50], detail="duplicate rows")
+
+        token = tokens[0]
+        if "," in token:
+            prefix, _, _ = token.rpartition(",")
+            prefix = f"{prefix}," if prefix else ""
+            items: list[CompletionItem] = []
+            for item in self._column_completion_items():
+                items.append(
+                    self._base_completion_item(
+                        f"{prefix}{item.insert_text}",
+                        "column",
+                        item.detail,
+                        score=item.score,
+                    )
+                )
+            return items
+        return self._column_completion_items()
+
+    def _complete_summary(self, args: str, trailing_space: bool) -> list[CompletionItem]:
+        if "|" in args:
+            return self._predicate_completion_items()
+
+        count_part = args.strip()
+        items = self._numeric_completion_items(
+            [len(self.columns), self.default_limit, 10, 25, 50],
+            detail="summary column count",
+        )
+        if not count_part.strip():
+            return items
+        if trailing_space and _parse_single_positive_int_arg(count_part) is not None:
+            return self._merge_completion_items(
+                items,
+                [self._base_completion_item("| ", "snippet", "add where filter", score=82)],
+            )
+        return items
+
+    def _complete_hist(self, args: str, trailing_space: bool) -> list[CompletionItem]:
+        if "|" in args:
+            return self._predicate_completion_items()
+
+        base = args.strip()
+        if not base:
+            return self._numeric_column_completion_items()
+
+        parts = base.split()
+        if len(parts) == 1 and not trailing_space:
+            return self._numeric_column_completion_items()
+        if len(parts) == 1 and trailing_space:
+            return self._merge_completion_items(
+                self._numeric_completion_items([10, 20, 30, 50], detail="histogram bins"),
+                [self._base_completion_item("| ", "snippet", "add where filter", score=82)],
+            )
+        if len(parts) == 2:
+            return self._numeric_completion_items([10, 20, 30, 50], detail="histogram bins")
+        return []
+
+    def _complete_crosstab(self, args: str, trailing_space: bool) -> list[CompletionItem]:
+        if "|" in args:
+            return self._predicate_completion_items()
+
+        base = args.strip()
+        if not base:
+            return self._column_completion_items()
+
+        parts = base.split()
+        if len(parts) == 1:
+            return self._column_completion_items()
+        if len(parts) == 2 and trailing_space:
+            return self._merge_completion_items(
+                self._numeric_completion_items([self.default_limit, 10, 25, 50], detail="top pairs"),
+                [self._base_completion_item("| ", "snippet", "add where filter", score=82)],
+            )
+        if len(parts) == 2:
+            return self._column_completion_items()
+        if len(parts) == 3:
+            return self._numeric_completion_items([self.default_limit, 10, 25, 50], detail="top pairs")
+        return []
+
+    def _complete_corr(self, args: str, trailing_space: bool) -> list[CompletionItem]:
+        if "|" in args:
+            return self._predicate_completion_items()
+
+        base = args.strip()
+        if not base:
+            return self._numeric_column_completion_items()
+
+        parts = base.split()
+        if len(parts) == 1:
+            return self._numeric_column_completion_items()
+        if len(parts) == 2 and trailing_space:
+            return [self._base_completion_item("| ", "snippet", "add where filter", score=82)]
+        if len(parts) == 2:
+            return self._numeric_column_completion_items()
         return []
 
     def _complete_profile(self, args: str, trailing_space: bool) -> list[CompletionItem]:
@@ -1281,7 +1769,15 @@ class SqlExplorerEngine:
                 if key in seen:
                     continue
                 seen.add(key)
-                items.append(self._base_completion_item(raw_name, "helper_command", spec.description, score=180))
+                items.append(
+                    self._base_completion_item(
+                        raw_name,
+                        "helper_command",
+                        spec.description,
+                        usage=spec.usage,
+                        score=180,
+                    )
+                )
         return items
 
     def helper_argument_completion_items(
@@ -1420,7 +1916,10 @@ class SqlExplorerEngine:
         return tokens
 
     def completion_items(self, text: str, cursor_location: tuple[int, int]) -> list[CompletionItem]:
-        return self._completion_engine.get_items(text, cursor_location)
+        return self._completion_engine.get_result(text, cursor_location).items
+
+    def completion_result(self, text: str, cursor_location: tuple[int, int]) -> CompletionResult:
+        return self._completion_engine.get_result(text, cursor_location)
 
     def record_completion_acceptance(self, token: str) -> None:
         self._completion_engine.record_acceptance(token)
@@ -1430,7 +1929,7 @@ class CompletionEngine:
     def __init__(self, engine: SqlExplorerEngine) -> None:
         self._engine = engine
         self._sqlglot_tokenizer = SqlglotTokenizer()
-        self._completion_cache: dict[tuple[str, int, int, int], list[CompletionItem]] = {}
+        self._completion_cache: dict[tuple[str, int, int, int], CompletionResult] = {}
         self._completion_cache_limit = 192
         self._acceptance_counts: dict[str, int] = {}
         self._acceptance_revision = 0
@@ -1735,6 +2234,7 @@ class CompletionEngine:
                 insert_text=insert_text,
                 kind=candidate.kind,
                 detail=candidate.detail,
+                usage=candidate.usage,
                 replacement_start=replacement_start,
                 replacement_end=replacement_end,
                 score=dynamic_score,
@@ -1749,7 +2249,23 @@ class CompletionEngine:
         )
         return [pair[1] for pair in ranked_matches[:64]]
 
-    def get_items(self, text: str, cursor_location: tuple[int, int]) -> list[CompletionItem]:
+    @staticmethod
+    def _should_auto_open(context: CompletionContext, matched: list[CompletionItem]) -> tuple[bool, str]:
+        if not matched:
+            return False, "no-matches"
+        if context.mode == "helper":
+            if context.completing_command_name:
+                return True, "helper-command"
+            return True, "helper-args"
+        if context.inside_function_args:
+            return True, "sql-function-args"
+        if context.prefix:
+            return True, "sql-prefix"
+        if context.line_before_cursor.endswith((" ", "\t")):
+            return True, "sql-trailing-space"
+        return False, "sql-no-trigger"
+
+    def get_result(self, text: str, cursor_location: tuple[int, int]) -> CompletionResult:
         cache_key = (text, cursor_location[0], cursor_location[1], self._acceptance_revision)
         cached = self._completion_cache.get(cache_key)
         if cached is not None:
@@ -1757,7 +2273,9 @@ class CompletionEngine:
 
         context = self._build_context(text, cursor_location)
         if context is None:
-            return []
+            result = CompletionResult(items=[], should_auto_open=False, context_mode=None, reason="no-context")
+            self._completion_cache[cache_key] = result
+            return result
 
         matched: list[CompletionItem]
         if context.mode == "helper":
@@ -1765,13 +2283,20 @@ class CompletionEngine:
                 candidates = self._engine.helper_command_completion_items()
             else:
                 if context.helper_command is None:
-                    return []
+                    result = CompletionResult(
+                        items=[],
+                        should_auto_open=False,
+                        context_mode="helper",
+                        reason="missing-command",
+                    )
+                    self._completion_cache[cache_key] = result
+                    return result
                 candidates = self._engine.helper_argument_completion_items(
                     context.helper_command,
                     context.helper_args,
                     context.helper_has_trailing_space,
                 )
-                if not candidates:
+                if not candidates and not self._engine.has_helper_command(context.helper_command):
                     candidates = self._engine.helper_command_completion_items()
             matched = self._match_candidates(
                 candidates,
@@ -1792,8 +2317,18 @@ class CompletionEngine:
                 context.replacement_end,
             )
 
-        self._completion_cache[cache_key] = matched
+        should_auto_open, reason = self._should_auto_open(context, matched)
+        result = CompletionResult(
+            items=matched,
+            should_auto_open=should_auto_open,
+            context_mode=context.mode,
+            reason=reason,
+        )
+        self._completion_cache[cache_key] = result
         if len(self._completion_cache) > self._completion_cache_limit:
             oldest_key = next(iter(self._completion_cache))
             self._completion_cache.pop(oldest_key)
-        return matched
+        return result
+
+    def get_items(self, text: str, cursor_location: tuple[int, int]) -> list[CompletionItem]:
+        return self.get_result(text, cursor_location).items
