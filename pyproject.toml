@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sqlexplore"
-version = "0.2.0"
+version = "0.3.0"
 description = "SQL exploration over data files with your CLI"
 readme = "README.md"
 license = "MIT"
