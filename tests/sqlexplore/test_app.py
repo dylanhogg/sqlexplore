@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from rich.text import Text
-from textual.widgets import DataTable, OptionList, RichLog, Static
+from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.engine import CompletionItem, SqlExplorerEngine, app_version
 from sqlexplore.tui import SqlExplorerTui, SqlQueryEditor
@@ -32,13 +32,13 @@ def _build_app(
 
 
 def _log_text(app: SqlExplorerTui) -> str:
-    log = cast(Any, app.query_one("#activity_log", RichLog))
-    return "\n".join(str(line.text) for line in log.lines)
+    log = cast(Any, app.query_one("#activity_log", TextArea))
+    return str(log.text)
 
 
 def _preview_text(app: SqlExplorerTui) -> str:
-    preview = cast(Any, app.query_one("#results_preview", RichLog))
-    return "\n".join(str(line.text) for line in preview.lines)
+    preview = cast(Any, app.query_one("#results_preview", TextArea))
+    return str(preview.text)
 
 
 def _column_values(table: DataTable[str], column_index: int) -> list[str]:
@@ -227,6 +227,34 @@ def test_copy_tsv_shortcut_shows_error_when_no_result_available(tmp_path: Path) 
                 await pilot.press("f8")
                 await pilot.pause()
                 assert "No query result available to copy." in _log_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_activity_and_preview_selection_can_be_copied(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+
+                preview = app.query_one("#results_preview", TextArea)
+                preview.focus()
+                preview.action_select_all()
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+                assert (
+                    "Cell Preview:" in app.clipboard or "Move in Results to preview full cell value." in app.clipboard
+                )
+
+                activity = app.query_one("#activity_log", TextArea)
+                activity.focus()
+                activity.action_select_all()
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+                assert f"sqlexplore {app_version()}" in app.clipboard
         finally:
             engine.close()
 

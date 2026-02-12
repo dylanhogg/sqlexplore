@@ -5,7 +5,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-
+- Make http/https/ftp links clickable in the Results and Cell Preview panel. Highlight the links as blue (like default browser blue)
+- Make single cell values that are null/None a darker color than other normal text in the Results and Cell Preview panel.
 
 ## App code quality
 

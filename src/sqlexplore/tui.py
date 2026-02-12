@@ -9,21 +9,19 @@ from io import StringIO
 from typing import Any, Callable, cast
 
 from rich.highlighter import JSONHighlighter
-from rich.markup import escape as rich_escape
 from rich.syntax import Syntax
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.events import Blur, Focus, Key
-from textual.widgets import DataTable, Footer, Header, OptionList, RichLog, Static, TextArea
+from textual.widgets import DataTable, Footer, Header, OptionList, Static, TextArea
 
 from sqlexplore.engine import (
     DEFAULT_HELPER_COMMANDS,
     HELPER_PREFIX_RE,
     IDENT_PREFIX_RE,
     QUOTED_PREFIX_RE,
-    STATUS_STYLE_BY_RESULT,
     CompletionItem,
     CompletionResult,
     EngineResponse,
@@ -658,7 +656,7 @@ class SqlExplorerTui(App[None]):
     }
 
     #query_editor {
-        height: 10;
+        height: 5;
         border: round #4d7ea8;
     }
 
@@ -682,13 +680,13 @@ class SqlExplorerTui(App[None]):
     }
 
     #results_preview {
-        height: 8;
+        height: 5;
         border: round #5b8f67;
         color: #d8e3ec;
     }
 
     #activity_log {
-        height: 11;
+        height: 5;
         border: round #b18b3d;
     }
     """
@@ -706,6 +704,7 @@ class SqlExplorerTui(App[None]):
         self._sort_column_index: int | None = None
         self._sort_reverse = False
         self._last_results_tsv = ""
+        self._activity_lines: list[str] = []
         self._json_highlighter = JSONHighlighter()
         self._json_rendering_enabled = True
 
@@ -744,8 +743,11 @@ class SqlExplorerTui(App[None]):
     def _completion_hint(self) -> Static:
         return self.query_one("#completion_hint", Static)
 
-    def _results_preview(self) -> RichLog:
-        return self.query_one("#results_preview", RichLog)
+    def _results_preview(self) -> TextArea:
+        return self.query_one("#results_preview", TextArea)
+
+    def _activity_log(self) -> TextArea:
+        return self.query_one("#activity_log", TextArea)
 
     @staticmethod
     def completion_option_prompt(item: CompletionItem) -> str:
@@ -842,15 +844,19 @@ class SqlExplorerTui(App[None]):
                 yield Static("Tab accept | Esc close | Up/Down navigate", id="completion_hint")
                 yield Static("Results", id="results_header", classes="section-title")
                 yield DataTable(id="results_table")
-                yield RichLog(
+                yield TextArea(
+                    "",
                     id="results_preview",
-                    markup=False,
-                    highlight=False,
-                    wrap=True,
-                    auto_scroll=False,
+                    read_only=True,
+                    soft_wrap=True,
                 )
                 yield Static("Activity", classes="section-title")
-                yield RichLog(id="activity_log", markup=True, highlight=True, wrap=True)
+                yield TextArea(
+                    "",
+                    id="activity_log",
+                    read_only=True,
+                    soft_wrap=True,
+                )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1055,8 +1061,8 @@ class SqlExplorerTui(App[None]):
 
     def _set_results_preview_text(self, text: str) -> None:
         preview = self._results_preview()
-        preview.clear()
-        preview.write(text, scroll_end=False)
+        preview.load_text(text)
+        preview.move_cursor((0, 0))
 
     def _selected_cell_context_at(
         self,
@@ -1113,10 +1119,10 @@ class SqlExplorerTui(App[None]):
     ) -> None:
         type_label = _preview_type_label(type_name)
         header = f"Cell Preview: row={row_index + 1}, col={column_index + 1} ({column_name}), type={type_label}"
+        formatted_value, _ = self._format_preview_value(value, type_name)
         preview = self._results_preview()
-        preview.clear()
-        preview.write(header, scroll_end=False)
-        preview.write(self._render_preview_value(value, type_name), scroll_end=False)
+        preview.load_text(f"{header}\n{formatted_value}")
+        preview.move_cursor((0, 0))
 
     def _refresh_results_preview_from_cursor(self) -> None:
         selected = self._selected_cell_context()
@@ -1161,6 +1167,9 @@ class SqlExplorerTui(App[None]):
         self._refresh_results_preview_at(event.coordinate.row, event.coordinate.column)
 
     def _log(self, message: str, status: ResultStatus) -> None:
-        logger = self.query_one("#activity_log", RichLog)
-        style_prefix = f"[{STATUS_STYLE_BY_RESULT[status]}]"
-        logger.write(f"{style_prefix}{rich_escape(message)}[/]")
+        logger = self._activity_log()
+        self._activity_lines.append(f"[{status.upper()}] {message}")
+        logger.load_text("\n".join(self._activity_lines))
+        if logger.document.line_count:
+            last_line = logger.document.line_count - 1
+            logger.move_cursor((last_line, len(logger.document[last_line])))
