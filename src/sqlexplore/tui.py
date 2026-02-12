@@ -32,6 +32,7 @@ from sqlexplore.engine import (
     SqlExplorerEngine,
     app_version,
     format_scalar,
+    is_struct_type_name,
     is_varchar_type,
     result_columns,
     sort_cell_key,
@@ -39,6 +40,9 @@ from sqlexplore.engine import (
 
 CellValue = object
 RenderedCell = str | Text
+JsonObject = dict[str, object]
+JsonArray = list[object]
+JsonContainer = JsonObject | JsonArray
 
 
 class CompletionMode(Enum):
@@ -66,6 +70,8 @@ SHORTCUT_SPECS: tuple[ShortcutSpec, ...] = (
     ShortcutSpec("ctrl+1", "focus_editor", "Editor"),
     ShortcutSpec("ctrl+2", "focus_results", "Results"),
     ShortcutSpec("ctrl+b", "toggle_sidebar", "Data Explorer", key_display="^b"),
+    ShortcutSpec("f3", "toggle_json_rendering", "JSON View"),
+    ShortcutSpec("f2", "copy_selected_cell", "Copy Cell"),
     ShortcutSpec("f8", "copy_results_tsv", "Copy TSV"),
     ShortcutSpec("f1", "show_help", "Help"),
     ShortcutSpec("ctrl+shift+p", "show_help", "Help", show=False),
@@ -111,17 +117,17 @@ def _column_looks_like_json(rows: list[tuple[CellValue, ...]], column_index: int
         value = row[column_index]
         if value is None:
             continue
-        text = str(value).strip()
-        if not text:
+        sample_count += 1
+        if isinstance(value, dict | list):
+            valid_count += 1
+            if sample_count >= JSON_DETECTION_SAMPLE_SIZE:
+                break
             continue
 
-        sample_count += 1
-        if len(text) <= JSON_CELL_MAX_PARSE_CHARS and _looks_like_json_container(text):
-            try:
-                parsed = json.loads(text)
-            except (TypeError, ValueError):
-                parsed = None
-            if isinstance(parsed, dict | list):
+        text = str(value).strip()
+        if len(text) <= JSON_CELL_MAX_PARSE_CHARS and text and _looks_like_json_container(text):
+            parsed = _parse_json_container_text(text)
+            if parsed is not None:
                 valid_count += 1
 
         if sample_count >= JSON_DETECTION_SAMPLE_SIZE:
@@ -135,19 +141,144 @@ def _column_looks_like_json(rows: list[tuple[CellValue, ...]], column_index: int
     return valid_count >= required
 
 
-def _compact_json_cell(value: CellValue) -> str | None:
+def _coerce_json_container(value: object) -> JsonContainer | None:
+    if isinstance(value, dict):
+        normalized: JsonObject = {}
+        for key, item in cast(dict[object, object], value).items():
+            normalized[str(key)] = item
+        return normalized
+    if isinstance(value, list):
+        normalized_list: JsonArray = []
+        for item in cast(list[object], value):
+            normalized_list.append(item)
+        return normalized_list
+    if not isinstance(value, str):
+        return None
+    inner = value.strip()
+    if not inner or not _looks_like_json_container(inner):
+        return None
+    try:
+        parsed_obj = cast(object, json.loads(inner))
+    except (TypeError, ValueError):
+        return None
+    return _coerce_json_container(parsed_obj)
+
+
+def _parse_json_container_text(text: str) -> JsonContainer | None:
+    if not text:
+        return None
+    candidates = [text]
+    if '\\"' in text:
+        candidates.append(text.replace('\\"', '"'))
+    for candidate in candidates:
+        try:
+            parsed_obj = cast(object, json.loads(candidate))
+        except (TypeError, ValueError):
+            continue
+        container = _coerce_json_container(parsed_obj)
+        if container is not None:
+            return container
+    return None
+
+
+def _normalize_embedded_json(value: object, *, max_decode_depth: int = 2, decode_depth: int = 0) -> object:
+    if isinstance(value, dict):
+        normalized: JsonObject = {}
+        for key, item in cast(dict[object, object], value).items():
+            normalized[str(key)] = _normalize_embedded_json(
+                item,
+                max_decode_depth=max_decode_depth,
+                decode_depth=decode_depth,
+            )
+        return normalized
+    if isinstance(value, list):
+        normalized_list: JsonArray = []
+        for item in cast(list[object], value):
+            normalized_list.append(
+                _normalize_embedded_json(
+                    item,
+                    max_decode_depth=max_decode_depth,
+                    decode_depth=decode_depth,
+                )
+            )
+        return normalized_list
+    if not isinstance(value, str) or decode_depth >= max_decode_depth:
+        return value
+    parsed = _parse_json_container_text(value.strip())
+    if parsed is None:
+        return value
+    return _normalize_embedded_json(parsed, max_decode_depth=max_decode_depth, decode_depth=decode_depth + 1)
+
+
+def _compact_json_cell(value: object) -> str | None:
+    if isinstance(value, dict | list):
+        try:
+            normalized = _normalize_embedded_json(cast(object, value))
+            return json.dumps(normalized, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            return None
+
     text = str(value).strip()
     if not text or len(text) > JSON_CELL_MAX_PARSE_CHARS:
         return None
     if not _looks_like_json_container(text):
         return None
-    try:
-        parsed = json.loads(text)
-    except (TypeError, ValueError):
+    parsed = _parse_json_container_text(text)
+    if parsed is None:
         return None
-    if not isinstance(parsed, dict | list):
+    normalized = _normalize_embedded_json(parsed)
+    return json.dumps(normalized, separators=(",", ":"), default=str)
+
+
+def _style_at_offset(text: Text, offset: int) -> str | None:
+    for span in reversed(text.spans):
+        if span.start <= offset < span.end:
+            return str(span.style)
+    return None
+
+
+def _truncate_highlighted_text(text: Text, max_chars: int | None) -> Text:
+    plain = text.plain
+    if max_chars is None or len(plain) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    kept = max_chars - 3
+    out = text[:kept]
+    ellipsis_style = _style_at_offset(text, kept - 1)
+    out.append("...", style=ellipsis_style)
+    out.end = ""
+    out.no_wrap = True
+    return out
+
+
+def _preview_type_label(type_name: str) -> str:
+    if not type_name:
+        return "unknown"
+    if is_struct_type_name(type_name):
+        return "STRUCT"
+    stripped = type_name.strip()
+    if len(stripped) <= 40:
+        return stripped
+    return f"{stripped[:37]}..."
+
+
+def _pretty_json_cell(value: object) -> str | None:
+    if isinstance(value, dict | list):
+        try:
+            normalized = _normalize_embedded_json(cast(object, value))
+            return json.dumps(normalized, indent=2, default=str)
+        except (TypeError, ValueError):
+            return None
+
+    text = str(value).strip()
+    if not text or not _looks_like_json_container(text):
         return None
-    return json.dumps(parsed, separators=(",", ":"))
+    parsed = _parse_json_container_text(text)
+    if parsed is None:
+        return None
+    normalized = _normalize_embedded_json(parsed)
+    return json.dumps(normalized, indent=2, default=str)
 
 
 class SqlQueryEditor(TextArea):
@@ -550,6 +681,12 @@ class SqlExplorerTui(App[None]):
         border: round #5b8f67;
     }
 
+    #results_preview {
+        height: 8;
+        border: round #5b8f67;
+        color: #d8e3ec;
+    }
+
     #activity_log {
         height: 11;
         border: round #b18b3d;
@@ -570,6 +707,7 @@ class SqlExplorerTui(App[None]):
         self._sort_reverse = False
         self._last_results_tsv = ""
         self._json_highlighter = JSONHighlighter()
+        self._json_rendering_enabled = True
 
     def _reset_history_cursor(self) -> None:
         self._history_cursor = None
@@ -605,6 +743,9 @@ class SqlExplorerTui(App[None]):
 
     def _completion_hint(self) -> Static:
         return self.query_one("#completion_hint", Static)
+
+    def _results_preview(self) -> RichLog:
+        return self.query_one("#results_preview", RichLog)
 
     @staticmethod
     def completion_option_prompt(item: CompletionItem) -> str:
@@ -701,6 +842,13 @@ class SqlExplorerTui(App[None]):
                 yield Static("Tab accept | Esc close | Up/Down navigate", id="completion_hint")
                 yield Static("Results", id="results_header", classes="section-title")
                 yield DataTable(id="results_table")
+                yield RichLog(
+                    id="results_preview",
+                    markup=False,
+                    highlight=False,
+                    wrap=True,
+                    auto_scroll=False,
+                )
                 yield Static("Activity", classes="section-title")
                 yield RichLog(id="activity_log", markup=True, highlight=True, wrap=True)
         yield Footer()
@@ -710,6 +858,7 @@ class SqlExplorerTui(App[None]):
         table.zebra_stripes = True
         self._completion_menu().display = False
         self._completion_hint().display = False
+        self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
         self._log(f"sqlexplore {app_version()}", "info")
         for message in self._startup_activity_messages:
             self._log(message, "info")
@@ -746,6 +895,24 @@ class SqlExplorerTui(App[None]):
 
     def action_focus_results(self) -> None:
         self._results_table().focus()
+
+    def action_toggle_json_rendering(self) -> None:
+        self._json_rendering_enabled = not self._json_rendering_enabled
+        state = "on" if self._json_rendering_enabled else "off"
+        self._log(f"JSON formatting/highlighting {state}.", "info")
+        self._redraw_results_table()
+
+    def action_copy_selected_cell(self) -> None:
+        selected = self._selected_cell_context()
+        if selected is None:
+            self._log("No cell selected to copy.", "error")
+            return
+
+        row_index, column_index, value, column_name, type_name = selected
+        formatted = self._format_full_cell_value(value, type_name)
+        self.copy_to_clipboard(formatted)
+        self._update_results_preview(row_index, column_index, column_name, type_name, value)
+        self._log(f"Copied full cell value ({column_name}, row {row_index + 1}) to clipboard.", "ok")
 
     def action_toggle_sidebar(self) -> None:
         sidebar = self.query_one("#sidebar", Vertical)
@@ -822,6 +989,8 @@ class SqlExplorerTui(App[None]):
         self._redraw_results_table()
 
     def _detect_json_columns(self, result: QueryResult) -> set[int]:
+        if not self._json_rendering_enabled:
+            return set()
         if result.total_rows > JSON_HIGHLIGHT_MAX_TOTAL_ROWS:
             return set()
         if not result.rows:
@@ -831,6 +1000,9 @@ class SqlExplorerTui(App[None]):
 
         detected: set[int] = set()
         for index, type_name in enumerate(result.column_types):
+            if is_struct_type_name(type_name):
+                detected.add(index)
+                continue
             if not is_varchar_type(type_name):
                 continue
             if _column_looks_like_json(result.rows, index):
@@ -838,21 +1010,26 @@ class SqlExplorerTui(App[None]):
         return detected
 
     def _render_json_cell(self, value: CellValue) -> RenderedCell:
+        if not self._json_rendering_enabled:
+            return format_scalar(value, self.engine.max_value_chars)
         compact = _compact_json_cell(value)
         if compact is None:
             return format_scalar(value, self.engine.max_value_chars)
-        if len(compact) > self.engine.max_value_chars:
-            return format_scalar(compact, self.engine.max_value_chars)
-        text = Text(compact, end="", no_wrap=True)
-        self._json_highlighter.highlight(text)
-        return text
+        highlighted = Text(compact, end="", no_wrap=True)
+        self._json_highlighter.highlight(highlighted)
+        return _truncate_highlighted_text(highlighted, self.engine.max_value_chars)
+
+    def _json_rendering_status_suffix(self) -> str:
+        state = "on" if self._json_rendering_enabled else "off"
+        return f" [json:{state}]"
 
     def _redraw_results_table(self) -> None:
         result = self._active_result
         table = self._results_table()
         table.clear(columns=True)
         if result is None or not result.columns:
-            self.query_one("#results_header", Static).update("Results")
+            self.query_one("#results_header", Static).update(f"Results{self._json_rendering_status_suffix()}")
+            self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
             return
 
         table.add_columns(*result.columns)
@@ -872,7 +1049,89 @@ class SqlExplorerTui(App[None]):
         if self._sort_column_index is not None and self._sort_column_index < len(result.columns):
             direction = "desc" if self._sort_reverse else "asc"
             header += f" [sorted: {result.columns[self._sort_column_index]} {direction}]"
+        header += self._json_rendering_status_suffix()
         self.query_one("#results_header", Static).update(header)
+        self._refresh_results_preview_from_cursor()
+
+    def _set_results_preview_text(self, text: str) -> None:
+        preview = self._results_preview()
+        preview.clear()
+        preview.write(text, scroll_end=False)
+
+    def _selected_cell_context_at(
+        self,
+        row_index: int,
+        column_index: int,
+    ) -> tuple[int, int, CellValue, str, str] | None:
+        result = self._active_result
+        if result is None or not result.rows:
+            return None
+        if row_index < 0 or row_index >= len(result.rows):
+            return None
+        row = result.rows[row_index]
+        if column_index < 0 or column_index >= len(row):
+            return None
+        column_name = result.columns[column_index] if column_index < len(result.columns) else f"col_{column_index + 1}"
+        type_name = result.column_types[column_index] if column_index < len(result.column_types) else ""
+        return row_index, column_index, row[column_index], column_name, type_name
+
+    def _selected_cell_context(self) -> tuple[int, int, CellValue, str, str] | None:
+        table = self._results_table()
+        return self._selected_cell_context_at(table.cursor_row, table.cursor_column)
+
+    def _format_full_cell_value(self, value: CellValue, type_name: str) -> str:
+        formatted_value, _ = self._format_preview_value(value, type_name)
+        return formatted_value
+
+    def _format_preview_value(self, value: CellValue, type_name: str) -> tuple[str, bool]:
+        value_any = cast(Any, value)
+        if value is None:
+            return "NULL", False
+        if not self._json_rendering_enabled:
+            return str(value_any), False
+        should_try_json = is_struct_type_name(type_name) or is_varchar_type(type_name) or isinstance(value, dict | list)
+        if should_try_json:
+            pretty = _pretty_json_cell(value_any)
+            if pretty is not None:
+                return pretty, True
+        return str(value_any), False
+
+    def _render_preview_value(self, value: CellValue, type_name: str) -> Text:
+        formatted_value, is_json = self._format_preview_value(value, type_name)
+        rendered = Text(formatted_value, end="")
+        if is_json:
+            self._json_highlighter.highlight(rendered)
+        return rendered
+
+    def _update_results_preview(
+        self,
+        row_index: int,
+        column_index: int,
+        column_name: str,
+        type_name: str,
+        value: CellValue,
+    ) -> None:
+        type_label = _preview_type_label(type_name)
+        header = f"Cell Preview: row={row_index + 1}, col={column_index + 1} ({column_name}), type={type_label}"
+        preview = self._results_preview()
+        preview.clear()
+        preview.write(header, scroll_end=False)
+        preview.write(self._render_preview_value(value, type_name), scroll_end=False)
+
+    def _refresh_results_preview_from_cursor(self) -> None:
+        selected = self._selected_cell_context()
+        if selected is None:
+            self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
+            return
+        row_index, column_index, value, column_name, type_name = selected
+        self._update_results_preview(row_index, column_index, column_name, type_name, value)
+
+    def _refresh_results_preview_at(self, row_index: int, column_index: int) -> None:
+        selected = self._selected_cell_context_at(row_index, column_index)
+        if selected is None:
+            return
+        selected_row, selected_column, value, column_name, type_name = selected
+        self._update_results_preview(selected_row, selected_column, column_name, type_name, value)
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         result = self._active_result
@@ -894,6 +1153,12 @@ class SqlExplorerTui(App[None]):
         self._redraw_results_table()
         direction = "DESC" if self._sort_reverse else "ASC"
         self._log(f"Sorted results by {event.label.plain} {direction}", "info")
+
+    def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted) -> None:
+        self._refresh_results_preview_at(event.coordinate.row, event.coordinate.column)
+
+    def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        self._refresh_results_preview_at(event.coordinate.row, event.coordinate.column)
 
     def _log(self, message: str, status: ResultStatus) -> None:
         logger = self.query_one("#activity_log", RichLog)

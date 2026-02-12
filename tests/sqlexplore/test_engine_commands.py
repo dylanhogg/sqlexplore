@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlexplore.engine import SqlExplorerEngine
+from sqlexplore.engine import (
+    SqlExplorerEngine,
+    flatten_struct_paths,
+    is_struct_type,
+    parse_struct_fields,
+)
 
 
 def _build_engine(tmp_path: Path, csv_text: str = "col_name,x\na,1\nb,2\na,3\n") -> SqlExplorerEngine:
@@ -25,6 +30,61 @@ def _completion_values(engine: SqlExplorerEngine, text: str) -> list[str]:
 
 def _completion_result(engine: SqlExplorerEngine, text: str):
     return engine.completion_result(text, (0, len(text)))
+
+
+def test_struct_type_helpers_parse_nested_fields(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        relation = engine.conn.execute("SELECT {'a': 1, 'b': {'c': 2, 'd': 'x'}, 'zip': '98101'} AS s")
+        dtype = relation.description[0][1]
+        assert is_struct_type(dtype) is True
+        assert is_struct_type(dtype.children[0][1]) is False
+
+        fields = parse_struct_fields(dtype)
+    finally:
+        engine.close()
+
+    assert [field.name for field in fields] == ["a", "b", "zip"]
+    assert fields[0].type_name == "INTEGER"
+    assert fields[1].type_name == "STRUCT(c INTEGER, d VARCHAR)"
+    assert [child.name for child in fields[1].children] == ["c", "d"]
+    assert fields[2].type_name == "VARCHAR"
+
+    paths = flatten_struct_paths(fields)
+    assert ("a", "INTEGER") in paths
+    assert ("b", "STRUCT(c INTEGER, d VARCHAR)") in paths
+    assert ("b.c", "INTEGER") in paths
+    assert ("b.d", "VARCHAR") in paths
+    assert ("zip", "VARCHAR") in paths
+
+
+def test_refresh_schema_populates_struct_metadata_by_column(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        assert engine.struct_fields_by_column == {}
+        assert engine.struct_paths_by_column == {}
+
+        engine.conn.execute(
+            """CREATE TABLE struct_source AS
+            SELECT {'zip': x, 'city': col_name, 'nested': {'k': x}} AS profile
+            FROM "data" """
+        )
+        engine.conn.execute('DROP VIEW "data"')
+        engine.conn.execute('CREATE VIEW "data" AS SELECT * FROM struct_source')
+        engine.refresh_schema()
+
+        assert list(engine.struct_fields_by_column) == ["profile"]
+        fields = engine.struct_fields_by_column["profile"]
+        assert [field.name for field in fields] == ["zip", "city", "nested"]
+
+        path_types = dict(engine.struct_paths_by_column["profile"])
+        assert "zip" in path_types
+        assert "city" in path_types
+        assert "nested" in path_types
+        assert "nested.k" in path_types
+        assert path_types["city"].upper().startswith("VARCHAR")
+    finally:
+        engine.close()
 
 
 def test_group_shorthand_generates_count_query(tmp_path: Path) -> None:

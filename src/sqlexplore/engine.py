@@ -225,6 +225,16 @@ class FileReader:
     args: str
 
 
+@dataclass(frozen=True, slots=True)
+class StructField:
+    name: str
+    type_name: str
+    children: tuple["StructField", ...] = ()
+
+
+StructPath = tuple[str, str]
+
+
 def _detect_reader(file_path: Path) -> FileReader:
     suffix = file_path.suffix.lower()
     if suffix == ".csv":
@@ -344,6 +354,57 @@ def is_varchar_type(type_name: str) -> bool:
     return any(marker in upper for marker in ("CHAR", "TEXT", "STRING", "VARCHAR"))
 
 
+def is_struct_type_name(type_name: str) -> bool:
+    stripped = type_name.strip()
+    if len(stripped) < 7:
+        return False
+    if stripped[:6].casefold() != "struct":
+        return False
+    return stripped[6:].lstrip().startswith("(")
+
+
+def _type_id(dtype: Any) -> str:
+    return str(getattr(dtype, "id", "")).casefold()
+
+
+def _type_children(dtype: Any) -> tuple[tuple[str, Any], ...]:
+    try:
+        raw_children = getattr(dtype, "children")
+    except Exception:  # noqa: BLE001
+        return ()
+    children: list[tuple[str, Any]] = []
+    for child_name, child_type in raw_children:
+        children.append((str(child_name), child_type))
+    return tuple(children)
+
+
+def is_struct_type(dtype: Any) -> bool:
+    return _type_id(dtype) == "struct"
+
+
+def parse_struct_fields(dtype: Any) -> tuple[StructField, ...]:
+    if not is_struct_type(dtype):
+        return ()
+    return tuple(
+        StructField(
+            name=child_name,
+            type_name=str(child_type),
+            children=parse_struct_fields(child_type),
+        )
+        for child_name, child_type in _type_children(dtype)
+    )
+
+
+def flatten_struct_paths(fields: tuple[StructField, ...], prefix: str = "") -> tuple[StructPath, ...]:
+    paths: list[StructPath] = []
+    for field in fields:
+        path = f"{prefix}.{field.name}" if prefix else field.name
+        paths.append((path, field.type_name))
+        if field.children:
+            paths.extend(flatten_struct_paths(field.children, path))
+    return tuple(paths)
+
+
 def sort_cell_key(value: Any) -> tuple[int, int, float | str]:
     if value is None:
         return (2, 0, "")
@@ -387,6 +448,8 @@ class SqlExplorerEngine:
         self._schema_rows: list[tuple[Any, ...]] = []
         self.columns: list[str] = []
         self.column_types: dict[str, str] = {}
+        self.struct_fields_by_column: dict[str, tuple[StructField, ...]] = {}
+        self.struct_paths_by_column: dict[str, tuple[StructPath, ...]] = {}
         self.column_lookup: dict[str, str] = {}
         self._column_completion_cache: list[CompletionItem] | None = None
         self._aggregate_completion_cache: list[CompletionItem] | None = None
@@ -411,8 +474,35 @@ class SqlExplorerEngine:
         self._schema_rows = [tuple(row) for row in schema_rows]
         self.columns = [str(row[0]) for row in self._schema_rows]
         self.column_types = {str(row[0]): str(row[1]) for row in self._schema_rows}
+        type_objects = self._column_type_objects_from_table()
+        self.struct_fields_by_column, self.struct_paths_by_column = self._build_struct_metadata(type_objects)
         self.column_lookup = {col.lower(): col for col in self.columns}
         self._invalidate_completion_caches()
+
+    def _column_type_objects_from_table(self) -> dict[str, Any]:
+        description = self.conn.execute(f'SELECT * FROM "{self.table_name}" LIMIT 0').description
+        if not description:
+            return {}
+        return {str(item[0]): item[1] for item in description if len(item) >= 2}
+
+    @classmethod
+    def _build_struct_metadata(
+        cls,
+        column_type_objects: dict[str, Any],
+    ) -> tuple[dict[str, tuple[StructField, ...]], dict[str, tuple[StructPath, ...]]]:
+        struct_fields_by_column: dict[str, tuple[StructField, ...]] = {}
+        struct_paths_by_column: dict[str, tuple[StructPath, ...]] = {}
+        for column_name, dtype in column_type_objects.items():
+            fields = cls._struct_fields_for_type(dtype)
+            if not fields:
+                continue
+            struct_fields_by_column[column_name] = fields
+            struct_paths_by_column[column_name] = flatten_struct_paths(fields)
+        return struct_fields_by_column, struct_paths_by_column
+
+    @staticmethod
+    def _struct_fields_for_type(dtype: Any) -> tuple[StructField, ...]:
+        return parse_struct_fields(dtype)
 
     def _invalidate_completion_caches(self) -> None:
         self._column_completion_cache = None

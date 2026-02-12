@@ -36,6 +36,11 @@ def _log_text(app: SqlExplorerTui) -> str:
     return "\n".join(str(line.text) for line in log.lines)
 
 
+def _preview_text(app: SqlExplorerTui) -> str:
+    preview = cast(Any, app.query_one("#results_preview", RichLog))
+    return "\n".join(str(line.text) for line in preview.lines)
+
+
 def _column_values(table: DataTable[str], column_index: int) -> list[str]:
     return [str(table.get_row_at(row_index)[column_index]) for row_index in range(table.row_count)]
 
@@ -346,6 +351,346 @@ def test_json_highlighting_keeps_sorting_behavior(tmp_path: Path) -> None:
             engine.close()
 
     asyncio.run(run())
+
+
+def test_json_highlighting_applies_to_struct_column(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "SELECT {'a': 1, 'b': {'c': 2}} AS s"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                cell = results.get_row_at(0)[0]
+                assert isinstance(cell, Text)
+                assert cell.plain == '{"a":1,"b":{"c":2}}'
+                assert any("json.key" in str(span.style) for span in cell.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_keeps_highlighting_when_json_is_truncated(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = (
+            "id,j\n"
+            '1,"{""a"":1,""b"":2,""c"":3,""d"":4,""e"":5,""f"":6}"\n'
+            '2,"{""a"":7,""b"":8,""c"":9,""d"":10,""e"":11,""f"":12}"\n'
+            '3,"{""a"":13,""b"":14,""c"":15,""d"":16,""e"":17,""f"":18}"\n'
+        )
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        engine.max_value_chars = 20
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                cell = results.get_row_at(0)[1]
+                assert isinstance(cell, Text)
+                assert cell.plain.endswith("...")
+                assert any("json.key" in str(span.style) for span in cell.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_keeps_highlighting_when_struct_is_truncated(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        engine.max_value_chars = 40
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "SELECT {'a': 1, 'long_key_name': {'c': 2, 'd': 3, 'e': 4}, 'tail': 'abcdef'} AS s"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                cell = results.get_row_at(0)[0]
+                assert isinstance(cell, Text)
+                assert cell.plain.endswith("...")
+                assert any("json.key" in str(span.style) for span in cell.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_keeps_truncated_array_string_tail_styled(tmp_path: Path) -> None:
+    async def run() -> None:
+        long_json = (
+            '["vertex_ai|gemini-api","vertex_ai|gemini-api","vertex_ai|gemini-api",'
+            '"vertex_ai|gemini-api","vertex_ai|gemini-api","vertex_ai|gemini-api","vertex_ai|gemini-api"]'
+        )
+        escaped_json = long_json.replace('"', '""')
+        csv_text = f'id,j\n1,"{escaped_json}"\n2,"{escaped_json}"\n3,"{escaped_json}"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        engine.max_value_chars = 130
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                cell = results.get_row_at(0)[1]
+                assert isinstance(cell, Text)
+                assert cell.plain.endswith("...")
+                end_offset = len(cell.plain) - 1
+                assert any("json.str" in str(span.style) and span.start <= end_offset < span.end for span in cell.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_json_highlighting_decodes_escaped_json_object_strings_in_varchar(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        engine.max_value_chars = 500
+        escaped_schema_json = (
+            '["{\\"type\\":\\"object\\",\\"properties\\":{\\"channel\\":{\\"type\\":\\"string\\"}}}",'
+            '"{\\"type\\":\\"object\\",\\"properties\\":{\\"id\\":{\\"type\\":\\"integer\\"}}}"]'
+        )
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = (
+                    "SELECT * FROM (VALUES "
+                    f"('{escaped_schema_json}'), ('{escaped_schema_json}'), ('{escaped_schema_json}')"
+                    ") AS t(schema_json)"
+                )
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                cell = results.get_row_at(0)[0]
+                assert isinstance(cell, Text)
+                assert '[{"type":"object"' in cell.plain
+                assert '\\"type\\"' not in cell.plain
+                assert any("json.key" in str(span.style) for span in cell.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_preview_shows_pretty_struct_and_updates_with_cursor(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "SELECT {'a': 1, 'deep': {'b': 2}} AS s, 'plain' AS note"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                preview_text = _preview_text(app)
+                assert '"a": 1' in preview_text
+                assert '"deep": {' in preview_text
+                assert '"b": 2' in preview_text
+                assert "col=1 (s)" in preview_text
+
+                await pilot.press("ctrl+2")
+                await pilot.pause()
+                await pilot.press("right")
+                await pilot.pause()
+
+                preview_text = _preview_text(app)
+                assert "col=2 (note)" in preview_text
+                assert "plain" in preview_text
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_f2_copies_full_selected_cell_value(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        engine.max_value_chars = 30
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "SELECT {'very_long_key_name': 'abcdefghijklmnopqrstuvwxyz', 'nested': {'x': 1}} AS s"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                rendered = results.get_row_at(0)[0]
+                assert isinstance(rendered, Text)
+                assert rendered.plain.endswith("...")
+
+                await pilot.press("ctrl+2")
+                await pilot.pause()
+                await pilot.press("f2")
+                await pilot.pause()
+
+                copied = app.clipboard
+                assert '"very_long_key_name": "abcdefghijklmnopqrstuvwxyz"' in copied
+                assert '"nested": {' in copied
+                assert '"x": 1' in copied
+                assert "Copied full cell value" in _log_text(app)
+                assert '"very_long_key_name": "abcdefghijklmnopqrstuvwxyz"' in _preview_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_preview_tracks_correct_row_value_on_cursor_move(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = (
+                    "SELECT {'row_name': 'first', 'x': 1} AS s UNION ALL SELECT {'row_name': 'second', 'x': 2} AS s"
+                )
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                assert '"row_name": "first"' in _preview_text(app)
+                assert '"x": 1' in _preview_text(app)
+
+                await pilot.press("ctrl+2")
+                await pilot.pause()
+                await pilot.press("down")
+                await pilot.pause()
+
+                preview_text = _preview_text(app)
+                assert '"row_name": "second"' in preview_text
+                assert '"x": 2' in preview_text
+                assert '"row_name": "first"' not in preview_text
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_preview_struct_uses_value_not_schema_type_text(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = (
+                    "SELECT {'property_channel': 'rent', 'property_location': "
+                    "[{'state': 'NSW', 'suburb': 'Macquarie Park'}]} AS property_filters"
+                )
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                preview = _preview_text(app)
+                assert "type=STRUCT" in preview
+                assert '"property_channel": "rent"' in preview
+                assert '"state": "NSW"' in preview
+                assert '"suburb": "Macquarie Park"' in preview
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_preview_formats_json_varchar_with_indent(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = 'id,j\n1,"{""a"":1,""b"":{""c"":2}}"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("ctrl+2")
+                await pilot.pause()
+                await pilot.press("right")
+                await pilot.pause()
+
+                preview = _preview_text(app)
+                assert "type=VARCHAR" in preview
+                assert '"a": 1' in preview
+                assert '"b": {' in preview
+                assert '  "c": 2' in preview
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_f3_toggles_results_json_rendering_and_header_status(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = 'id,j\n1,"{""a"":1}"\n2,"{""a"":2}"\n3,"{""a"":3}"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                header = app.query_one("#results_header", Static)
+
+                assert isinstance(results.get_row_at(0)[1], Text)
+                assert "[json:on]" in str(header.render())
+
+                await pilot.press("f3")
+                await pilot.pause()
+                assert isinstance(results.get_row_at(0)[1], str)
+                assert "[json:off]" in str(header.render())
+
+                await pilot.press("f3")
+                await pilot.pause()
+                assert isinstance(results.get_row_at(0)[1], Text)
+                assert "[json:on]" in str(header.render())
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_f3_toggles_preview_json_formatting_for_struct(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "SELECT {'a': 1, 'b': {'c': 2}} AS s"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                preview = _preview_text(app)
+                assert '"a": 1' in preview
+                assert '"b": {' in preview
+
+                await pilot.press("f3")
+                await pilot.pause()
+                preview = _preview_text(app)
+                assert "{'a': 1, 'b': {'c': 2}}" in preview
+                assert '"a": 1' not in preview
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_preview_render_value_highlights_json_for_struct_and_varchar(tmp_path: Path) -> None:
+    app, engine = _build_app(tmp_path)
+    try:
+        private_app = cast(Any, app)
+        varchar_rendered = private_app._render_preview_value('{"a":1,"b":{"c":2}}', "VARCHAR")
+        struct_rendered = private_app._render_preview_value(
+            {"a": 1, "b": {"c": 2}},
+            "STRUCT(a INTEGER, b STRUCT(c INTEGER))",
+        )
+        assert any("json.key" in str(span.style) for span in varchar_rendered.spans)
+        assert any("json.key" in str(span.style) for span in struct_rendered.spans)
+
+        private_app._json_rendering_enabled = False
+        no_highlight = private_app._render_preview_value('{"a":1}', "VARCHAR")
+        assert no_highlight.spans == []
+    finally:
+        engine.close()
 
 
 def test_completion_menu_auto_opens_for_prefix_and_down_navigates(tmp_path: Path) -> None:

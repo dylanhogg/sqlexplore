@@ -5,16 +5,12 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-a. Add test cov tool for feedabck
-b. Add "use asserts" to AGENTS.md
 
-1. Look at current slash helper commands. Brainstorm new and better helper slash commands for quick data exploration and analysis. Describe their usage/arguments, give examples, and describe why they are useful.
-2. Add a table /summary slash command that shows a summary of the table, including column names, data types, and sample values, min, max, avg len, etc.
 
 ## App code quality
 
-- Run key binding clean up and review task
-- Show version in app, sync with pypi and pyproject.toml
+- Add test cov tool for feedabck
+- Add "use asserts" to AGENTS.md
 
 ## UI & UX (layout, navigation, keybindings)
 
