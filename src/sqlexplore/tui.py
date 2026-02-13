@@ -16,6 +16,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
+from textual.coordinate import Coordinate
 from textual.events import Blur, Focus, Key
 from textual.widget import Widget
 from textual.widgets import DataTable, Footer, Header, OptionList, Static, TextArea
@@ -697,6 +698,34 @@ class ResultsPreview(TextArea):
         return rendered
 
 
+class ResultsTable(DataTable[RenderedCell]):
+    COMPONENT_CLASSES = DataTable.COMPONENT_CLASSES | {"results-table--cursor-row"}
+    DEFAULT_CSS = """
+    ResultsTable > .results-table--cursor-row {
+        background: #223744;
+    }
+    """
+
+    def _get_row_style(self, row_index: int, base_style: Style) -> Style:
+        row_style = super()._get_row_style(row_index, base_style)
+        if not self.show_cursor or self.cursor_type != "cell":
+            return row_style
+        if row_index < 0 or row_index != self.cursor_row:
+            return row_style
+        return row_style + self.get_component_styles("results-table--cursor-row").rich_style
+
+    def watch_cursor_coordinate(
+        self,
+        old_coordinate: Coordinate,
+        new_coordinate: Coordinate,
+    ) -> None:
+        super().watch_cursor_coordinate(old_coordinate, new_coordinate)
+        if self.cursor_type != "cell":
+            return
+        for row_index in {old_coordinate.row, new_coordinate.row}:
+            self.refresh_row(row_index)
+
+
 class SqlExplorerTui(App[None]):
     TITLE = "sqlexplorer"
     SUB_TITLE = "explore your data"
@@ -920,7 +949,7 @@ class SqlExplorerTui(App[None]):
                 yield OptionList(id="completion_menu")
                 yield Static("Tab accept | Esc close | Up/Down navigate", id="completion_hint")
                 yield Static("Results", id="results_header", classes="section-title")
-                yield DataTable(id="results_table")
+                yield ResultsTable(id="results_table")
                 yield ResultsPreview("", id="results_preview")
                 yield Static("Activity", classes="section-title")
                 yield TextArea(

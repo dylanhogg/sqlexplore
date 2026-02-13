@@ -5,6 +5,7 @@ import csv
 from io import StringIO
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 from rich.text import Text
 from textual.widgets import DataTable, OptionList, Static, TextArea
@@ -463,6 +464,69 @@ def test_results_header_click_sorts_asc_desc(tmp_path: Path) -> None:
                 app.on_data_table_header_selected(click)
                 await pilot.pause()
                 assert _column_values(results, 1) == ["100", "20", "3"]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_selected_cell_adds_subtle_row_indicator(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,x\n2,y\n")
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                private_table = cast(Any, results)
+
+                row_indicator = results.get_component_styles("results-table--cursor-row").rich_style
+                assert row_indicator.bgcolor is not None
+
+                selected_style = private_table._get_row_style(results.cursor_row, results.rich_style)
+                unselected_style = private_table._get_row_style(1, results.rich_style)
+                assert selected_style.bgcolor == row_indicator.bgcolor
+                assert unselected_style.bgcolor != row_indicator.bgcolor
+
+                results.move_cursor(row=1, column=0)
+                await pilot.pause()
+
+                moved_selected_style = private_table._get_row_style(results.cursor_row, results.rich_style)
+                moved_unselected_style = private_table._get_row_style(0, results.rich_style)
+                assert moved_selected_style.bgcolor == row_indicator.bgcolor
+                assert moved_unselected_style.bgcolor != row_indicator.bgcolor
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_row_indicator_refreshes_on_cell_cursor_changes(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,x\n2,y\n")
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+
+                with patch.object(results, "refresh_row", wraps=results.refresh_row) as refresh_row:
+                    results.move_cursor(row=1, column=0)
+                    await pilot.pause()
+                    refreshed_rows = [cast(int, call.args[0]) for call in refresh_row.call_args_list]
+                    assert 0 in refreshed_rows
+                    assert 1 in refreshed_rows
+
+                    refresh_row.reset_mock()
+                    results.move_cursor(row=1, column=1)
+                    await pilot.pause()
+                    refreshed_rows = [cast(int, call.args[0]) for call in refresh_row.call_args_list]
+                    assert 1 in refreshed_rows
+
+                    refresh_row.reset_mock()
+                    results.move_cursor(row=1, column=1)
+                    await pilot.pause()
+                    refreshed_rows = [cast(int, call.args[0]) for call in refresh_row.call_args_list]
+                    assert refreshed_rows == [1]
         finally:
             engine.close()
 

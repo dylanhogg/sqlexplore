@@ -5,7 +5,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Make single cell values that are null/None a darker color than other normal text in the Results and Cell Preview panel.
+- Enable load text file where each line is a single column value.
 - Enable column sorting by clicking on the column header.
 - Ensure SQL always writting to the Activity panel.
 
