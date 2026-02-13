@@ -105,6 +105,8 @@ JSON_DETECTION_MIN_RATIO = 0.7
 JSON_CELL_MAX_PARSE_CHARS = 4_096
 URL_COLOR = "#74B6E6"
 URL_STYLE = Style(color=URL_COLOR, underline=True)
+NULL_VALUE_COLOR = "#9CB0C2"
+NULL_VALUE_STYLE = Style(color=NULL_VALUE_COLOR)
 URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
 URL_RE = re.compile(r"(?P<url>(?:https?|ftp)://[^\s<>'\"`]+)", re.IGNORECASE)
 
@@ -136,12 +138,6 @@ def _stylize_links(text: Text, *, clickable: bool) -> bool:
         text.stylize(_url_style(url, clickable=clickable), start, end)
         matched = True
     return matched
-
-
-def _render_text_with_links(text: str, *, clickable: bool) -> Text:
-    rendered = Text(text, end="")
-    _stylize_links(rendered, clickable=clickable)
-    return rendered
 
 
 def _looks_like_json_container(text: str) -> bool:
@@ -672,6 +668,7 @@ class ResultsPreview(TextArea):
     def __init__(self, content: PreviewContent = "", **kwargs: Any) -> None:
         super().__init__("", read_only=True, soft_wrap=True, **kwargs)
         self._content: PreviewContent = ""
+        self._rendered_lines: list[Text] | None = None
         self.update(content)
 
     @property
@@ -680,13 +677,22 @@ class ResultsPreview(TextArea):
 
     def update(self, content: PreviewContent = "", *, layout: bool = True) -> None:
         self._content = content
-        content_text = content.plain if isinstance(content, Text) else str(content)
+        if isinstance(content, Text):
+            self._rendered_lines = list(content.split("\n", allow_blank=True))
+            content_text = content.plain
+        else:
+            self._rendered_lines = None
+            content_text = str(content)
         self.load_text(content_text)
         self.move_cursor((0, 0))
 
     def get_line(self, line_index: int) -> Text:
-        line_text = self.document.get_line(line_index)
-        rendered = Text(line_text, end="")
+        if self._rendered_lines is not None and line_index < len(self._rendered_lines):
+            rendered = self._rendered_lines[line_index].copy()
+            rendered.end = ""
+        else:
+            line_text = self.document.get_line(line_index)
+            rendered = Text(line_text, end="")
         _stylize_links(rendered, clickable=True)
         return rendered
 
@@ -928,6 +934,7 @@ class SqlExplorerTui(App[None]):
     def on_mount(self) -> None:
         table = self._results_table()
         table.zebra_stripes = True
+        self.query_one("#sidebar", Vertical).display = False
         self._completion_menu().display = False
         self._completion_hint().display = False
         self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
@@ -1098,6 +1105,8 @@ class SqlExplorerTui(App[None]):
         return truncated
 
     def _render_scalar_cell(self, value: CellValue) -> RenderedCell:
+        if value is None:
+            return Text("NULL", style=NULL_VALUE_STYLE, end="", no_wrap=True)
         text = format_scalar(value, self.engine.max_value_chars)
         rendered = Text(text, end="", no_wrap=True)
         if not _stylize_links(rendered, clickable=False):
@@ -1141,7 +1150,7 @@ class SqlExplorerTui(App[None]):
     def _set_results_preview_text(self, text: str) -> None:
         preview = self._results_preview()
         self._results_preview_plain_text = text
-        preview.update(_render_text_with_links(text, clickable=True))
+        preview.update(text)
         preview.scroll_home(animate=False, immediate=True)
 
     def _selected_cell_context_at(
@@ -1183,6 +1192,8 @@ class SqlExplorerTui(App[None]):
         return str(value_any), False
 
     def _render_preview_value(self, value: CellValue, type_name: str) -> Text:
+        if value is None:
+            return Text("NULL", style=NULL_VALUE_STYLE, end="")
         formatted_value, is_json = self._format_preview_value(value, type_name)
         rendered = Text(formatted_value, end="")
         if is_json:
@@ -1211,11 +1222,11 @@ class SqlExplorerTui(App[None]):
         type_label = _preview_type_label(type_name)
         value_len = self._safe_len(value)
         header = f"{column_name}, {type_label}, row {row_index + 1}, col {column_index + 1}, len {value_len}"
-        formatted_value, _ = self._format_preview_value(value, type_name)
-        preview_text = f"{header}\n{formatted_value}"
+        preview_text = Text(f"{header}\n", end="")
+        preview_text.append_text(self._render_preview_value(value, type_name))
         preview = self._results_preview()
-        self._results_preview_plain_text = preview_text
-        preview.update(_render_text_with_links(preview_text, clickable=True))
+        self._results_preview_plain_text = preview_text.plain
+        preview.update(preview_text)
         preview.scroll_home(animate=False, immediate=True)
 
     def _refresh_results_preview_from_cursor(self) -> None:

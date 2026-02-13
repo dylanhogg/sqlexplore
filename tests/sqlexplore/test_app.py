@@ -10,7 +10,7 @@ from rich.text import Text
 from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.engine import CompletionItem, SqlExplorerEngine, app_version
-from sqlexplore.tui import URL_COLOR, ResultsPreview, SqlExplorerTui, SqlQueryEditor
+from sqlexplore.tui import NULL_VALUE_COLOR, URL_COLOR, ResultsPreview, SqlExplorerTui, SqlQueryEditor
 
 
 def _build_app(
@@ -62,6 +62,10 @@ def _visible_binding_order(bindings: list[Any]) -> list[tuple[str, str]]:
 
 def _has_url_color(style: Any) -> bool:
     return URL_COLOR.lower() in str(style).lower()
+
+
+def _has_null_value_color(style: Any) -> bool:
+    return style is not None and NULL_VALUE_COLOR.lower() in str(style).lower()
 
 
 def test_query_and_results_panes_share_status_key_order() -> None:
@@ -367,21 +371,74 @@ def test_cell_preview_links_are_clickable_but_results_links_are_not(tmp_path: Pa
     asyncio.run(run())
 
 
+def test_preview_pane_preserves_json_highlighting(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = 'SELECT \'{"a":1,"b":{"c":2}}\' AS j'
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                preview = app.query_one("#results_preview", ResultsPreview)
+                rendered_lines = [preview.get_line(index) for index in range(preview.document.line_count)]
+                assert any("json.key" in str(span.style) for line in rendered_lines for span in line.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_null_value_text_is_darker_in_results_and_preview(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "SELECT NULL AS n"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                result_cell = results.get_row_at(0)[0]
+                assert isinstance(result_cell, Text)
+                assert result_cell.plain == "NULL"
+                assert _has_null_value_color(result_cell.style)
+
+                preview = app.query_one("#results_preview", ResultsPreview)
+                preview_content = cast(Any, preview.content)
+                assert isinstance(preview_content, Text)
+                null_start = preview_content.plain.rfind("NULL")
+                assert null_start >= 0
+                assert any(
+                    _has_null_value_color(span.style)
+                    for span in preview_content.spans
+                    if span.start <= null_start < span.end
+                )
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_ctrl_b_toggles_data_explorer_sidebar(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)
         try:
             async with app.run_test() as pilot:
                 sidebar = app.query_one("#sidebar")
-                assert sidebar.display is True
-
-                await pilot.press("ctrl+b")
-                await pilot.pause()
                 assert sidebar.display is False
 
                 await pilot.press("ctrl+b")
                 await pilot.pause()
                 assert sidebar.display is True
+
+                await pilot.press("ctrl+b")
+                await pilot.pause()
+                assert sidebar.display is False
         finally:
             engine.close()
 
