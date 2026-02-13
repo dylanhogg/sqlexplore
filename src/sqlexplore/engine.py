@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import math
 import re
@@ -16,7 +14,13 @@ import duckdb
 import typer
 from sqlglot.tokens import Tokenizer as SqlglotTokenizer
 
-ResultStatus = Literal["ok", "info", "error"]
+from sqlexplore.sql_templates import (
+    DEFAULT_LOAD_QUERY_TEMPLATE,
+    TXT_LOAD_QUERY_TEMPLATE,
+    render_load_query,
+)
+
+ResultStatus = Literal["ok", "info", "sql", "error"]
 CompletionKind = Literal[
     "helper_command",
     "sql_keyword",
@@ -30,6 +34,7 @@ SqlClause = Literal["unknown", "select", "from", "join", "where", "group_by", "h
 STATUS_STYLE_BY_RESULT: dict[ResultStatus, str] = {
     "ok": "green",
     "info": "cyan",
+    "sql": "cyan",
     "error": "red",
 }
 SQL_KEYWORDS = [
@@ -156,9 +161,17 @@ class EngineResponse:
     message: str
     result: QueryResult | None = None
     generated_sql: str | None = None
+    executed_sql: str | None = None
     should_exit: bool = False
     load_query: str | None = None
     clear_editor: bool = False
+
+    def activity_sql_log(self) -> tuple[str, str] | None:
+        if self.generated_sql is not None:
+            return "Generated", self.generated_sql
+        if self.executed_sql is not None:
+            return "Executed", self.executed_sql
+        return None
 
 
 @dataclass(slots=True)
@@ -223,6 +236,17 @@ class SqlHelperCommandSpec:
 class FileReader:
     function_name: str
     args: str
+    query_template: str = DEFAULT_LOAD_QUERY_TEMPLATE
+
+
+@dataclass(frozen=True, slots=True)
+class StructField:
+    name: str
+    type_name: str
+    children: tuple["StructField", ...] = ()
+
+
+StructPath = tuple[str, str]
 
 
 def _detect_reader(file_path: Path) -> FileReader:
@@ -233,7 +257,13 @@ def _detect_reader(file_path: Path) -> FileReader:
         return FileReader(function_name="read_csv_auto", args=", delim='\\t'")
     if suffix in {".parquet", ".pq"}:
         return FileReader(function_name="read_parquet", args="")
-    raise typer.BadParameter("Only .csv, .tsv, and .parquet/.pq files are supported.")
+    if suffix == ".txt":
+        return FileReader(
+            function_name="read_csv",
+            args=", auto_detect=false, header=false, delim='\\0', columns={'line':'VARCHAR'}, force_not_null=['line']",
+            query_template=TXT_LOAD_QUERY_TEMPLATE,
+        )
+    raise typer.BadParameter("Only .csv, .tsv, .txt, and .parquet/.pq files are supported.")
 
 
 def _sql_literal(value: str) -> str:
@@ -344,6 +374,57 @@ def is_varchar_type(type_name: str) -> bool:
     return any(marker in upper for marker in ("CHAR", "TEXT", "STRING", "VARCHAR"))
 
 
+def is_struct_type_name(type_name: str) -> bool:
+    stripped = type_name.strip()
+    if len(stripped) < 7:
+        return False
+    if stripped[:6].casefold() != "struct":
+        return False
+    return stripped[6:].lstrip().startswith("(")
+
+
+def _type_id(dtype: Any) -> str:
+    return str(getattr(dtype, "id", "")).casefold()
+
+
+def _type_children(dtype: Any) -> tuple[tuple[str, Any], ...]:
+    try:
+        raw_children = getattr(dtype, "children")
+    except Exception:  # noqa: BLE001
+        return ()
+    children: list[tuple[str, Any]] = []
+    for child_name, child_type in raw_children:
+        children.append((str(child_name), child_type))
+    return tuple(children)
+
+
+def is_struct_type(dtype: Any) -> bool:
+    return _type_id(dtype) == "struct"
+
+
+def parse_struct_fields(dtype: Any) -> tuple[StructField, ...]:
+    if not is_struct_type(dtype):
+        return ()
+    return tuple(
+        StructField(
+            name=child_name,
+            type_name=str(child_type),
+            children=parse_struct_fields(child_type),
+        )
+        for child_name, child_type in _type_children(dtype)
+    )
+
+
+def flatten_struct_paths(fields: tuple[StructField, ...], prefix: str = "") -> tuple[StructPath, ...]:
+    paths: list[StructPath] = []
+    for field in fields:
+        path = f"{prefix}.{field.name}" if prefix else field.name
+        paths.append((path, field.type_name))
+        if field.children:
+            paths.extend(flatten_struct_paths(field.children, path))
+    return tuple(paths)
+
+
 def sort_cell_key(value: Any) -> tuple[int, int, float | str]:
     if value is None:
         return (2, 0, "")
@@ -381,12 +462,15 @@ class SqlExplorerEngine:
 
         reader = _detect_reader(self.data_path)
         source_sql = f"{reader.function_name}({_sql_literal(str(self.data_path))}{reader.args})"
+        load_query = render_load_query(source_sql, reader.query_template)
         self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
-        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS SELECT * FROM {source_sql}')
+        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {load_query}')
 
         self._schema_rows: list[tuple[Any, ...]] = []
         self.columns: list[str] = []
         self.column_types: dict[str, str] = {}
+        self.struct_fields_by_column: dict[str, tuple[StructField, ...]] = {}
+        self.struct_paths_by_column: dict[str, tuple[StructPath, ...]] = {}
         self.column_lookup: dict[str, str] = {}
         self._column_completion_cache: list[CompletionItem] | None = None
         self._aggregate_completion_cache: list[CompletionItem] | None = None
@@ -411,8 +495,35 @@ class SqlExplorerEngine:
         self._schema_rows = [tuple(row) for row in schema_rows]
         self.columns = [str(row[0]) for row in self._schema_rows]
         self.column_types = {str(row[0]): str(row[1]) for row in self._schema_rows}
+        type_objects = self._column_type_objects_from_table()
+        self.struct_fields_by_column, self.struct_paths_by_column = self._build_struct_metadata(type_objects)
         self.column_lookup = {col.lower(): col for col in self.columns}
         self._invalidate_completion_caches()
+
+    def _column_type_objects_from_table(self) -> dict[str, Any]:
+        description = self.conn.execute(f'SELECT * FROM "{self.table_name}" LIMIT 0').description
+        if not description:
+            return {}
+        return {str(item[0]): item[1] for item in description if len(item) >= 2}
+
+    @classmethod
+    def _build_struct_metadata(
+        cls,
+        column_type_objects: dict[str, Any],
+    ) -> tuple[dict[str, tuple[StructField, ...]], dict[str, tuple[StructPath, ...]]]:
+        struct_fields_by_column: dict[str, tuple[StructField, ...]] = {}
+        struct_paths_by_column: dict[str, tuple[StructPath, ...]] = {}
+        for column_name, dtype in column_type_objects.items():
+            fields = cls._struct_fields_for_type(dtype)
+            if not fields:
+                continue
+            struct_fields_by_column[column_name] = fields
+            struct_paths_by_column[column_name] = flatten_struct_paths(fields)
+        return struct_fields_by_column, struct_paths_by_column
+
+    @staticmethod
+    def _struct_fields_for_type(dtype: Any) -> tuple[StructField, ...]:
+        return parse_struct_fields(dtype)
 
     def _invalidate_completion_caches(self) -> None:
         self._column_completion_cache = None
@@ -540,7 +651,7 @@ class SqlExplorerEngine:
             columns = result_columns(relation.description)
             column_types = _result_column_types(relation.description)
         except Exception as exc:  # noqa: BLE001
-            return EngineResponse(status="error", message=str(exc))
+            return EngineResponse(status="error", message=str(exc), executed_sql=sql)
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         self.last_sql = sql
@@ -548,7 +659,11 @@ class SqlExplorerEngine:
             self.executed_sql.append(sql)
 
         if not columns:
-            return EngineResponse(status="ok", message=f"Statement executed in {elapsed_ms:.1f} ms")
+            return EngineResponse(
+                status="ok",
+                message=f"Statement executed in {elapsed_ms:.1f} ms",
+                executed_sql=sql,
+            )
 
         shown, truncated = self._display_rows(rows)
         self.last_result_sql = sql
@@ -564,7 +679,7 @@ class SqlExplorerEngine:
         message = f"{len(shown):,}/{len(rows):,} rows shown in {elapsed_ms:.1f} ms"
         if truncated:
             message += f" (row display limit={self.max_rows_display})"
-        return EngineResponse(status="ok", message=message, result=result)
+        return EngineResponse(status="ok", message=message, result=result, executed_sql=sql)
 
     def run_input(self, raw_input: str) -> EngineResponse:
         text = raw_input.strip()
@@ -1193,7 +1308,7 @@ ORDER BY bin_start'''
             null_pct = (100.0 * nulls / rows) if rows else 0.0
             column_rows.append((column, self.column_types[column], distinct_count, nulls, f"{null_pct:.2f}%"))
 
-        message = f"Dataset: {total_rows:,} rows x {total_columns} columns"
+        message = f"Describe: {total_rows:,} rows x {total_columns} columns"
         return self._table_response(["column", "type", "distinct", "nulls", "null_%"], column_rows, message)
 
     def _summarize_dataset(self, column_limit: int, where_clause: str) -> EngineResponse:

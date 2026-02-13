@@ -51,6 +51,9 @@ precommit:
 	uv run pre-commit run --all-files
 
 build-dist:
+	rm -rf dist
+	rm -rf build
+	rm -rf sqlexplore.egg-info
 	uv build
 
 publish-check:
