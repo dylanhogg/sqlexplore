@@ -969,8 +969,7 @@ class SqlExplorerTui(App[None]):
         for message in self._startup_activity_messages:
             self._log(message, "info")
         self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
-        boot = self.engine.run_sql(self.engine.default_query, remember=False)
-        self._apply_response(boot)
+        self.action_run_query()
         self._query_editor().focus()
 
     def _set_editor_text(self, text: str, *, log_message: str | None = None) -> None:

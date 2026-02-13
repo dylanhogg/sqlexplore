@@ -185,6 +185,24 @@ def test_activity_log_shows_version_on_mount(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_startup_sample_query_is_in_history_immediately(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                await pilot.pause()
+                editor.text = ""
+                editor.focus()
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == engine.default_query
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_copy_tsv_shortcut_copies_full_query_result_beyond_display_limit(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path, csv_text="a,b\n1,x\n2,y\n3,z\n4,w\n5,v\n", max_rows_display=2)
