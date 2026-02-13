@@ -3,12 +3,14 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 from dataclasses import dataclass
 from enum import Enum
 from io import StringIO
 from typing import Any, Callable, cast
 
 from rich.highlighter import JSONHighlighter
+from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -100,6 +102,45 @@ JSON_DETECTION_SAMPLE_SIZE = 12
 JSON_DETECTION_MIN_VALID = 3
 JSON_DETECTION_MIN_RATIO = 0.7
 JSON_CELL_MAX_PARSE_CHARS = 4_096
+URL_COLOR = "#74B6E6"
+URL_STYLE = Style(color=URL_COLOR, underline=True)
+URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
+URL_RE = re.compile(r"(?P<url>(?:https?|ftp)://[^\s<>'\"`]+)", re.IGNORECASE)
+
+
+def _iter_url_matches(text: str) -> list[tuple[int, int, str]]:
+    matches: list[tuple[int, int, str]] = []
+    for match in URL_RE.finditer(text):
+        raw = match.group("url")
+        trimmed = raw.rstrip(URL_TRAILING_PUNCTUATION)
+        if not trimmed:
+            continue
+        start = match.start("url")
+        end = start + len(trimmed)
+        if end <= start:
+            continue
+        matches.append((start, end, trimmed))
+    return matches
+
+
+def _url_style(url: str, *, clickable: bool) -> Style:
+    if not clickable:
+        return URL_STYLE
+    return URL_STYLE + Style.from_meta({"@click": f"app.open_preview_link({url!r})"})
+
+
+def _stylize_links(text: Text, *, clickable: bool) -> bool:
+    matched = False
+    for start, end, url in _iter_url_matches(text.plain):
+        text.stylize(_url_style(url, clickable=clickable), start, end)
+        matched = True
+    return matched
+
+
+def _render_text_with_links(text: str, *, clickable: bool) -> Text:
+    rendered = Text(text, end="")
+    _stylize_links(rendered, clickable=clickable)
+    return rendered
 
 
 def _looks_like_json_container(text: str) -> bool:
@@ -623,6 +664,10 @@ class SqlQueryEditor(TextArea):
         return rendered
 
 
+class ResultsPreview(Static, can_focus=True):
+    pass
+
+
 class SqlExplorerTui(App[None]):
     TITLE = "sqlexplorer"
     SUB_TITLE = "explore your data"
@@ -683,6 +728,7 @@ class SqlExplorerTui(App[None]):
         height: 5;
         border: round #5b8f67;
         color: #d8e3ec;
+        overflow-y: auto;
     }
 
     #activity_log {
@@ -704,6 +750,7 @@ class SqlExplorerTui(App[None]):
         self._sort_column_index: int | None = None
         self._sort_reverse = False
         self._last_results_tsv = ""
+        self._results_preview_plain_text = ""
         self._activity_lines: list[str] = []
         self._json_highlighter = JSONHighlighter()
         self._json_rendering_enabled = True
@@ -743,8 +790,8 @@ class SqlExplorerTui(App[None]):
     def _completion_hint(self) -> Static:
         return self.query_one("#completion_hint", Static)
 
-    def _results_preview(self) -> TextArea:
-        return self.query_one("#results_preview", TextArea)
+    def _results_preview(self) -> ResultsPreview:
+        return self.query_one("#results_preview", ResultsPreview)
 
     def _activity_log(self) -> TextArea:
         return self.query_one("#activity_log", TextArea)
@@ -844,12 +891,7 @@ class SqlExplorerTui(App[None]):
                 yield Static("Tab accept | Esc close | Up/Down navigate", id="completion_hint")
                 yield Static("Results", id="results_header", classes="section-title")
                 yield DataTable(id="results_table")
-                yield TextArea(
-                    "",
-                    id="results_preview",
-                    read_only=True,
-                    soft_wrap=True,
-                )
+                yield ResultsPreview("", id="results_preview")
                 yield Static("Activity", classes="section-title")
                 yield TextArea(
                     "",
@@ -928,6 +970,10 @@ class SqlExplorerTui(App[None]):
 
     def action_show_help(self) -> None:
         self._log(self.engine.help_text(), "info")
+
+    def action_open_preview_link(self, href: str) -> None:
+        if href:
+            self.open_url(href)
 
     @staticmethod
     def _rows_to_tsv(columns: list[str], rows: list[tuple[CellValue, ...]]) -> str:
@@ -1017,13 +1063,22 @@ class SqlExplorerTui(App[None]):
 
     def _render_json_cell(self, value: CellValue) -> RenderedCell:
         if not self._json_rendering_enabled:
-            return format_scalar(value, self.engine.max_value_chars)
+            return self._render_scalar_cell(value)
         compact = _compact_json_cell(value)
         if compact is None:
-            return format_scalar(value, self.engine.max_value_chars)
+            return self._render_scalar_cell(value)
         highlighted = Text(compact, end="", no_wrap=True)
         self._json_highlighter.highlight(highlighted)
-        return _truncate_highlighted_text(highlighted, self.engine.max_value_chars)
+        truncated = _truncate_highlighted_text(highlighted, self.engine.max_value_chars)
+        _stylize_links(truncated, clickable=False)
+        return truncated
+
+    def _render_scalar_cell(self, value: CellValue) -> RenderedCell:
+        text = format_scalar(value, self.engine.max_value_chars)
+        rendered = Text(text, end="", no_wrap=True)
+        if not _stylize_links(rendered, clickable=False):
+            return text
+        return rendered
 
     def _json_rendering_status_suffix(self) -> str:
         state = "on" if self._json_rendering_enabled else "off"
@@ -1046,7 +1101,7 @@ class SqlExplorerTui(App[None]):
                 if index in json_columns:
                     rendered_row.append(self._render_json_cell(value))
                 else:
-                    rendered_row.append(format_scalar(value, self.engine.max_value_chars))
+                    rendered_row.append(self._render_scalar_cell(value))
             table.add_row(*rendered_row)
 
         header = f"Results ({len(result.rows):,}/{result.total_rows:,} rows, {result.elapsed_ms:.1f} ms)"
@@ -1061,8 +1116,9 @@ class SqlExplorerTui(App[None]):
 
     def _set_results_preview_text(self, text: str) -> None:
         preview = self._results_preview()
-        preview.load_text(text)
-        preview.move_cursor((0, 0))
+        self._results_preview_plain_text = text
+        preview.update(_render_text_with_links(text, clickable=True))
+        preview.scroll_home(animate=False, immediate=True)
 
     def _selected_cell_context_at(
         self,
@@ -1109,6 +1165,17 @@ class SqlExplorerTui(App[None]):
             self._json_highlighter.highlight(rendered)
         return rendered
 
+    def _safe_len(self, value: CellValue) -> int | None:
+        if not value:
+            return None
+        if isinstance(value, dict):
+            return len(cast(JsonObject, value))
+        if isinstance(value, list):
+            return len(cast(JsonArray, value))
+        if isinstance(value, str):
+            return len(value)
+        return len(str(value))
+
     def _update_results_preview(
         self,
         row_index: int,
@@ -1118,11 +1185,14 @@ class SqlExplorerTui(App[None]):
         value: CellValue,
     ) -> None:
         type_label = _preview_type_label(type_name)
-        header = f"Cell Preview: row={row_index + 1}, col={column_index + 1} ({column_name}), type={type_label}"
+        value_len = self._safe_len(value)
+        header = f"{column_name}, {type_label}, row {row_index + 1}, col {column_index + 1}, len {value_len}"
         formatted_value, _ = self._format_preview_value(value, type_name)
+        preview_text = f"{header}\n{formatted_value}"
         preview = self._results_preview()
-        preview.load_text(f"{header}\n{formatted_value}")
-        preview.move_cursor((0, 0))
+        self._results_preview_plain_text = preview_text
+        preview.update(_render_text_with_links(preview_text, clickable=True))
+        preview.scroll_home(animate=False, immediate=True)
 
     def _refresh_results_preview_from_cursor(self) -> None:
         selected = self._selected_cell_context()
@@ -1165,6 +1235,15 @@ class SqlExplorerTui(App[None]):
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         self._refresh_results_preview_at(event.coordinate.row, event.coordinate.column)
+
+    def on_key(self, event: Key) -> None:
+        if event.key != "ctrl+c":
+            return
+        if self.focused is not self._results_preview():
+            return
+        event.stop()
+        event.prevent_default()
+        self.copy_to_clipboard(self._results_preview_plain_text)
 
     def _log(self, message: str, status: ResultStatus) -> None:
         logger = self._activity_log()

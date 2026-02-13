@@ -10,7 +10,7 @@ from rich.text import Text
 from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.engine import CompletionItem, SqlExplorerEngine, app_version
-from sqlexplore.tui import SqlExplorerTui, SqlQueryEditor
+from sqlexplore.tui import URL_COLOR, ResultsPreview, SqlExplorerTui, SqlQueryEditor
 
 
 def _build_app(
@@ -37,8 +37,11 @@ def _log_text(app: SqlExplorerTui) -> str:
 
 
 def _preview_text(app: SqlExplorerTui) -> str:
-    preview = cast(Any, app.query_one("#results_preview", TextArea))
-    return str(preview.text)
+    preview = app.query_one("#results_preview", ResultsPreview)
+    rendered = cast(Any, preview.content)
+    if isinstance(rendered, Text):
+        return rendered.plain
+    return str(rendered)
 
 
 def _column_values(table: DataTable[str], column_index: int) -> list[str]:
@@ -55,6 +58,10 @@ def _visible_binding_order(bindings: list[Any]) -> list[tuple[str, str]]:
         for binding in bindings
         if binding.show and binding.description
     ]
+
+
+def _has_url_color(style: Any) -> bool:
+    return URL_COLOR.lower() in str(style).lower()
 
 
 def test_query_and_results_panes_share_status_key_order() -> None:
@@ -240,14 +247,12 @@ def test_activity_and_preview_selection_can_be_copied(tmp_path: Path) -> None:
             async with app.run_test() as pilot:
                 await pilot.pause()
 
-                preview = app.query_one("#results_preview", TextArea)
+                preview = app.query_one("#results_preview", ResultsPreview)
                 preview.focus()
-                preview.action_select_all()
                 await pilot.press("ctrl+c")
                 await pilot.pause()
-                assert (
-                    "Cell Preview:" in app.clipboard or "Move in Results to preview full cell value." in app.clipboard
-                )
+                assert app.clipboard == _preview_text(app)
+                assert app.clipboard
 
                 activity = app.query_one("#activity_log", TextArea)
                 activity.focus()
@@ -255,6 +260,69 @@ def test_activity_and_preview_selection_can_be_copied(tmp_path: Path) -> None:
                 await pilot.press("ctrl+c")
                 await pilot.pause()
                 assert f"sqlexplore {app_version()}" in app.clipboard
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_cells_render_http_https_ftp_links_in_blue(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = (
+                    "SELECT "
+                    "'http://example.com' AS h1, "
+                    "'https://example.com/path' AS h2, "
+                    "'ftp://example.com/file.txt' AS h3"
+                )
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                for column_index in (0, 1, 2):
+                    cell = results.get_row_at(0)[column_index]
+                    assert isinstance(cell, Text)
+                    assert any(_has_url_color(span.style) for span in cell.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_cell_preview_links_are_clickable_but_results_links_are_not(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "SELECT 'https://example.com/path' AS url_value"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                result_cell = results.get_row_at(0)[0]
+                assert isinstance(result_cell, Text)
+                assert any(_has_url_color(span.style) for span in result_cell.spans)
+                assert all(
+                    not hasattr(span.style, "meta") or not cast(Any, span.style).meta for span in result_cell.spans
+                )
+
+                preview = app.query_one("#results_preview", ResultsPreview)
+                rendered_preview = cast(Any, preview.content)
+                assert isinstance(rendered_preview, Text)
+                clickable_spans = [
+                    span
+                    for span in rendered_preview.spans
+                    if hasattr(span.style, "meta") and "@click" in cast(Any, span.style).meta
+                ]
+                assert clickable_spans
+                assert all(_has_url_color(span.style) for span in clickable_spans)
+                assert any("app.open_preview_link(" in cast(Any, span.style).meta["@click"] for span in clickable_spans)
         finally:
             engine.close()
 
@@ -519,7 +587,7 @@ def test_results_preview_shows_pretty_struct_and_updates_with_cursor(tmp_path: P
                 assert '"a": 1' in preview_text
                 assert '"deep": {' in preview_text
                 assert '"b": 2' in preview_text
-                assert "col=1 (s)" in preview_text
+                assert "s, STRUCT, row 1, col 1" in preview_text
 
                 await pilot.press("ctrl+2")
                 await pilot.pause()
@@ -527,7 +595,7 @@ def test_results_preview_shows_pretty_struct_and_updates_with_cursor(tmp_path: P
                 await pilot.pause()
 
                 preview_text = _preview_text(app)
-                assert "col=2 (note)" in preview_text
+                assert "note, VARCHAR, row 1, col 2" in preview_text
                 assert "plain" in preview_text
         finally:
             engine.close()
@@ -615,7 +683,7 @@ def test_results_preview_struct_uses_value_not_schema_type_text(tmp_path: Path) 
                 await pilot.pause()
 
                 preview = _preview_text(app)
-                assert "type=STRUCT" in preview
+                assert "property_filters, STRUCT, row 1, col 1" in preview
                 assert '"property_channel": "rent"' in preview
                 assert '"state": "NSW"' in preview
                 assert '"suburb": "Macquarie Park"' in preview
@@ -638,7 +706,7 @@ def test_results_preview_formats_json_varchar_with_indent(tmp_path: Path) -> Non
                 await pilot.pause()
 
                 preview = _preview_text(app)
-                assert "type=VARCHAR" in preview
+                assert "j, VARCHAR, row 1, col 2" in preview
                 assert '"a": 1' in preview
                 assert '"b": {' in preview
                 assert '  "c": 2' in preview
