@@ -17,6 +17,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.events import Blur, Focus, Key
+from textual.widget import Widget
 from textual.widgets import DataTable, Footer, Header, OptionList, Static, TextArea
 
 from sqlexplore.engine import (
@@ -664,8 +665,30 @@ class SqlQueryEditor(TextArea):
         return rendered
 
 
-class ResultsPreview(Static, can_focus=True):
-    pass
+PreviewContent = str | Text
+
+
+class ResultsPreview(TextArea):
+    def __init__(self, content: PreviewContent = "", **kwargs: Any) -> None:
+        super().__init__("", read_only=True, soft_wrap=True, **kwargs)
+        self._content: PreviewContent = ""
+        self.update(content)
+
+    @property
+    def content(self) -> PreviewContent:
+        return self._content
+
+    def update(self, content: PreviewContent = "", *, layout: bool = True) -> None:
+        self._content = content
+        content_text = content.plain if isinstance(content, Text) else str(content)
+        self.load_text(content_text)
+        self.move_cursor((0, 0))
+
+    def get_line(self, line_index: int) -> Text:
+        line_text = self.document.get_line(line_index)
+        rendered = Text(line_text, end="")
+        _stylize_links(rendered, clickable=True)
+        return rendered
 
 
 class SqlExplorerTui(App[None]):
@@ -728,12 +751,13 @@ class SqlExplorerTui(App[None]):
         height: 5;
         border: round #5b8f67;
         color: #d8e3ec;
-        overflow-y: auto;
+        overflow-y: scroll;
     }
 
     #activity_log {
         height: 5;
         border: round #b18b3d;
+        overflow-y: scroll;
     }
     """
 
@@ -1239,11 +1263,38 @@ class SqlExplorerTui(App[None]):
     def on_key(self, event: Key) -> None:
         if event.key != "ctrl+c":
             return
-        if self.focused is not self._results_preview():
+        focused = self.focused
+        if focused is None:
             return
-        event.stop()
-        event.prevent_default()
-        self.copy_to_clipboard(self._results_preview_plain_text)
+        if focused is self._results_preview():
+            selected = self._selected_text(focused)
+            event.stop()
+            event.prevent_default()
+            self.copy_to_clipboard(selected if selected is not None else self._results_preview_plain_text)
+            return
+        if focused is self._activity_log():
+            selected = self._selected_text(focused)
+            if selected is None:
+                return
+            event.stop()
+            event.prevent_default()
+            self.copy_to_clipboard(selected)
+
+    @staticmethod
+    def _selected_text(widget: Widget) -> str | None:
+        if isinstance(widget, TextArea):
+            if widget.selected_text:
+                return widget.selected_text
+        selection = widget.text_selection
+        if selection is None:
+            return None
+        extracted = widget.get_selection(selection)
+        if extracted is None:
+            return None
+        text, _ = extracted
+        if not text:
+            return None
+        return text
 
     def _log(self, message: str, status: ResultStatus) -> None:
         logger = self._activity_log()

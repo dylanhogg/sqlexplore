@@ -5,13 +5,15 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Make http/https/ftp links clickable in the Results and Cell Preview panel. Highlight the links as blue (like default browser blue)
 - Make single cell values that are null/None a darker color than other normal text in the Results and Cell Preview panel.
+- Enable column sorting by clicking on the column header.
+- Ensure SQL always writting to the Activity panel.
 
 ## App code quality
 
 - Add test cov tool for feedabck
 - Add "use asserts" to AGENTS.md
+- Add "no documentation additions/updates unless explicitly requested" to AGENTS.md
 
 ## UI & UX (layout, navigation, keybindings)
 

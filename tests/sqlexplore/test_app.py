@@ -248,18 +248,53 @@ def test_activity_and_preview_selection_can_be_copied(tmp_path: Path) -> None:
                 await pilot.pause()
 
                 preview = app.query_one("#results_preview", ResultsPreview)
+                preview.update("alpha\nbeta\ngamma")
                 preview.focus()
+                preview.select_line(1)
                 await pilot.press("ctrl+c")
                 await pilot.pause()
-                assert app.clipboard == _preview_text(app)
-                assert app.clipboard
+                assert app.clipboard == "beta"
 
                 activity = app.query_one("#activity_log", TextArea)
+                activity.load_text("one\ntwo\nthree")
                 activity.focus()
-                activity.action_select_all()
+                activity.select_line(1)
                 await pilot.press("ctrl+c")
                 await pilot.pause()
-                assert f"sqlexplore {app_version()}" in app.clipboard
+                assert app.clipboard == "two"
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_activity_and_preview_panes_can_scroll(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                long_text = "\n".join(f"line {index}" for index in range(160))
+
+                preview = app.query_one("#results_preview", ResultsPreview)
+                preview.update(long_text)
+                preview.scroll_home(animate=False, immediate=True)
+                await pilot.pause()
+                preview_start = preview.scroll_y
+                preview.action_scroll_down()
+                await pilot.pause()
+                assert preview.max_scroll_y > 0
+                assert preview.scroll_y > preview_start
+
+                activity = app.query_one("#activity_log", TextArea)
+                activity.load_text(long_text)
+                activity.scroll_home(animate=False, immediate=True)
+                await pilot.pause()
+                activity_start = activity.scroll_y
+                activity.action_scroll_down()
+                await pilot.pause()
+                assert activity.max_scroll_y > 0
+                assert activity.scroll_y > activity_start
         finally:
             engine.close()
 
@@ -313,16 +348,19 @@ def test_cell_preview_links_are_clickable_but_results_links_are_not(tmp_path: Pa
                 )
 
                 preview = app.query_one("#results_preview", ResultsPreview)
-                rendered_preview = cast(Any, preview.content)
-                assert isinstance(rendered_preview, Text)
-                clickable_spans = [
-                    span
-                    for span in rendered_preview.spans
-                    if hasattr(span.style, "meta") and "@click" in cast(Any, span.style).meta
-                ]
+                rendered_lines = [preview.get_line(index) for index in range(preview.document.line_count)]
+                clickable_spans: list[Any] = []
+                for line in rendered_lines:
+                    clickable_spans.extend(
+                        [
+                            span
+                            for span in line.spans
+                            if hasattr(span.style, "meta") and "@click" in cast(Any, span.style).meta
+                        ]
+                    )
                 assert clickable_spans
                 assert all(_has_url_color(span.style) for span in clickable_spans)
-                assert any("app.open_preview_link(" in cast(Any, span.style).meta["@click"] for span in clickable_spans)
+                assert any("app.open_preview_link(" in span.style.meta["@click"] for span in clickable_spans)
         finally:
             engine.close()
 
