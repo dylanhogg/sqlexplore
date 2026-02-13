@@ -725,7 +725,7 @@ class ResultsTable(DataTable[RenderedCell]):
 
 
 class SqlExplorerTui(App[None]):
-    TITLE = "sqlexplorer"
+    TITLE = f"sqlexplorer v{app_version()}"
     SUB_TITLE = "explore your data"
 
     CSS = """
