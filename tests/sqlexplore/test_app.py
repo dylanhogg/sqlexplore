@@ -209,7 +209,7 @@ def test_startup_query_sql_is_written_to_activity_for_txt_template(tmp_path: Pat
         try:
             async with app.run_test() as pilot:
                 await pilot.pause()
-                assert f"Executed SQL:\n{engine.default_query}" in _log_text(app)
+                assert f"[SQL] Executed: {engine.default_query}" in _log_text(app)
         finally:
             engine.close()
 
@@ -226,7 +226,7 @@ def test_manual_query_sql_is_written_to_activity(tmp_path: Path) -> None:
                 editor.text = "SELECT 1 AS x"
                 await pilot.press("ctrl+enter")
                 await pilot.pause()
-                assert "Executed SQL:\nSELECT 1 AS x" in _log_text(app)
+                assert "[SQL] Executed: SELECT 1 AS x" in _log_text(app)
         finally:
             engine.close()
 
@@ -243,7 +243,7 @@ def test_slash_helper_query_sql_is_written_to_activity(tmp_path: Path) -> None:
                 editor.text = "/sample 2"
                 await pilot.press("ctrl+enter")
                 await pilot.pause()
-                assert 'Generated SQL:\nSELECT * FROM "data" LIMIT 2' in _log_text(app)
+                assert '[SQL] Generated: SELECT * FROM "data" LIMIT 2' in _log_text(app)
         finally:
             engine.close()
 

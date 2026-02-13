@@ -20,7 +20,7 @@ from sqlexplore.sql_templates import (
     render_load_query,
 )
 
-ResultStatus = Literal["ok", "info", "error"]
+ResultStatus = Literal["ok", "info", "sql", "error"]
 CompletionKind = Literal[
     "helper_command",
     "sql_keyword",
@@ -34,6 +34,7 @@ SqlClause = Literal["unknown", "select", "from", "join", "where", "group_by", "h
 STATUS_STYLE_BY_RESULT: dict[ResultStatus, str] = {
     "ok": "green",
     "info": "cyan",
+    "sql": "cyan",
     "error": "red",
 }
 SQL_KEYWORDS = [
@@ -167,9 +168,9 @@ class EngineResponse:
 
     def activity_sql_log(self) -> tuple[str, str] | None:
         if self.generated_sql is not None:
-            return "Generated SQL", self.generated_sql
+            return "Generated", self.generated_sql
         if self.executed_sql is not None:
-            return "Executed SQL", self.executed_sql
+            return "Executed", self.executed_sql
         return None
 
 

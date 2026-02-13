@@ -1071,7 +1071,7 @@ class SqlExplorerTui(App[None]):
         sql_log = response.activity_sql_log()
         if sql_log is not None:
             title, sql_text = sql_log
-            self._log(f"{title}:\n{sql_text}", "info")
+            self._log(f"{title}: {sql_text}", "sql")
 
         if response.result is not None:
             self._render_table(response.result)
