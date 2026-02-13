@@ -1308,7 +1308,7 @@ ORDER BY bin_start'''
             null_pct = (100.0 * nulls / rows) if rows else 0.0
             column_rows.append((column, self.column_types[column], distinct_count, nulls, f"{null_pct:.2f}%"))
 
-        message = f"Dataset: {total_rows:,} rows x {total_columns} columns"
+        message = f"Describe: {total_rows:,} rows x {total_columns} columns"
         return self._table_response(["column", "type", "distinct", "nulls", "null_%"], column_rows, message)
 
     def _summarize_dataset(self, column_limit: int, where_clause: str) -> EngineResponse:

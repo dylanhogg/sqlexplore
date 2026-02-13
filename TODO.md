@@ -6,6 +6,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 ## -> Next feature!
 
 - Ensure SQL always writting to the Activity panel.
+- Distinguish /describe from /summary
 
 ## App code quality
 
