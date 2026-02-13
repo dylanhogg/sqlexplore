@@ -26,7 +26,7 @@ from sqlexplore.engine import (
 from sqlexplore.tui import SqlExplorerTui, SqlQueryEditor
 
 app = typer.Typer(
-    help="Interactive DuckDB SQL explorer for CSV/TSV/Parquet files.",
+    help="Interactive DuckDB SQL explorer for CSV/TSV/TXT/Parquet files.",
     pretty_exceptions_enable=False,
     pretty_exceptions_show_locals=True,
 )
@@ -72,8 +72,8 @@ def _remote_filename(url: str) -> str:
     if not file_name:
         host_name = _REMOTE_FILENAME_SAFE_CHARS_RE.sub("-", parsed.netloc).strip("-")
         file_name = f"{host_name or 'download'}.parquet"
-    if Path(file_name).suffix.lower() not in {".csv", ".tsv", ".parquet", ".pq"}:
-        raise typer.BadParameter("Remote URL must end with .csv, .tsv, .parquet, or .pq.")
+    if Path(file_name).suffix.lower() not in {".csv", ".tsv", ".txt", ".parquet", ".pq"}:
+        raise typer.BadParameter("Remote URL must end with .csv, .tsv, .txt, .parquet, or .pq.")
     return file_name
 
 
@@ -248,7 +248,7 @@ def _version_callback(version: bool) -> None:
 def main(
     data: str = typer.Argument(
         ...,
-        help="CSV/TSV/Parquet local file path, or HTTP(S) URL.",
+        help="CSV/TSV/TXT/Parquet local file path, or HTTP(S) URL.",
     ),
     table_name: str = typer.Option("data", "--table", "-t", help="Logical table/view name inside DuckDB."),
     limit: int = typer.Option(100, "--limit", "-l", min=1, help="Default helper query row limit."),

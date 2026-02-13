@@ -40,7 +40,7 @@ sqlexplore --version
 
 Remote URL behavior:
 
-- Supports `http://` and `https://` URLs ending in `.csv`, `.tsv`, `.parquet`, or `.pq`.
+- Supports `http://` and `https://` URLs ending in `.csv`, `.tsv`, `.txt`, `.parquet`, or `.pq`.
 - Downloads to `<app-user-dir>/downloads/<filename>` by default.
 - Use `--download-dir /your/path` to override the download location.
 - If local download target already exists, prints warning and exits (no overwrite by default). Use `--overwrite` to replace it.
@@ -52,6 +52,7 @@ Result formatting:
 - JSON syntax highlighting is auto-applied for `VARCHAR`/text columns when sampled values look like JSON objects/arrays.
 - Detection samples only a few visible rows (not full columns) to keep rendering fast.
 - Highlighting is disabled when query result row count is over `100,000`.
+- `.txt` sources load as one line per row with extra metrics columns: `line_number`, `line_length`, `line_hash`, `word_count`, `mean_word_length`, `median_word_length`, `max_word_length`, `min_word_length`.
 
 Autocomplete behavior:
 
@@ -64,7 +65,7 @@ Autocomplete behavior:
 ## Known limitations
 
 - Python 3.12 and below are not supported.
-- Remote downloads only support `.csv`, `.tsv`, `.parquet`, `.pq`.
+- Remote downloads only support `.csv`, `.tsv`, `.txt`, `.parquet`, `.pq`.
 
 ## Links
 

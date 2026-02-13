@@ -32,6 +32,20 @@ def _build_app(
     return SqlExplorerTui(engine), engine
 
 
+def _build_txt_app(tmp_path: Path, txt_text: str) -> tuple[SqlExplorerTui, SqlExplorerEngine]:
+    txt_path = tmp_path / "data.txt"
+    txt_path.write_text(txt_text, encoding="utf-8")
+    engine = SqlExplorerEngine(
+        data_path=txt_path,
+        table_name="data",
+        database=":memory:",
+        default_limit=10,
+        max_rows_display=100,
+        max_value_chars=80,
+    )
+    return SqlExplorerTui(engine), engine
+
+
 def _log_text(app: SqlExplorerTui) -> str:
     log = cast(Any, app.query_one("#activity_log", TextArea))
     return str(log.text)
@@ -419,6 +433,31 @@ def test_null_value_text_is_darker_in_results_and_preview(tmp_path: Path) -> Non
                     for span in preview_content.spans
                     if span.start <= null_start < span.end
                 )
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_txt_empty_line_renders_as_empty_not_null_in_results_and_preview(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_txt_app(tmp_path, "alpha\n\nbeta\n")
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+
+                empty_cell = results.get_row_at(1)[0]
+                if isinstance(empty_cell, Text):
+                    assert empty_cell.plain == ""
+                else:
+                    assert empty_cell == ""
+
+                results.move_cursor(row=1, column=0)
+                await pilot.pause()
+
+                preview = _preview_text(app)
+                assert "NULL" not in preview
         finally:
             engine.close()
 

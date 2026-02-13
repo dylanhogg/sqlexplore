@@ -23,6 +23,46 @@ def _build_engine(tmp_path: Path, csv_text: str = "col_name,x\na,1\nb,2\na,3\n")
     )
 
 
+def test_txt_data_source_loads_line_metrics_columns(tmp_path: Path) -> None:
+    txt_path = tmp_path / "data.txt"
+    txt_path.write_text("alpha,beta\n\nvalue\twith\ttabs\nplain text\n", encoding="utf-8")
+    engine = SqlExplorerEngine(
+        data_path=txt_path,
+        table_name="data",
+        database=":memory:",
+        default_limit=10,
+        max_rows_display=100,
+        max_value_chars=80,
+    )
+    try:
+        out = engine.run_sql('SELECT * FROM "data"')
+        assert out.status == "ok"
+        assert out.result is not None
+        assert out.result.columns == [
+            "line",
+            "line_number",
+            "line_length",
+            "line_hash",
+            "word_count",
+            "mean_word_length",
+            "median_word_length",
+            "max_word_length",
+            "min_word_length",
+        ]
+        rows = [tuple(row) for row in out.result.rows]
+        assert [row[0] for row in rows] == ["alpha,beta", "", "value\twith\ttabs", "plain text"]
+        assert [row[1] for row in rows] == [1, 2, 3, 4]
+        assert [row[2] for row in rows] == [10, 0, 15, 10]
+        assert all(isinstance(row[3], int) for row in rows)
+        assert [row[4] for row in rows] == [1, 0, 3, 2]
+        assert [round(float(row[5]), 6) for row in rows] == [10.0, 0.0, 4.333333, 4.5]
+        assert [round(float(row[6]), 6) for row in rows] == [10.0, 0.0, 4.0, 4.5]
+        assert [row[7] for row in rows] == [10, 0, 5, 5]
+        assert [row[8] for row in rows] == [10, 0, 4, 4]
+    finally:
+        engine.close()
+
+
 def _completion_values(engine: SqlExplorerEngine, text: str) -> list[str]:
     items = engine.completion_items(text, (0, len(text)))
     return [item.insert_text for item in items]

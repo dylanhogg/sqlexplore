@@ -136,16 +136,17 @@ def test_download_remote_data_file_rejects_file_path_as_download_dir(tmp_path: P
     [
         ("https://example.com/data.csv", "data.csv"),
         ("https://example.com/data.tsv", "data.tsv"),
+        ("https://example.com/data.txt", "data.txt"),
     ],
 )
-def test_remote_filename_accepts_csv_and_tsv(url: str, expected: str) -> None:
+def test_remote_filename_accepts_csv_tsv_and_txt(url: str, expected: str) -> None:
     remote_filename = getattr(app_module, "_remote_filename")
     assert remote_filename(url) == expected
 
 
 def test_resolve_data_path_rejects_remote_unsupported_extension() -> None:
     resolve_data_path = getattr(app_module, "_resolve_data_path")
-    with pytest.raises(typer.BadParameter, match=r"Remote URL must end with \.csv, \.tsv, \.parquet, or \.pq\."):
+    with pytest.raises(typer.BadParameter, match=r"Remote URL must end with \.csv, \.tsv, \.txt, \.parquet, or \.pq\."):
         resolve_data_path("https://example.com/data.json", download_dir=Path("/tmp"))
 
 

@@ -16,6 +16,12 @@ import duckdb
 import typer
 from sqlglot.tokens import Tokenizer as SqlglotTokenizer
 
+from sqlexplore.sql_templates import (
+    DEFAULT_LOAD_QUERY_TEMPLATE,
+    TXT_LOAD_QUERY_TEMPLATE,
+    render_load_query,
+)
+
 ResultStatus = Literal["ok", "info", "error"]
 CompletionKind = Literal[
     "helper_command",
@@ -223,6 +229,7 @@ class SqlHelperCommandSpec:
 class FileReader:
     function_name: str
     args: str
+    query_template: str = DEFAULT_LOAD_QUERY_TEMPLATE
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,7 +250,13 @@ def _detect_reader(file_path: Path) -> FileReader:
         return FileReader(function_name="read_csv_auto", args=", delim='\\t'")
     if suffix in {".parquet", ".pq"}:
         return FileReader(function_name="read_parquet", args="")
-    raise typer.BadParameter("Only .csv, .tsv, and .parquet/.pq files are supported.")
+    if suffix == ".txt":
+        return FileReader(
+            function_name="read_csv",
+            args=", auto_detect=false, header=false, delim='\\0', columns={'line':'VARCHAR'}, force_not_null=['line']",
+            query_template=TXT_LOAD_QUERY_TEMPLATE,
+        )
+    raise typer.BadParameter("Only .csv, .tsv, .txt, and .parquet/.pq files are supported.")
 
 
 def _sql_literal(value: str) -> str:
@@ -442,8 +455,9 @@ class SqlExplorerEngine:
 
         reader = _detect_reader(self.data_path)
         source_sql = f"{reader.function_name}({_sql_literal(str(self.data_path))}{reader.args})"
+        load_query = render_load_query(source_sql, reader.query_template)
         self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
-        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS SELECT * FROM {source_sql}')
+        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {load_query}')
 
         self._schema_rows: list[tuple[Any, ...]] = []
         self.columns: list[str] = []
