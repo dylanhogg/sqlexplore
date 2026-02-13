@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 DEFAULT_LOAD_QUERY_TEMPLATE = "SELECT * FROM {source_sql}"
 
 TXT_LOAD_QUERY_TEMPLATE = """

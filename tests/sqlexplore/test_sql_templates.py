@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from sqlexplore.sql_templates import DEFAULT_LOAD_QUERY_TEMPLATE, TXT_LOAD_QUERY_TEMPLATE, render_load_query
 
 
