@@ -203,6 +203,53 @@ def test_startup_sample_query_is_in_history_immediately(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_startup_query_sql_is_written_to_activity_for_txt_template(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_txt_app(tmp_path, txt_text="alpha\nbeta\n")
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert f"Executed SQL:\n{engine.default_query}" in _log_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_manual_query_sql_is_written_to_activity(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                await pilot.pause()
+                editor.text = "SELECT 1 AS x"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+                assert "Executed SQL:\nSELECT 1 AS x" in _log_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_slash_helper_query_sql_is_written_to_activity(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                await pilot.pause()
+                editor.text = "/sample 2"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+                assert 'Generated SQL:\nSELECT * FROM "data" LIMIT 2' in _log_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_copy_tsv_shortcut_copies_full_query_result_beyond_display_limit(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path, csv_text="a,b\n1,x\n2,y\n3,z\n4,w\n5,v\n", max_rows_display=2)

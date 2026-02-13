@@ -17,6 +17,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 - Include UI overview like HuggingFace datasets page (column lengths, sort by column, etc.)
 - Create a generic pop window that can run different custom functions against query and results panes (eg query gen, data analysis)
+- If no file supplied at startup, show a welcome message from an embedded csv file.
+- Add example tables like `sqlexplore_example`
 
 ## Query authoring experience
 

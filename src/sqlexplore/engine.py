@@ -160,9 +160,17 @@ class EngineResponse:
     message: str
     result: QueryResult | None = None
     generated_sql: str | None = None
+    executed_sql: str | None = None
     should_exit: bool = False
     load_query: str | None = None
     clear_editor: bool = False
+
+    def activity_sql_log(self) -> tuple[str, str] | None:
+        if self.generated_sql is not None:
+            return "Generated SQL", self.generated_sql
+        if self.executed_sql is not None:
+            return "Executed SQL", self.executed_sql
+        return None
 
 
 @dataclass(slots=True)
@@ -642,7 +650,7 @@ class SqlExplorerEngine:
             columns = result_columns(relation.description)
             column_types = _result_column_types(relation.description)
         except Exception as exc:  # noqa: BLE001
-            return EngineResponse(status="error", message=str(exc))
+            return EngineResponse(status="error", message=str(exc), executed_sql=sql)
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         self.last_sql = sql
@@ -650,7 +658,11 @@ class SqlExplorerEngine:
             self.executed_sql.append(sql)
 
         if not columns:
-            return EngineResponse(status="ok", message=f"Statement executed in {elapsed_ms:.1f} ms")
+            return EngineResponse(
+                status="ok",
+                message=f"Statement executed in {elapsed_ms:.1f} ms",
+                executed_sql=sql,
+            )
 
         shown, truncated = self._display_rows(rows)
         self.last_result_sql = sql
@@ -666,7 +678,7 @@ class SqlExplorerEngine:
         message = f"{len(shown):,}/{len(rows):,} rows shown in {elapsed_ms:.1f} ms"
         if truncated:
             message += f" (row display limit={self.max_rows_display})"
-        return EngineResponse(status="ok", message=message, result=result)
+        return EngineResponse(status="ok", message=message, result=result, executed_sql=sql)
 
     def run_input(self, raw_input: str) -> EngineResponse:
         text = raw_input.strip()

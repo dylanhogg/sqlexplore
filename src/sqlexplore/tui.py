@@ -1068,8 +1068,10 @@ class SqlExplorerTui(App[None]):
         self._log(message, "ok")
 
     def _apply_response(self, response: EngineResponse) -> None:
-        if response.generated_sql:
-            self._log(f"Generated SQL:\n{response.generated_sql}", "info")
+        sql_log = response.activity_sql_log()
+        if sql_log is not None:
+            title, sql_text = sql_log
+            self._log(f"{title}:\n{sql_text}", "info")
 
         if response.result is not None:
             self._render_table(response.result)

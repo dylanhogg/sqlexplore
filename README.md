@@ -46,6 +46,7 @@ Remote URL behavior:
 - If local download target already exists, prints warning and exits (no overwrite by default). Use `--overwrite` to replace it.
 - Logs download details before normal app flow: remote/local path, progress, elapsed time, and file size.
 - In TUI mode, the Activity pane shows app version on load, then startup download log lines (if any).
+- Activity pane logs executed SQL for startup query runs, manual SQL, and helper/slash-command generated SQL.
 
 Result formatting:
 
