@@ -37,6 +37,7 @@ from sqlexplore.engine import (
     result_columns,
     sort_cell_key,
 )
+from sqlexplore.image_cells import format_image_cell_token, format_image_preview_metadata, summarize_image_cell
 
 CellValue = object
 RenderedCell = str | Text
@@ -1123,6 +1124,9 @@ class SqlExplorerTui(App[None]):
     def _render_json_cell(self, value: CellValue) -> RenderedCell:
         if not self._json_rendering_enabled:
             return self._render_scalar_cell(value)
+        image = summarize_image_cell(value)
+        if image is not None:
+            return Text(format_image_cell_token(image), end="", no_wrap=True)
         compact = _compact_json_cell(value)
         if compact is None:
             return self._render_scalar_cell(value)
@@ -1135,6 +1139,15 @@ class SqlExplorerTui(App[None]):
     def _render_scalar_cell(self, value: CellValue) -> RenderedCell:
         if value is None:
             return Text("NULL", style=NULL_VALUE_STYLE, end="", no_wrap=True)
+        if not self._json_rendering_enabled:
+            text = format_scalar(value, self.engine.max_value_chars)
+            rendered = Text(text, end="", no_wrap=True)
+            if not _stylize_links(rendered, clickable=False):
+                return text
+            return rendered
+        image = summarize_image_cell(value)
+        if image is not None:
+            return Text(format_image_cell_token(image), end="", no_wrap=True)
         text = format_scalar(value, self.engine.max_value_chars)
         rendered = Text(text, end="", no_wrap=True)
         if not _stylize_links(rendered, clickable=False):
@@ -1212,6 +1225,10 @@ class SqlExplorerTui(App[None]):
             return "NULL", False
         if not self._json_rendering_enabled:
             return str(value_any), False
+        image = summarize_image_cell(value_any)
+        if image is not None:
+            metadata = format_image_preview_metadata(image)
+            return f"{metadata}\nraw:\n{value_any}", False
         should_try_json = is_struct_type_name(type_name) or is_varchar_type(type_name) or isinstance(value, dict | list)
         if should_try_json:
             pretty = _pretty_json_cell(value_any)

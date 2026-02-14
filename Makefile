@@ -28,6 +28,9 @@ run-as-tool:
 run-as-docker:
 	docker compose run --rm app gnaf.parquet
 
+run-example-images:
+	uv run sqlexplore https://huggingface.co/datasets/mteb/tiny-imagenet/resolve/main/data/valid-00000-of-00001-70d52db3c749a935.parquet
+
 docker-build:
 	docker compose build --no-cache
 

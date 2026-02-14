@@ -731,6 +731,73 @@ def test_json_highlighting_applies_to_struct_column(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_struct_image_bytes_render_compact_token_and_preview_metadata(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = (
+                    "SELECT {'bytes': from_hex("
+                    "'89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C489"
+                    "0000000A49444154789C6360000000020001E221BC330000000049454E44AE426082"
+                    "'), 'path': NULL} AS image_blob"
+                )
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                cell = results.get_row_at(0)[0]
+                assert isinstance(cell, Text)
+                assert cell.plain == "[img png 1x1 67 B]"
+
+                preview_text = _preview_text(app)
+                assert "image_blob, STRUCT, row 1, col 1" in preview_text
+                assert "format: png" in preview_text
+                assert "dimensions: 1x1" in preview_text
+                assert "size: 67 B (67 bytes)" in preview_text
+                assert "source: struct.bytes" in preview_text
+                assert "raw:" in preview_text
+                assert "'bytes': b'\\x89PNG\\r\\n\\x1a\\n" in preview_text
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_struct_image_bytes_show_raw_value_when_json_view_is_off(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "SELECT {'bytes': from_hex('FFD8FFE000104A4649460001FFD9'), 'path': NULL} AS image_blob"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                on_cell = results.get_row_at(0)[0]
+                assert isinstance(on_cell, Text)
+                assert on_cell.plain.startswith("[img jpeg")
+
+                await pilot.press("f3")
+                await pilot.pause()
+
+                off_cell = results.get_row_at(0)[0]
+                assert isinstance(off_cell, str)
+                assert off_cell.startswith("{'bytes': b'")
+                assert "[img " not in off_cell
+
+                preview_text = _preview_text(app)
+                assert "[image]" not in preview_text
+                assert "{'bytes': b'" in preview_text
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_json_highlighting_keeps_highlighting_when_json_is_truncated(tmp_path: Path) -> None:
     async def run() -> None:
         csv_text = (

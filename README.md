@@ -1,5 +1,13 @@
 # sqlexplore
 
+Get answers from messy data files fast, without building pipelines first.
+
+With `sqlexplore`, you can:
+
+- Inspect new datasets in minutes instead of writing setup scripts.
+- Ask ad hoc questions with SQL and get immediate feedback.
+- Move from quick profiling to exportable results in one terminal workflow.
+
 `sqlexplore` is a terminal SQL workbench for flat files. Point it at a local or remote dataset, then explore with DuckDB SQL in an interactive TUI or run one-shot queries in standard CLI mode.
 
 ## Useful features
@@ -12,6 +20,7 @@
 - Query history and rerun support (`/history`, `/rerun`), plus editor helpers (`/last`, `/clear`).
 - Export last result to `.csv`, `.parquet`/`.pq`, or `.json` with `/save`.
 - JSON-aware rendering in result cells and clickable links in preview.
+- Image bytes in `BLOB` or `STRUCT{bytes,path}` cells render as compact `[img ...]` tags with metadata in preview.
 - Non-interactive mode via `--execute`, `--file`, or `--no-ui`.
 - Remote download controls: custom directory (`--download-dir`) and overwrite behavior (`--overwrite`).
 - `.txt` files are ingested line-by-line with derived metrics (`line_number`, `word_count`, `line_hash`, etc).
