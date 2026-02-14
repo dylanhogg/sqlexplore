@@ -14,6 +14,8 @@ With `sqlexplore`, you can:
 
 - Works with `.csv`, `.tsv`, `.txt`, `.parquet`, and `.pq`.
 - Accepts local paths and `http(s)` URLs for supported file types.
+- Accepts piped stdin text (omit `data` when piping) and opens in TUI by default.
+  If no controlling tty is available, it falls back to `--no-ui`.
 - Interactive TUI with query editor, results grid, preview pane, and activity log.
 - SQL + helper commands for common analysis tasks: `/summary`, `/profile`, `/hist`, `/corr`, `/dupes`, `/top`, `/group`, and more.
 - Context-aware autocomplete for SQL clauses and helper command arguments.
@@ -21,7 +23,7 @@ With `sqlexplore`, you can:
 - Export last result to `.csv`, `.parquet`/`.pq`, or `.json` with `/save`.
 - JSON-aware rendering in result cells and clickable links in preview.
 - Image bytes in `BLOB` or `STRUCT{bytes,path}` cells render as compact `[img ...]` tags with metadata in preview.
-- Non-interactive mode via `--execute`, `--file`, or `--no-ui`.
+- Non-interactive mode via `--no-ui` (optionally with `--execute` or `--file`).
 - Remote download controls: custom directory (`--download-dir`) and overwrite behavior (`--overwrite`); existing local downloads are reused by default.
 - `.txt` files are ingested line-by-line with derived metrics (`line_number`, `word_count`, `line_hash`, etc).
 
@@ -42,19 +44,37 @@ sqlexplore https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/githu
 Run one SQL query and exit:
 
 ```bash
-sqlexplore ./data/example.parquet --execute "SELECT COUNT(*) AS n FROM data"
+sqlexplore ./data/example.parquet --execute "SELECT COUNT(*) AS n FROM data" --no-ui
 ```
 
 Run SQL from a file and exit:
 
 ```bash
-sqlexplore ./data/example.parquet --file ./queries/report.sql
+sqlexplore ./data/example.parquet --file ./queries/report.sql --no-ui
 ```
 
 Run default sample query in plain terminal output (no TUI):
 
 ```bash
 sqlexplore ./data/example.csv --no-ui
+```
+
+Analyze piped terminal text:
+
+```bash
+ls -lha | sqlexplore
+```
+
+Analyze piped terminal text in plain terminal output (no TUI):
+
+```bash
+ls -lha | sqlexplore --no-ui
+```
+
+Pipe text and open TUI with a startup SQL query:
+
+```bash
+ps aux | sqlexplore - --execute "SELECT line FROM data WHERE line ILIKE '%python%'"
 ```
 
 Control remote download location and overwrite:

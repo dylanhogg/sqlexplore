@@ -797,10 +797,16 @@ class SqlExplorerTui(App[None]):
 
     BINDINGS = _build_shortcuts(for_editor=False)
 
-    def __init__(self, engine: SqlExplorerEngine, startup_activity_messages: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        engine: SqlExplorerEngine,
+        startup_activity_messages: list[str] | None = None,
+        startup_query: str | None = None,
+    ) -> None:
         super().__init__()
         self.engine = engine
         self._startup_activity_messages = tuple(startup_activity_messages or [])
+        self._startup_query = startup_query if startup_query is not None else self.engine.default_query
         self._history_cursor: int | None = None
         self._completion_window_start = 0
         self._active_result: QueryResult | None = None
@@ -935,7 +941,7 @@ class SqlExplorerTui(App[None]):
             with Vertical(id="workspace"):
                 yield Static("Query", classes="section-title")
                 yield SqlQueryEditor(
-                    self.engine.default_query,
+                    self._startup_query,
                     self.engine.completion_tokens,
                     self._history_prev,
                     self._history_next,

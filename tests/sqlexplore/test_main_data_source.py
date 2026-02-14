@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
@@ -198,6 +199,10 @@ def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkey
 
         def run_sql(self, sql_text: str, remember: bool = True) -> app_module.EngineResponse:
             captured["run_sql"] = (sql_text, remember)
+            return app_module.EngineResponse(status="ok", message="ok")
+
+        def run_input(self, sql_text: str) -> app_module.EngineResponse:
+            captured["run_input"] = sql_text
             return app_module.EngineResponse(status="ok", message="ok")
 
         def close(self) -> None:
@@ -433,6 +438,260 @@ def test_main_keeps_local_path_behavior(tmp_path: Path, monkeypatch: pytest.Monk
     assert result.exit_code == 0
     assert captured["data_path"] == local_path.resolve()
     assert captured["closed"] is True
+
+
+def _patch_stdin_fake_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict[str, Any],
+    *,
+    capture_text: bool = False,
+) -> None:
+    class FakeEngine:
+        def __init__(
+            self,
+            data_path: Path,
+            table_name: str,
+            database: str,
+            default_limit: int,
+            max_rows_display: int,
+            max_value_chars: int,
+        ) -> None:
+            captured["data_path"] = data_path
+            if capture_text:
+                captured["data_text"] = data_path.read_text(encoding="utf-8")
+            self.default_query = 'SELECT * FROM "data" LIMIT 100'
+            self.max_value_chars = max_value_chars
+
+        def run_sql(self, sql_text: str, remember: bool = True) -> app_module.EngineResponse:
+            captured["run_sql"] = (sql_text, remember)
+            return app_module.EngineResponse(status="ok", message="ok")
+
+        def run_input(self, sql_text: str) -> app_module.EngineResponse:
+            captured["run_input"] = sql_text
+            return app_module.EngineResponse(status="ok", message="ok")
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
+
+
+def _patch_stdin_tty(monkeypatch: pytest.MonkeyPatch, can_run_tui: bool) -> None:
+    @contextmanager
+    def fake_stdin_tty_for_tui(enabled: bool):
+        assert enabled is True
+        yield can_run_tui
+
+    monkeypatch.setattr(app_module.stdin_io, "stdin_tty_for_tui", fake_stdin_tty_for_tui)
+
+
+def test_main_reads_stdin_when_data_arg_is_dash(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    captured: dict[str, Any] = {}
+
+    class FakeTui:
+        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+            captured["startup_activity_messages"] = list(startup_activity_messages or [])
+
+        def run(self) -> None:
+            captured["tui_run"] = True
+
+    _patch_stdin_fake_engine(monkeypatch, captured, capture_text=True)
+    monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
+    _patch_stdin_tty(monkeypatch, can_run_tui=True)
+
+    result = runner.invoke(app_module.app, ["-"], input="alpha\nbeta\n")
+
+    assert result.exit_code == 0
+    data_path = cast(Path, captured["data_path"])
+    assert data_path.suffix == ".txt"
+    assert captured["data_text"] == "alpha\nbeta\n"
+    assert captured["tui_run"] is True
+    startup_messages = cast(list[str], captured["startup_activity_messages"])
+    assert any(message.startswith(app_module.stdin_io.STDIN_LOCAL_PREFIX) for message in startup_messages)
+    assert captured["closed"] is True
+    assert data_path.exists() is False
+
+
+def test_main_reads_stdin_when_data_arg_is_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    captured: dict[str, Any] = {}
+
+    class FakeTui:
+        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+            captured["startup_activity_messages"] = list(startup_activity_messages or [])
+
+        def run(self) -> None:
+            captured["tui_run"] = True
+
+    _patch_stdin_fake_engine(monkeypatch, captured, capture_text=True)
+    monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
+    _patch_stdin_tty(monkeypatch, can_run_tui=True)
+
+    result = runner.invoke(app_module.app, [], input="one\ntwo\n")
+
+    assert result.exit_code == 0
+    data_path = cast(Path, captured["data_path"])
+    assert data_path.suffix == ".txt"
+    assert captured["data_text"] == "one\ntwo\n"
+    assert captured["tui_run"] is True
+    startup_messages = cast(list[str], captured["startup_activity_messages"])
+    assert any(message.startswith(app_module.stdin_io.STDIN_LOCAL_PREFIX) for message in startup_messages)
+    assert captured["closed"] is True
+    assert data_path.exists() is False
+
+
+def test_main_runs_no_ui_for_stdin_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    captured: dict[str, Any] = {}
+
+    class FakeTui:
+        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+            raise AssertionError("TUI should not run when --no-ui is set")
+
+    _patch_stdin_fake_engine(monkeypatch, captured)
+    monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
+
+    result = runner.invoke(app_module.app, ["-", "--no-ui"], input="a\nb\n")
+
+    assert result.exit_code == 0
+    assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
+    assert captured["closed"] is True
+
+
+def test_main_uses_execute_as_startup_query_in_tui(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    captured: dict[str, Any] = {}
+    sql = "SELECT line FROM data WHERE line ILIKE '%python%'"
+
+    class FakeTui:
+        def __init__(
+            self,
+            engine: Any,
+            startup_activity_messages: list[str] | None = None,
+            startup_query: str | None = None,
+        ) -> None:
+            captured["startup_activity_messages"] = list(startup_activity_messages or [])
+            captured["startup_query"] = startup_query
+
+        def run(self) -> None:
+            captured["tui_run"] = True
+
+    _patch_stdin_fake_engine(monkeypatch, captured)
+    monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
+    _patch_stdin_tty(monkeypatch, can_run_tui=True)
+
+    result = runner.invoke(app_module.app, ["-", "--execute", sql], input="alpha\npython\n")
+
+    assert result.exit_code == 0
+    assert captured["tui_run"] is True
+    assert captured["startup_query"] == sql
+    assert "run_input" not in captured
+    assert "run_sql" not in captured
+    assert captured["closed"] is True
+
+
+def test_main_runs_execute_in_no_ui_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    captured: dict[str, Any] = {}
+    sql = "SELECT line FROM data WHERE line ILIKE '%python%'"
+
+    class FakeTui:
+        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+            raise AssertionError("TUI should not run when --no-ui is set")
+
+    _patch_stdin_fake_engine(monkeypatch, captured)
+    monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
+
+    result = runner.invoke(app_module.app, ["-", "--execute", sql, "--no-ui"], input="alpha\npython\n")
+
+    assert result.exit_code == 0
+    assert captured["run_input"] == sql
+    assert "run_sql" not in captured
+    assert captured["closed"] is True
+
+
+def test_main_runs_execute_when_tty_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    captured: dict[str, Any] = {}
+    sql = "SELECT line FROM data WHERE line ILIKE '%python%'"
+
+    class FakeTui:
+        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+            raise AssertionError("TUI should not run when tty is unavailable")
+
+    _patch_stdin_fake_engine(monkeypatch, captured)
+    monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
+    _patch_stdin_tty(monkeypatch, can_run_tui=False)
+
+    result = runner.invoke(app_module.app, ["-", "--execute", sql], input="alpha\npython\n")
+
+    assert result.exit_code == 0
+    assert captured["run_input"] == sql
+    assert app_module.stdin_io.STDIN_TTY_FALLBACK_MESSAGE in result.output
+    assert captured["closed"] is True
+
+
+def test_main_strips_ansi_escape_sequences_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    captured: dict[str, Any] = {}
+
+    _patch_stdin_fake_engine(monkeypatch, captured, capture_text=True)
+    result = runner.invoke(app_module.app, ["-", "--no-ui"], input="\x1b[31malpha\x1b[0m\n")
+
+    assert result.exit_code == 0
+    assert captured["data_text"] == "alpha\n"
+    assert captured["closed"] is True
+
+
+def test_main_falls_back_to_no_ui_when_tty_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    captured: dict[str, Any] = {}
+
+    class FakeTui:
+        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+            raise AssertionError("TUI should not run when tty is unavailable")
+
+    _patch_stdin_fake_engine(monkeypatch, captured)
+    monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
+    _patch_stdin_tty(monkeypatch, can_run_tui=False)
+
+    result = runner.invoke(app_module.app, ["-"], input="alpha\n")
+
+    assert result.exit_code == 0
+    assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
+    assert app_module.stdin_io.STDIN_TTY_FALLBACK_MESSAGE in result.output
+    assert captured["closed"] is True
+
+
+def test_main_rejects_missing_data_when_stdin_is_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _TtyStdin:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(app_module.sys, "stdin", cast(Any, _TtyStdin()))
+    with pytest.raises(typer.BadParameter, match=app_module.stdin_io.STDIN_MISSING_SOURCE_ERROR):
+        app_module.main(
+            data=None,
+            table_name="data",
+            limit=100,
+            max_rows=1000,
+            max_value_chars=160,
+            database=":memory:",
+            execute=None,
+            query_file=None,
+            no_ui=False,
+            overwrite=False,
+            download_dir=_expected_default_download_dir(),
+            version=False,
+        )
+
+
+def test_main_rejects_empty_stdin_input() -> None:
+    runner = CliRunner()
+    result = runner.invoke(app_module.app, ["-"], input="")
+    assert result.exit_code == 2
+    assert app_module.stdin_io.STDIN_EMPTY_ERROR in result.output
 
 
 def test_main_version_option_prints_version_without_data(monkeypatch: pytest.MonkeyPatch) -> None:

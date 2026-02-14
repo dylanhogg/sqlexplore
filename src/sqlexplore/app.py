@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 from tqdm import tqdm
 
+from sqlexplore import stdin_io
 from sqlexplore.engine import (
     STATUS_STYLE_BY_RESULT,
     EngineResponse,
@@ -234,6 +235,38 @@ def _render_console_response(console: Console, response: EngineResponse, max_val
     return 1 if response.status == "error" else 0
 
 
+def _run_console_query_and_exit(engine: SqlExplorerEngine, query: str | None) -> None:
+    if query is None:
+        response = engine.run_sql(engine.default_query, remember=False)
+    else:
+        response = engine.run_input(query)
+    exit_code = _render_console_response(Console(), response, engine.max_value_chars)
+    raise typer.Exit(code=exit_code)
+
+
+def _resolve_main_data_source(
+    data: str | None,
+    download_dir: Path,
+    overwrite: bool,
+    startup_activity_messages: list[str],
+) -> tuple[Path, bool, stdin_io.StdinCapture | None]:
+    use_stdin = stdin_io.should_use_stdin(data)
+    if data is None and not use_stdin:
+        raise typer.BadParameter(stdin_io.STDIN_MISSING_SOURCE_ERROR)
+    if use_stdin:
+        capture = stdin_io.read_stdin_to_temp_file()
+        startup_activity_messages.append(capture.startup_message)
+        return capture.path, True, capture
+    assert data is not None
+    file_path = _resolve_data_path(
+        data,
+        download_dir=download_dir,
+        overwrite=overwrite,
+        startup_activity_messages=startup_activity_messages,
+    )
+    return file_path, False, None
+
+
 def _version_callback(version: bool) -> None:
     if not version:
         return
@@ -243,9 +276,9 @@ def _version_callback(version: bool) -> None:
 
 @app.command()
 def main(
-    data: str = typer.Argument(
-        ...,
-        help="CSV/TSV/TXT/Parquet local file path, or HTTP(S) URL.",
+    data: str | None = typer.Argument(
+        None,
+        help="CSV/TSV/TXT/Parquet local path, HTTP(S) URL, or '-' for stdin text.",
     ),
     table_name: str = typer.Option("data", "--table", "-t", help="Logical table/view name inside DuckDB."),
     limit: int = typer.Option(100, "--limit", "-l", min=1, help="Default helper query row limit."),
@@ -261,7 +294,12 @@ def main(
         "--db",
         help="DuckDB database path. Use :memory: for in-memory session.",
     ),
-    execute: str | None = typer.Option(None, "--execute", "-e", help="Run SQL non-interactively and exit."),
+    execute: str | None = typer.Option(
+        None,
+        "--execute",
+        "-e",
+        help="Startup SQL query. Runs once and exits only when --no-ui is enabled.",
+    ),
     query_file: Path | None = typer.Option(
         None,
         "--file",
@@ -269,7 +307,7 @@ def main(
         exists=True,
         readable=True,
         resolve_path=True,
-        help="Run SQL from file non-interactively and exit.",
+        help="Load startup SQL from file. Runs once and exits only when --no-ui is enabled.",
     ),
     no_ui: bool = typer.Option(False, "--no-ui", help="Run once in standard terminal output mode."),
     overwrite: bool = typer.Option(
@@ -294,12 +332,13 @@ def main(
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
     startup_activity_messages: list[str] = []
-    file_path = _resolve_data_path(
+    file_path, use_stdin, stdin_capture = _resolve_main_data_source(
         data,
         download_dir=download_dir,
         overwrite=overwrite,
         startup_activity_messages=startup_activity_messages,
     )
+
     engine = SqlExplorerEngine(
         data_path=file_path,
         table_name=table_name,
@@ -314,19 +353,25 @@ def main(
         if query_file is not None:
             non_interactive_sql = query_file.read_text(encoding="utf-8").strip()
 
-        if non_interactive_sql is not None:
-            response = engine.run_input(non_interactive_sql)
-            exit_code = _render_console_response(Console(), response, engine.max_value_chars)
-            raise typer.Exit(code=exit_code)
-
         if no_ui:
-            response = engine.run_sql(engine.default_query, remember=False)
-            exit_code = _render_console_response(Console(), response, engine.max_value_chars)
-            raise typer.Exit(code=exit_code)
+            _run_console_query_and_exit(engine, non_interactive_sql)
 
-        SqlExplorerTui(engine, startup_activity_messages=startup_activity_messages).run()
+        with stdin_io.stdin_tty_for_tui(use_stdin) as can_run_tui:
+            if not can_run_tui:
+                typer.echo(stdin_io.STDIN_TTY_FALLBACK_MESSAGE)
+                _run_console_query_and_exit(engine, non_interactive_sql)
+            if non_interactive_sql is None:
+                SqlExplorerTui(engine, startup_activity_messages=startup_activity_messages).run()
+            else:
+                SqlExplorerTui(
+                    engine,
+                    startup_activity_messages=startup_activity_messages,
+                    startup_query=non_interactive_sql,
+                ).run()
     finally:
         engine.close()
+        if stdin_capture is not None:
+            stdin_capture.cleanup()
 
 
 if __name__ == "__main__":
