@@ -19,13 +19,15 @@ from textual.events import Blur, Focus, Key
 from textual.widget import Widget
 from textual.widgets import DataTable, Footer, Header, OptionList, Static, TextArea
 
-from sqlexplore.engine import (
+from sqlexplore.completion.completion_types import (
     DEFAULT_HELPER_COMMANDS,
     HELPER_PREFIX_RE,
     IDENT_PREFIX_RE,
     QUOTED_PREFIX_RE,
     CompletionItem,
     CompletionResult,
+)
+from sqlexplore.engine import (
     EngineResponse,
     QueryResult,
     ResultStatus,

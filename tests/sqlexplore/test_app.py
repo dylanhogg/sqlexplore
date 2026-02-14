@@ -8,7 +8,8 @@ from unittest.mock import patch
 from rich.text import Text
 from textual.widgets import DataTable, OptionList, Static, TextArea
 
-from sqlexplore.engine import CompletionItem, SqlExplorerEngine, app_version
+from sqlexplore.completion.completion_types import CompletionItem
+from sqlexplore.engine import SqlExplorerEngine, app_version
 from sqlexplore.tui import NULL_VALUE_COLOR, URL_COLOR, ResultsPreview, SqlExplorerTui, SqlQueryEditor
 
 

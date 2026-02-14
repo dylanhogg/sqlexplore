@@ -1,5 +1,7 @@
+import inspect
 from pathlib import Path
 
+import sqlexplore.completion.completions as completion_module
 from sqlexplore.engine import (
     SqlExplorerEngine,
     flatten_struct_paths,
@@ -70,6 +72,11 @@ def _completion_result(engine: SqlExplorerEngine, text: str):
     return engine.completion_result(text, (0, len(text)))
 
 
+def test_completion_module_does_not_import_engine() -> None:
+    source = inspect.getsource(completion_module)
+    assert "from sqlexplore.engine import" not in source
+
+
 def test_struct_type_helpers_parse_nested_fields(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
@@ -121,6 +128,27 @@ def test_refresh_schema_populates_struct_metadata_by_column(tmp_path: Path) -> N
         assert "nested" in path_types
         assert "nested.k" in path_types
         assert path_types["city"].upper().startswith("VARCHAR")
+    finally:
+        engine.close()
+
+
+def test_refresh_schema_invalidates_completion_caches(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        before = _completion_values(engine, "SELECT ")
+        assert "col_name" in before
+        assert "x" in before
+
+        engine.conn.execute("CREATE TABLE refreshed_source AS SELECT 1 AS y, 2 AS z")
+        engine.conn.execute('DROP VIEW "data"')
+        engine.conn.execute('CREATE VIEW "data" AS SELECT * FROM refreshed_source')
+        engine.refresh_schema()
+
+        after = _completion_values(engine, "SELECT ")
+        assert "y" in after
+        assert "z" in after
+        assert "col_name" not in after
+        assert "x" not in after
     finally:
         engine.close()
 
