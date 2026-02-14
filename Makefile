@@ -16,7 +16,7 @@ which-python:
 clean:
 	rm -rf .venv
 
-run:
+run-local:
 	uv run python -m sqlexplore.app data/example.parquet
 
 run-http:
@@ -28,8 +28,11 @@ run-as-tool:
 run-as-docker:
 	docker compose run --rm app gnaf.parquet
 
-run-example-images:
+run-example-images-1:
 	uv run sqlexplore https://huggingface.co/datasets/mteb/tiny-imagenet/resolve/main/data/valid-00000-of-00001-70d52db3c749a935.parquet
+
+run-example-images-2:
+	uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
 
 docker-build:
 	docker compose build --no-cache

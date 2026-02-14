@@ -86,17 +86,27 @@ def test_download_remote_data_file_does_not_log_progress_lines(
     assert "[download] progress=" not in out
 
 
-def test_download_remote_data_file_refuses_overwrite(tmp_path: Path, capsys: Any) -> None:
+def test_download_remote_data_file_uses_cached_file_when_overwrite_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
     existing = tmp_path / "data.parquet"
-    existing.write_bytes(b"PAR1")
+    existing_contents = b"PAR1"
+    existing.write_bytes(existing_contents)
+
+    def fail_urlopen(_: Any) -> _FakeHttpResponse:
+        raise AssertionError("urlopen should not be called when a cached file exists and overwrite is disabled")
+
+    monkeypatch.setattr(app_module, "urlopen", fail_urlopen)
+
     download_remote = getattr(app_module, "_download_remote_data_file")
-    with pytest.raises(typer.Exit) as out:
-        download_remote("https://example.com/data.parquet", tmp_path)
-    assert out.value.exit_code == 1
-    err = capsys.readouterr().err
-    assert "stopping download" in err
-    assert "--overwrite" in err
-    assert f"{existing.name}" in err
+    out_path = download_remote("https://example.com/data.parquet", tmp_path)
+
+    assert out_path == existing.resolve()
+    assert existing.read_bytes() == existing_contents
+    out = capsys.readouterr().out
+    assert "skipping download" in out
+    assert "--overwrite" in out
+    assert f"{existing.name}" in out
 
 
 def test_download_remote_data_file_overwrites_when_enabled(

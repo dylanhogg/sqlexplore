@@ -5,7 +5,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Ensure SQL always writting to the Activity panel.
+- Add arg to read local cache of downloaded files (--cache-ok ??)
 - Distinguish /describe from /summary
 - Review top N display (Results (1,000/10,000 rows, 24.3 ms)  [json:on])
 - Key binding: Write marimo notebook and uvx open it
@@ -47,6 +47,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 ## Data sources
 
 - https://github.com/pydata/pandas-datareader : Extract data from a wide range of Internet sources into a pandas DataFrame.
+- Add tar/zip support for reading archive contents (or maybe best to pip in tar/zip results instead?) [e.g. https://huggingface.co/datasets/ma-xu/fine-t2i/resolve/main/synthetic_original_prompt_random_resolution/train-000000.tar]
 
 ## Data formatting & schema introspection
 

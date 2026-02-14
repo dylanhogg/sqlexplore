@@ -22,7 +22,7 @@ With `sqlexplore`, you can:
 - JSON-aware rendering in result cells and clickable links in preview.
 - Image bytes in `BLOB` or `STRUCT{bytes,path}` cells render as compact `[img ...]` tags with metadata in preview.
 - Non-interactive mode via `--execute`, `--file`, or `--no-ui`.
-- Remote download controls: custom directory (`--download-dir`) and overwrite behavior (`--overwrite`).
+- Remote download controls: custom directory (`--download-dir`) and overwrite behavior (`--overwrite`); existing local downloads are reused by default.
 - `.txt` files are ingested line-by-line with derived metrics (`line_number`, `word_count`, `line_hash`, etc).
 
 ## Usage examples

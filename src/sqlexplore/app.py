@@ -130,13 +130,12 @@ def _download_remote_data_file(
     if destination.exists() and not overwrite:
         _emit_download_log(
             (
-                f"[download] Warning: local download file {destination.name} already exists, stopping download. "
+                f"[download] Cached local download file {destination.name} already exists, skipping download. "
                 "Use --overwrite to replace it."
             ),
             activity_messages,
-            err=True,
         )
-        raise typer.Exit(code=1)
+        return destination
     elif destination.exists() and overwrite:
         _emit_download_log(f"[download] Overwriting local download file {destination.name}", activity_messages)
 
