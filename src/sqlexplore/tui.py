@@ -813,6 +813,7 @@ class SqlExplorerTui(App[None]):
         self._base_rows: list[tuple[CellValue, ...]] = []
         self._sort_column_index: int | None = None
         self._sort_reverse = False
+        self._active_data_total_rows: int | None = None
         self._last_results_tsv = ""
         self._results_preview_plain_text = ""
         self._activity_lines: list[str] = []
@@ -1071,7 +1072,8 @@ class SqlExplorerTui(App[None]):
 
         message = f"Copied {len(rows):,} rows x {len(columns)} cols as TSV (full query result). Paste into Excel."
         if self._active_result is not None and self._active_result.truncated:
-            message += f" Results pane shows {len(self._active_result.rows):,}/{self._active_result.total_rows:,} rows."
+            out_of_rows = self._results_out_of_rows(self._active_result)
+            message += f" Results pane shows {len(self._active_result.rows):,}/{out_of_rows:,} rows."
         self._log(message, "ok")
 
     def _apply_response(self, response: EngineResponse) -> None:
@@ -1103,8 +1105,18 @@ class SqlExplorerTui(App[None]):
         self._base_rows = list(result.rows)
         self._sort_column_index = None
         self._sort_reverse = False
+        self._active_data_total_rows = self.engine.row_count() if result.sql else None
 
         self._redraw_results_table()
+
+    def _results_out_of_rows(self, result: QueryResult) -> int:
+        if not result.sql:
+            return result.total_rows
+        data_total_rows = self._active_data_total_rows
+        if data_total_rows is None:
+            data_total_rows = self.engine.row_count()
+            self._active_data_total_rows = data_total_rows
+        return max(result.total_rows, data_total_rows)
 
     def _detect_json_columns(self, result: QueryResult) -> set[int]:
         if not self._json_rendering_enabled:
@@ -1184,7 +1196,8 @@ class SqlExplorerTui(App[None]):
                     rendered_row.append(self._render_scalar_cell(value))
             table.add_row(*rendered_row)
 
-        header = f"Results ({len(result.rows):,}/{result.total_rows:,} rows, {result.elapsed_ms:.1f} ms)"
+        out_of_rows = self._results_out_of_rows(result)
+        header = f"Results ({len(result.rows):,}/{out_of_rows:,} rows, {result.elapsed_ms:.1f} ms)"
         if result.truncated:
             header += " [truncated]"
         if self._sort_column_index is not None and self._sort_column_index < len(result.columns):

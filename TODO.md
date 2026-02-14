@@ -5,7 +5,6 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Pipe in any shell cmd output into new data for analysis
 - Review top N display (Results (1,000/10,000 rows, 24.3 ms)  [json:on])
 - Key binding: Write marimo notebook and uvx open it
 - Distinguish /describe from /summary

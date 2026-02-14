@@ -322,6 +322,30 @@ def test_copy_tsv_shortcut_shows_error_when_no_result_available(tmp_path: Path) 
     asyncio.run(run())
 
 
+def test_results_header_out_of_uses_full_data_length_when_rows_limit_is_set(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,x\n2,y\n3,z\n4,w\n5,v\n")
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+
+                editor.text = "/rows 1"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                editor.text = 'SELECT * FROM "data" LIMIT 2'
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                header = app.query_one("#results_header", Static)
+                assert "Results (1/5 rows," in str(header.render())
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_activity_and_preview_selection_can_be_copied(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)
