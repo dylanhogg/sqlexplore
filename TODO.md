@@ -5,14 +5,21 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Ensure SQL always writting to the Activity panel.
+- Review top N display (Results (1,000/10,000 rows, 24.3 ms)  [json:on])
+- Key binding: Write marimo notebook and uvx open it
 - Distinguish /describe from /summary
+- Integrate LiteLLM
+    - Simple /llm <cmd> "prompt"
+    - e.g. /llm fix
 
 ## App code quality
 
+- Review pypi publish workflow
 - Add test cov tool for feedabck
 - Add "use asserts" to AGENTS.md
 - Add "no documentation additions/updates unless explicitly requested" to AGENTS.md
+- Add LLM:
+    - Fix Binder Errors
 
 ## UI & UX (layout, navigation, keybindings)
 
@@ -39,10 +46,10 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 ## Data sources
 
 - https://github.com/pydata/pandas-datareader : Extract data from a wide range of Internet sources into a pandas DataFrame.
+- Add tar/zip support for reading archive contents (or maybe best to pip in tar/zip results instead?) [e.g. https://huggingface.co/datasets/ma-xu/fine-t2i/resolve/main/synthetic_original_prompt_random_resolution/train-000000.tar]
 
 ## Data formatting & schema introspection
 
-- JSON formatting if JSON column is detected
 - Enable create JSON schema (best-guess field descriptions, etc.)
 
 ## Analytics & profiling
@@ -60,8 +67,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## Visualisation
 
-- Column summaries like on Huggingface datasets page
-- Inspiration from: https://github.com/adamerose/pandasgui
+- Column summaries like on Huggingface datasets page (also see https://github.com/deeplook/sparklines)
+- use inspiration from: https://github.com/adamerose/pandasgui
 
 ## Integrations / “open in …”
 

@@ -1,8 +1,105 @@
 # sqlexplore
 
-SQL exploration over data files with your CLI
+Get answers from messy data files fast, without building pipelines first.
 
-Currently in development (Feb 2026).
+With `sqlexplore`, you can:
+
+- Inspect new datasets in minutes instead of writing setup scripts.
+- Ask ad hoc questions with SQL and get immediate feedback.
+- Move from quick profiling to exportable results in one terminal workflow.
+
+`sqlexplore` is a terminal SQL workbench for flat files. Point it at a local or remote dataset, then explore with DuckDB SQL in an interactive TUI or run one-shot queries in standard CLI mode.
+
+## Useful features
+
+- Works with `.csv`, `.tsv`, `.txt`, `.parquet`, and `.pq`.
+- Accepts local paths and `http(s)` URLs for supported file types.
+- Accepts piped stdin text (omit `data` when piping) and opens in TUI by default.
+  If no controlling tty is available, it falls back to `--no-ui`.
+- Interactive TUI with query editor, results grid, preview pane, and activity log.
+- SQL + helper commands for common analysis tasks: `/summary`, `/profile`, `/hist`, `/corr`, `/dupes`, `/top`, `/group`, and more.
+- Context-aware autocomplete for SQL clauses and helper command arguments.
+- Query history and rerun support (`/history`, `/rerun`), plus editor helpers (`/last`, `/clear`).
+- Export last result to `.csv`, `.parquet`/`.pq`, or `.json` with `/save`.
+- JSON-aware rendering in result cells and clickable links in preview.
+- Image bytes in `BLOB` or `STRUCT{bytes,path}` cells render as compact `[img ...]` tags with metadata in preview.
+- Non-interactive mode via `--no-ui` (optionally with `--execute` or `--file`).
+- Remote download controls: custom directory (`--download-dir`) and overwrite behavior (`--overwrite`); existing local downloads are reused by default.
+- `.txt` files are ingested line-by-line with derived metrics (`line_number`, `word_count`, `line_hash`, etc).
+
+## Usage examples
+
+Open a local file in the TUI:
+
+```bash
+sqlexplore ./data/example.parquet
+```
+
+Open a remote dataset URL (downloaded first, then loaded):
+
+```bash
+sqlexplore https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
+```
+
+Run one SQL query and exit:
+
+```bash
+sqlexplore ./data/example.parquet --execute "SELECT COUNT(*) AS n FROM data" --no-ui
+```
+
+Run SQL from a file and exit:
+
+```bash
+sqlexplore ./data/example.parquet --file ./queries/report.sql --no-ui
+```
+
+Run default sample query in plain terminal output (no TUI):
+
+```bash
+sqlexplore ./data/example.csv --no-ui
+```
+
+Analyze piped terminal text:
+
+```bash
+ls -lha | sqlexplore
+```
+
+Analyze piped terminal text in plain terminal output (no TUI):
+
+```bash
+ls -lha | sqlexplore --no-ui
+```
+
+Pipe text and open TUI with a startup SQL query:
+
+```bash
+ps aux | sqlexplore - --execute "SELECT line FROM data WHERE line ILIKE '%python%'"
+```
+
+Control remote download location and overwrite:
+
+```bash
+sqlexplore https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet --download-dir ./data/cache --overwrite
+```
+
+Typical helper commands in the editor:
+
+```sql
+/summary
+/profile amount
+/top category 10
+/hist amount 20 | amount > 0
+/corr tip_amount total_amount
+/dupes order_id
+/save ./out/results.parquet
+```
+
+Show installed version:
+
+```bash
+sqlexplore --version
+```
 
 ## Install
 
@@ -12,63 +109,13 @@ Requires Python 3.13+.
 pip install sqlexplore
 ```
 
-Optional (`uv` tool install):
+or:
 
 ```bash
 uv tool install sqlexplore
 ```
 
-## Usage
-
-Local file:
-
-```bash
-sqlexplore ./data/example.parquet
-```
-
-Remote file URL:
-
-```bash
-sqlexplore https://example.com/data_file.csv
-```
-
-Show version:
-
-```bash
-sqlexplore --version
-```
-
-Remote URL behavior:
-
-- Supports `http://` and `https://` URLs ending in `.csv`, `.tsv`, `.txt`, `.parquet`, or `.pq`.
-- Downloads to `<app-user-dir>/downloads/<filename>` by default.
-- Use `--download-dir /your/path` to override the download location.
-- If local download target already exists, prints warning and exits (no overwrite by default). Use `--overwrite` to replace it.
-- Logs download details before normal app flow: remote/local path, progress, elapsed time, and file size.
-- In TUI mode, the Activity pane shows app version on load, then startup download log lines (if any).
-- Activity pane logs executed SQL for startup query runs, manual SQL, and helper/slash-command generated SQL.
-
-Result formatting:
-
-- JSON syntax highlighting is auto-applied for `VARCHAR`/text columns when sampled values look like JSON objects/arrays.
-- Detection samples only a few visible rows (not full columns) to keep rendering fast.
-- Highlighting is disabled when query result row count is over `100,000`.
-- `.txt` sources load as one line per row with extra metrics columns: `line_number`, `line_length`, `line_hash`, `word_count`, `mean_word_length`, `median_word_length`, `max_word_length`, `min_word_length`.
-
-Autocomplete behavior:
-
-- Completions auto-open from engine context for SQL clauses and helper command arguments (for example `SELECT ` and `/top `).
-- `Up/Down` navigates the completion menu whenever it is visible.
-- `Tab` accepts the selected completion when the menu is visible; otherwise it inserts editor indentation.
-- `Esc` closes the completion menu.
-- `Ctrl+Space` opens completion mode explicitly.
-
-## Known limitations
-
-- Python 3.12 and below are not supported.
-- Remote downloads only support `.csv`, `.tsv`, `.txt`, `.parquet`, `.pq`.
-
 ## Links
 
-- https://github.com/dylanhogg/sqlexplore
-- https://pypi.org/project/sqlexplore/
+- [GitHub](https://github.com/dylanhogg/sqlexplore)
+- [PyPI](https://pypi.org/project/sqlexplore/)

@@ -37,6 +37,7 @@ from sqlexplore.engine import (
     result_columns,
     sort_cell_key,
 )
+from sqlexplore.image_cells import format_image_cell_token, format_image_preview_metadata, summarize_image_cell
 
 CellValue = object
 RenderedCell = str | Text
@@ -725,7 +726,7 @@ class ResultsTable(DataTable[RenderedCell]):
 
 
 class SqlExplorerTui(App[None]):
-    TITLE = "sqlexplorer"
+    TITLE = f"sqlexplorer v{app_version()}"
     SUB_TITLE = "explore your data"
 
     CSS = """
@@ -796,16 +797,23 @@ class SqlExplorerTui(App[None]):
 
     BINDINGS = _build_shortcuts(for_editor=False)
 
-    def __init__(self, engine: SqlExplorerEngine, startup_activity_messages: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        engine: SqlExplorerEngine,
+        startup_activity_messages: list[str] | None = None,
+        startup_query: str | None = None,
+    ) -> None:
         super().__init__()
         self.engine = engine
         self._startup_activity_messages = tuple(startup_activity_messages or [])
+        self._startup_query = startup_query if startup_query is not None else self.engine.default_query
         self._history_cursor: int | None = None
         self._completion_window_start = 0
         self._active_result: QueryResult | None = None
         self._base_rows: list[tuple[CellValue, ...]] = []
         self._sort_column_index: int | None = None
         self._sort_reverse = False
+        self._active_data_total_rows: int | None = None
         self._last_results_tsv = ""
         self._results_preview_plain_text = ""
         self._activity_lines: list[str] = []
@@ -934,7 +942,7 @@ class SqlExplorerTui(App[None]):
             with Vertical(id="workspace"):
                 yield Static("Query", classes="section-title")
                 yield SqlQueryEditor(
-                    self.engine.default_query,
+                    self._startup_query,
                     self.engine.completion_tokens,
                     self._history_prev,
                     self._history_next,
@@ -1064,7 +1072,8 @@ class SqlExplorerTui(App[None]):
 
         message = f"Copied {len(rows):,} rows x {len(columns)} cols as TSV (full query result). Paste into Excel."
         if self._active_result is not None and self._active_result.truncated:
-            message += f" Results pane shows {len(self._active_result.rows):,}/{self._active_result.total_rows:,} rows."
+            out_of_rows = self._results_out_of_rows(self._active_result)
+            message += f" Results pane shows {len(self._active_result.rows):,}/{out_of_rows:,} rows."
         self._log(message, "ok")
 
     def _apply_response(self, response: EngineResponse) -> None:
@@ -1096,8 +1105,18 @@ class SqlExplorerTui(App[None]):
         self._base_rows = list(result.rows)
         self._sort_column_index = None
         self._sort_reverse = False
+        self._active_data_total_rows = self.engine.row_count() if result.sql else None
 
         self._redraw_results_table()
+
+    def _results_out_of_rows(self, result: QueryResult) -> int:
+        if not result.sql:
+            return result.total_rows
+        data_total_rows = self._active_data_total_rows
+        if data_total_rows is None:
+            data_total_rows = self.engine.row_count()
+            self._active_data_total_rows = data_total_rows
+        return max(result.total_rows, data_total_rows)
 
     def _detect_json_columns(self, result: QueryResult) -> set[int]:
         if not self._json_rendering_enabled:
@@ -1123,6 +1142,9 @@ class SqlExplorerTui(App[None]):
     def _render_json_cell(self, value: CellValue) -> RenderedCell:
         if not self._json_rendering_enabled:
             return self._render_scalar_cell(value)
+        image = summarize_image_cell(value)
+        if image is not None:
+            return Text(format_image_cell_token(image), end="", no_wrap=True)
         compact = _compact_json_cell(value)
         if compact is None:
             return self._render_scalar_cell(value)
@@ -1135,6 +1157,15 @@ class SqlExplorerTui(App[None]):
     def _render_scalar_cell(self, value: CellValue) -> RenderedCell:
         if value is None:
             return Text("NULL", style=NULL_VALUE_STYLE, end="", no_wrap=True)
+        if not self._json_rendering_enabled:
+            text = format_scalar(value, self.engine.max_value_chars)
+            rendered = Text(text, end="", no_wrap=True)
+            if not _stylize_links(rendered, clickable=False):
+                return text
+            return rendered
+        image = summarize_image_cell(value)
+        if image is not None:
+            return Text(format_image_cell_token(image), end="", no_wrap=True)
         text = format_scalar(value, self.engine.max_value_chars)
         rendered = Text(text, end="", no_wrap=True)
         if not _stylize_links(rendered, clickable=False):
@@ -1165,7 +1196,8 @@ class SqlExplorerTui(App[None]):
                     rendered_row.append(self._render_scalar_cell(value))
             table.add_row(*rendered_row)
 
-        header = f"Results ({len(result.rows):,}/{result.total_rows:,} rows, {result.elapsed_ms:.1f} ms)"
+        out_of_rows = self._results_out_of_rows(result)
+        header = f"Results ({len(result.rows):,}/{out_of_rows:,} rows, {result.elapsed_ms:.1f} ms)"
         if result.truncated:
             header += " [truncated]"
         if self._sort_column_index is not None and self._sort_column_index < len(result.columns):
@@ -1212,6 +1244,10 @@ class SqlExplorerTui(App[None]):
             return "NULL", False
         if not self._json_rendering_enabled:
             return str(value_any), False
+        image = summarize_image_cell(value_any)
+        if image is not None:
+            metadata = format_image_preview_metadata(image)
+            return f"{metadata}\nraw:\n{value_any}", False
         should_try_json = is_struct_type_name(type_name) or is_varchar_type(type_name) or isinstance(value, dict | list)
         if should_try_json:
             pretty = _pretty_json_cell(value_any)

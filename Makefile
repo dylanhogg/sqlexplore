@@ -16,11 +16,24 @@ which-python:
 clean:
 	rm -rf .venv
 
-run:
+run-example-local:
 	uv run python -m sqlexplore.app data/example.parquet
 
-run-http:
+run-example-http:
 	uv run python -m sqlexplore.app https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet --overwrite
+
+run-example-images-1:
+	uv run sqlexplore https://huggingface.co/datasets/mteb/tiny-imagenet/resolve/main/data/valid-00000-of-00001-70d52db3c749a935.parquet
+
+run-example-images-2:
+	uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
+
+run-example-pipe-1:
+	ps aux | uv run sqlexplore
+
+run-example-pipe-2:
+	ps aux | uv run sqlexplore --execute "SELECT * FROM data WHERE line ILIKE '%python%' LIMIT 100"
+
 
 run-as-tool:
 	uv run sqlexplore data/example.parquet
