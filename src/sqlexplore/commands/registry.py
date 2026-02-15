@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from sqlexplore.completion.models import CompletionItem
-from sqlexplore.engine_models import EngineResponse
+from sqlexplore.core.engine_models import EngineResponse
 
 from .handlers import (
     build_sql_helper_handler,

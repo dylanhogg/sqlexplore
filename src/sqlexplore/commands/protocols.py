@@ -1,7 +1,7 @@
 from typing import Any, Protocol
 
 from sqlexplore.completion.models import CompletionItem
-from sqlexplore.engine_models import EngineResponse
+from sqlexplore.core.engine_models import EngineResponse
 
 
 class CommandEngine(Protocol):

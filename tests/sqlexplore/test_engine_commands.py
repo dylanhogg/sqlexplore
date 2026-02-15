@@ -4,7 +4,7 @@ from pathlib import Path
 import sqlexplore.commands.handlers as command_handlers_module
 import sqlexplore.commands.registry as commands_module
 import sqlexplore.completion.completions as completion_module
-from sqlexplore.engine import (
+from sqlexplore.core.engine import (
     SqlExplorerEngine,
     flatten_struct_paths,
     is_struct_type,
@@ -76,14 +76,14 @@ def _completion_result(engine: SqlExplorerEngine, text: str):
 
 def test_completion_module_does_not_import_engine() -> None:
     source = inspect.getsource(completion_module)
-    assert "from sqlexplore.engine import" not in source
+    assert "from sqlexplore.core.engine import" not in source
 
 
 def test_command_modules_do_not_import_engine() -> None:
     command_source = inspect.getsource(commands_module)
     handler_source = inspect.getsource(command_handlers_module)
-    assert "from sqlexplore.engine import" not in command_source
-    assert "from sqlexplore.engine import" not in handler_source
+    assert "from sqlexplore.core.engine import" not in command_source
+    assert "from sqlexplore.core.engine import" not in handler_source
 
 
 def test_struct_type_helpers_parse_nested_fields(tmp_path: Path) -> None:

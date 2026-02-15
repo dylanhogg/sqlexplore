@@ -8,7 +8,7 @@ import typer
 from typer.testing import CliRunner
 
 import sqlexplore.app as app_module
-import sqlexplore.engine as engine_module
+import sqlexplore.core.engine as engine_module
 
 
 def _expected_default_download_dir() -> Path:

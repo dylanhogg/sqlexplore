@@ -3,7 +3,7 @@ from io import StringIO
 import pytest
 import typer
 
-from sqlexplore import stdin_io
+from sqlexplore.cli import stdin_io
 
 
 class _FakeStream(StringIO):

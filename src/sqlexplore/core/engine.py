@@ -21,9 +21,9 @@ from sqlexplore.commands.registry import (
 )
 from sqlexplore.completion.completions import CompletionEngine, EngineCompletionCatalog
 from sqlexplore.completion.models import CompletionItem, CompletionResult, SqlClause
-from sqlexplore.engine_models import EngineResponse, QueryResult, ResultStatus
-from sqlexplore.result_utils import format_scalar, result_column_types, result_columns, sql_literal
-from sqlexplore.sql_templates import (
+from sqlexplore.core.engine_models import EngineResponse, QueryResult, ResultStatus
+from sqlexplore.core.result_utils import format_scalar, result_column_types, result_columns, sql_literal
+from sqlexplore.core.sql_templates import (
     DEFAULT_LOAD_QUERY_TEMPLATE,
     TXT_LOAD_QUERY_TEMPLATE,
     render_load_query,

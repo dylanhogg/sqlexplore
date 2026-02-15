@@ -10,8 +10,8 @@ from sqlexplore.completion.helpers import (
     parse_single_positive_int_arg,
     quote_ident,
 )
-from sqlexplore.engine_models import EngineResponse, ResultStatus
-from sqlexplore.result_utils import format_scalar, result_columns, sql_literal
+from sqlexplore.core.engine_models import EngineResponse, ResultStatus
+from sqlexplore.core.result_utils import format_scalar, result_columns, sql_literal
 
 from .protocols import CommandEngine
 
