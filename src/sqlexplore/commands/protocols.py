@@ -8,6 +8,7 @@ class CommandEngine(Protocol):
     conn: Any
     table_name: str
     default_limit: int
+    max_rows_display: int
     max_value_chars: int
     columns: list[str]
     column_types: dict[str, str]

@@ -273,8 +273,10 @@ def test_setting_editor_and_exit_commands_update_engine_state(tmp_path: Path) ->
 
         limit_out = engine.run_input("/limit 9")
         assert limit_out.status == "ok"
-        assert limit_out.message == "Default helper query limit set to 9"
+        assert limit_out.message == "Default helper query limit set to 9; row display limit set to 9"
+        assert limit_out.load_query == 'SELECT * FROM "data" LIMIT 9'
         assert engine.default_limit == 9
+        assert engine.max_rows_display == 9
 
         engine.run_sql('SELECT * FROM "data" LIMIT 2')
         last_out = engine.run_input("/last")
@@ -292,6 +294,27 @@ def test_setting_editor_and_exit_commands_update_engine_state(tmp_path: Path) ->
         quit_out = engine.run_input("/quit")
         assert quit_out.status == "info"
         assert quit_out.should_exit is True
+    finally:
+        engine.close()
+
+
+def test_limit_command_updates_row_display_for_custom_sql(tmp_path: Path) -> None:
+    csv_rows = "".join(f"a,{idx}\n" for idx in range(1, 121))
+    engine = _build_engine(tmp_path, csv_text=f"col_name,x\n{csv_rows}")
+    try:
+        engine.max_rows_display = 50
+        limit_out = engine.run_input("/limit 80")
+        assert limit_out.status == "ok"
+        assert engine.default_limit == 80
+        assert engine.max_rows_display == 80
+
+        out = engine.run_sql('SELECT * FROM "data" ORDER BY x')
+        assert out.status == "ok"
+        assert out.result is not None
+        assert len(out.result.rows) == 80
+        assert out.result.total_rows == 120
+        assert out.result.truncated is True
+        assert "(row display limit=80)" in out.message
     finally:
         engine.close()
 

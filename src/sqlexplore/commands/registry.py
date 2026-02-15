@@ -221,7 +221,7 @@ def build_command_specs(engine: CommandEngine, completion: CommandCompletionCata
         CommandSpec(
             "/limit",
             "/limit <n>",
-            "Set helper query row limit.",
+            "Set helper query + row display limits.",
             _bind(engine, cmd_limit),
             completion.complete_limit,
         ),

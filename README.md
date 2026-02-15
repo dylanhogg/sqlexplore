@@ -86,6 +86,8 @@ sqlexplore https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/githu
 Typical helper commands in the editor:
 
 ```sql
+/limit 5000
+/rows 5000
 /summary
 /profile amount
 /top category 10
@@ -94,6 +96,9 @@ Typical helper commands in the editor:
 /dupes order_id
 /save ./out/results.parquet
 ```
+
+`/limit <n>` sets both helper query limit and row display limit.  
+`/rows <n>` only sets row display limit.
 
 Show installed version:
 

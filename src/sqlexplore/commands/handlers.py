@@ -281,12 +281,15 @@ def cmd_values(engine: CommandEngine, args: str) -> EngineResponse:
 
 
 def cmd_limit(engine: CommandEngine, args: str) -> EngineResponse:
-    return set_positive_int_setting(
-        engine,
-        args,
-        "/limit <n>",
-        "Default helper query limit",
-        lambda value: setattr(engine, "default_limit", value),
+    parsed = parse_single_positive_int_arg(args)
+    if parsed is None:
+        return usage_error("/limit <n>")
+    engine.default_limit = parsed
+    engine.max_rows_display = parsed
+    return response(
+        status="ok",
+        message=f"Default helper query limit set to {parsed}; row display limit set to {parsed}",
+        load_query=f'SELECT * FROM "{engine.table_name}" LIMIT {engine.default_limit}',
     )
 
 

@@ -488,7 +488,7 @@ class EngineCompletionCatalog:
 
     def _complete_limit(self, args: str, trailing_space: bool) -> list[CompletionItem]:
         del args, trailing_space
-        return self._numeric_completion_items([10, 25, 100, 500], detail="helper query limit")
+        return self._numeric_completion_items([10, 25, 100, 500], detail="helper + display row limit")
 
     def _complete_save(self, args: str, trailing_space: bool) -> list[CompletionItem]:
         del args, trailing_space
