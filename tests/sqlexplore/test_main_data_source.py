@@ -1,3 +1,4 @@
+import re
 from contextlib import contextmanager
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -9,6 +10,12 @@ from typer.testing import CliRunner
 
 import sqlexplore.app as app_module
 import sqlexplore.core.engine as engine_module
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(value: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", value)
 
 
 def _expected_default_download_dir() -> Path:
@@ -843,7 +850,7 @@ def test_main_rejects_execute_and_query_file_together(tmp_path: Path) -> None:
 
     result = runner.invoke(app_module.app, ["--execute", "SELECT 2", "--file", str(query_file)])
     assert result.exit_code == 2
-    assert "Use either --execute or --file, not both." in result.output
+    assert "Use either --execute or --file, not both." in _strip_ansi(result.output)
 
 
 def test_main_reads_query_file_for_no_ui_execution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

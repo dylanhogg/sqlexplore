@@ -34,7 +34,6 @@ run-example-pipe-1:
 run-example-pipe-2:
 	ps aux | uv run sqlexplore --execute "SELECT * FROM data WHERE line ILIKE '%python%' LIMIT 100"
 
-
 run-as-tool:
 	uv run sqlexplore data/example.parquet
 
@@ -46,6 +45,9 @@ docker-build:
 
 test:
 	uv run pytest -vv --capture=no --no-cov tests
+
+test-selected:
+	uv run pytest -vv --capture=no --no-cov tests -k "test_main_rejects_execute_and_query_file_together"
 
 test-cov:
 	uv run pytest -vv --capture=no --cov-report=term-missing --cov-report=html tests
