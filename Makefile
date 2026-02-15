@@ -20,7 +20,7 @@ run-example-local:
 	uv run python -m sqlexplore.app data/example.parquet
 
 run-example-http:
-	uv run python -m sqlexplore.app https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet --overwrite
+	uv run python -m sqlexplore.app https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
 
 run-example-images-1:
 	uv run sqlexplore https://huggingface.co/datasets/mteb/tiny-imagenet/resolve/main/data/valid-00000-of-00001-70d52db3c749a935.parquet
