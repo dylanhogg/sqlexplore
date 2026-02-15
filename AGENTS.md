@@ -8,6 +8,7 @@ This file contains guidelines for AI agents to follow when writing code in this 
 - Write simple, clean and minimal code.
 - Don't over complicate or over engineer solutions.
 - Prefer implicit namespace packages and avoid creating __init__.py files unless there is a clear, justified need.
+- Only update documentation or README.md if explicitly requested.
 - Keep sensitive information in `.env` files.
 - Keep functions small and focused on a single responsibility.
 - Use type hints for all function parameters and return values.
@@ -45,6 +46,7 @@ This file contains guidelines for AI agents to follow when writing code in this 
 ## Tests
 
 - Use `pytest` for testing
+- Use `pytest-cov` for code coverage reporting
 - Follow the naming convention: test_*.py
 - Use fixtures for test setup and teardown
 - Place test files in `./tests/<package_name>/`

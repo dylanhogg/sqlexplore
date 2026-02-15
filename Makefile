@@ -45,7 +45,10 @@ docker-build:
 	docker compose build --no-cache
 
 test:
-	uv run pytest -vv --capture=no tests
+	uv run pytest -vv --capture=no --no-cov tests
+
+test-cov:
+	uv run pytest -vv --capture=no --cov-report=term-missing --cov-report=html tests
 
 test-as-docker:
 	docker compose run --rm tests
