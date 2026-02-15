@@ -5,18 +5,26 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Fix default limit, and bug updating it via /limit N command
-- Code coverage!
+
+- Review all commands, and ensure they have unit tests, and are in the help text
+- Perf review copy TSV from uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
 - Key binding: Write marimo notebook and uvx open it
 - Distinguish /describe from /summary
 - Integrate LiteLLM
     - Simple /llm <cmd> "prompt"
+        - /llm query "my query in natural language"
+        - /llm suggest
+        - /llm fix
+        - /llm explain
+        - /llm optimize
+        - /llm summarize
+        - /llm chat
+        - /llm categoise col
     - e.g. /llm fix
 
 ## App code quality
 
 - Review pypi publish workflow
-- Add test cov tool for feedabck
 - Add "use asserts" to AGENTS.md
 - Add "no documentation additions/updates unless explicitly requested" to AGENTS.md
 - Add LLM:

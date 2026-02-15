@@ -1,5 +1,6 @@
+import re
 from contextlib import contextmanager
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, cast
 
@@ -9,6 +10,12 @@ from typer.testing import CliRunner
 
 import sqlexplore.app as app_module
 import sqlexplore.core.engine as engine_module
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(value: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", value)
 
 
 def _expected_default_download_dir() -> Path:
@@ -39,6 +46,80 @@ class _FakeHttpResponse:
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         return None
+
+
+class _ExplodingHttpResponse:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self._reads = 0
+        self.headers: dict[str, str] = {"Content-Length": str(sum(len(chunk) for chunk in chunks))}
+
+    def read(self, _size: int = -1) -> bytes:
+        if self._reads < len(self._chunks):
+            chunk = self._chunks[self._reads]
+            self._reads += 1
+            return chunk
+        raise RuntimeError("stream read failed")
+
+    def __enter__(self) -> "_ExplodingHttpResponse":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+
+def test_format_byte_count_scales_kb_mb_and_gb() -> None:
+    format_byte_count = getattr(app_module, "_format_byte_count")
+    assert format_byte_count(1024) == "1.0 KB"
+    assert format_byte_count(1024 * 1024) == "1.0 MB"
+    assert format_byte_count(1024 * 1024 * 1024) == "1.0 GB"
+
+
+def test_remote_filename_defaults_to_sanitized_host_when_path_is_empty() -> None:
+    remote_filename = getattr(app_module, "_remote_filename")
+    assert remote_filename("https://example.com:8443") == "example.com-8443.parquet"
+
+
+def test_emit_download_log_can_skip_activity_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    emit_download_log = getattr(app_module, "_emit_download_log")
+    calls: list[tuple[str, bool]] = []
+
+    def fake_echo(message: str, err: bool = False) -> None:
+        calls.append((message, err))
+
+    monkeypatch.setattr(app_module.typer, "echo", fake_echo)
+    messages: list[str] = []
+    emit_download_log("hello", messages, echo=True, include_activity=False)
+
+    assert calls == [("hello", False)]
+    assert messages == []
+
+
+def test_remote_content_length_handles_missing_and_invalid_headers() -> None:
+    remote_content_length = getattr(app_module, "_remote_content_length")
+
+    class _NoHeaders:
+        headers: Any = None
+
+    assert remote_content_length(_NoHeaders()) is None
+    assert remote_content_length(type("R", (), {"headers": {"Content-Length": "bad"}})()) is None
+    assert remote_content_length(type("R", (), {"headers": {"Content-Length": "0"}})()) is None
+    assert remote_content_length(type("R", (), {"headers": {"Content-Length": "7"}})()) == 7
+
+
+def test_ensure_download_dir_wraps_mkdir_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ensure_download_dir = getattr(app_module, "_ensure_download_dir")
+    target = tmp_path / "downloads"
+    real_mkdir = Path.mkdir
+
+    def failing_mkdir(self: Path, parents: bool = False, exist_ok: bool = False) -> None:
+        if self == target:
+            raise OSError("permission denied")
+        real_mkdir(self, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", failing_mkdir)
+    with pytest.raises(typer.BadParameter, match=r"Download directory is not writable"):
+        ensure_download_dir(target)
 
 
 def test_download_remote_data_file_writes_file_and_logs(
@@ -140,6 +221,42 @@ def test_download_remote_data_file_rejects_file_path_as_download_dir(tmp_path: P
         download_remote("https://example.com/data.parquet", occupied_path)
 
 
+def test_download_remote_data_file_cleans_up_partial_file_when_stream_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://example.com/data.parquet"
+    expected = (tmp_path / "data.parquet").resolve()
+
+    def fake_urlopen(request: Any) -> _ExplodingHttpResponse:
+        assert request.full_url == url
+        return _ExplodingHttpResponse([b"PAR1", b"ABCD"])
+
+    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
+    download_remote = getattr(app_module, "_download_remote_data_file")
+
+    with pytest.raises(typer.BadParameter, match=r"Failed to download data file"):
+        download_remote(url, tmp_path)
+    assert expected.exists() is False
+
+
+def test_download_remote_data_file_wraps_error_before_progress_bar_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://example.com/data.parquet"
+    expected = (tmp_path / "data.parquet").resolve()
+
+    def fail_urlopen(request: Any) -> _FakeHttpResponse:
+        assert request.full_url == url
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(app_module, "urlopen", fail_urlopen)
+    download_remote = getattr(app_module, "_download_remote_data_file")
+
+    with pytest.raises(typer.BadParameter, match=r"Failed to download data file"):
+        download_remote(url, tmp_path)
+    assert expected.exists() is False
+
+
 @pytest.mark.parametrize(
     "url,expected",
     [
@@ -157,6 +274,38 @@ def test_resolve_data_path_rejects_remote_unsupported_extension() -> None:
     resolve_data_path = getattr(app_module, "_resolve_data_path")
     with pytest.raises(typer.BadParameter, match=r"Remote URL must end with \.csv, \.tsv, \.txt, \.parquet, or \.pq\."):
         resolve_data_path("https://example.com/data.json", download_dir=Path("/tmp"))
+
+
+def test_resolve_data_path_rejects_empty_value(tmp_path: Path) -> None:
+    resolve_data_path = getattr(app_module, "_resolve_data_path")
+    with pytest.raises(typer.BadParameter, match=r"Data path cannot be empty"):
+        resolve_data_path("   ", download_dir=tmp_path)
+
+
+def test_resolve_data_path_rejects_missing_local_file(tmp_path: Path) -> None:
+    resolve_data_path = getattr(app_module, "_resolve_data_path")
+    with pytest.raises(typer.BadParameter, match=r"Data file not found"):
+        resolve_data_path(str(tmp_path / "missing.csv"), download_dir=tmp_path)
+
+
+def test_resolve_data_path_rejects_directory_path(tmp_path: Path) -> None:
+    resolve_data_path = getattr(app_module, "_resolve_data_path")
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    with pytest.raises(typer.BadParameter, match=r"Data path is not a file"):
+        resolve_data_path(str(folder), download_dir=tmp_path)
+
+
+def test_resolve_data_path_rejects_unreadable_local_file(tmp_path: Path) -> None:
+    resolve_data_path = getattr(app_module, "_resolve_data_path")
+    data_path = (tmp_path / "data.csv").resolve()
+    data_path.write_text("x\n1\n", encoding="utf-8")
+    data_path.chmod(0o000)
+    try:
+        with pytest.raises(typer.BadParameter, match=r"Data file is not readable"):
+            resolve_data_path(str(data_path), download_dir=tmp_path)
+    finally:
+        data_path.chmod(0o600)
 
 
 def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -692,6 +841,70 @@ def test_main_rejects_empty_stdin_input() -> None:
     result = runner.invoke(app_module.app, ["-"], input="")
     assert result.exit_code == 2
     assert app_module.stdin_io.STDIN_EMPTY_ERROR in result.output
+
+
+def test_main_rejects_execute_and_query_file_together(tmp_path: Path) -> None:
+    runner = CliRunner()
+    query_file = tmp_path / "query.sql"
+    query_file.write_text("SELECT 1", encoding="utf-8")
+
+    result = runner.invoke(app_module.app, ["--execute", "SELECT 2", "--file", str(query_file)])
+    assert result.exit_code == 2
+    assert "Use either --execute or --file, not both." in _strip_ansi(result.output)
+
+
+def test_main_reads_query_file_for_no_ui_execution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    captured: dict[str, Any] = {}
+    query_file = tmp_path / "query.sql"
+    query_file.write_text("  SELECT line FROM data  \n", encoding="utf-8")
+
+    _patch_stdin_fake_engine(monkeypatch, captured)
+    result = runner.invoke(app_module.app, ["-", "--file", str(query_file), "--no-ui"], input="alpha\n")
+
+    assert result.exit_code == 0
+    assert captured["run_input"] == "SELECT line FROM data"
+    assert captured["closed"] is True
+
+
+def test_render_console_response_renders_generated_sql_and_table_and_error_status() -> None:
+    render_console_response = getattr(app_module, "_render_console_response")
+    output = StringIO()
+    console = app_module.Console(file=output, width=120, color_system=None, force_terminal=False)
+
+    response = app_module.EngineResponse(
+        status="error",
+        message="query failed",
+        generated_sql="SELECT * FROM data",
+        result=app_module.QueryResult(
+            sql="SELECT * FROM data",
+            columns=["name", "score"],
+            column_types=["VARCHAR", "INTEGER"],
+            rows=[("alphabet", 42)],
+            elapsed_ms=12.3,
+            total_rows=2,
+            truncated=True,
+        ),
+    )
+    exit_code = render_console_response(console, response, max_value_chars=5)
+
+    assert exit_code == 1
+    text = output.getvalue()
+    assert "Generated SQL" in text
+    assert "Result (1/2 rows," in text
+    assert "12.3 ms)" in text
+    assert "al..." in text
+    assert "query failed" in text
+
+
+def test_render_console_response_returns_zero_without_message_panel() -> None:
+    render_console_response = getattr(app_module, "_render_console_response")
+    output = StringIO()
+    console = app_module.Console(file=output, width=100, color_system=None, force_terminal=False)
+
+    response = app_module.EngineResponse(status="ok", message="")
+    assert render_console_response(console, response, max_value_chars=10) == 0
+    assert output.getvalue() == ""
 
 
 def test_main_version_option_prints_version_without_data(monkeypatch: pytest.MonkeyPatch) -> None:

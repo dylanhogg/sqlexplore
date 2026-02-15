@@ -7,22 +7,22 @@ This file contains guidelines for AI agents to follow when writing code in this 
 - Always be extremely concise. Sacrifice grammar for the sake of being concise.
 - Write simple, clean and minimal code.
 - Don't over complicate or over engineer solutions.
+- Strive for simplicity and maintainability, while being efficient.
 - Prefer implicit namespace packages and avoid creating __init__.py files unless there is a clear, justified need.
-- Keep sensitive information in `.env` files.
-- Keep functions small and focused on a single responsibility.
-- Use type hints for all function parameters and return values.
-- Provide meaningful error messages.
-- Keep README.md up to date.
-- Document all configuration options.
-- Do not over-engineer solutions - strive for simplicity and maintainability while being efficient.
+- Only update documentation or README.md if explicitly requested.
 - Keep docstrings minimal, prefer the code to speak for itself.
+- Keep functions small and focused on a single responsibility.
+- Use asserts to check assumptions when appropriate.
+- Use type hints for all function parameters and return values.
+- Keep sensitive information in `.env` files.
+- Provide meaningful error messages.
 - Leverage `async` and `await` for I/O-bound operations to maximize concurrency.
 - Leverage `asyncio` as an event-loop framework when appropriate.
-- Apply decorator `@functools.cache` function caching where appropriate.
+- Use caching like `@functools.cache`, or `@functools.lru_cache`, when appropriate.
 - For any pandas data pipelines, prefer chainable functions with `DataFrame.pipe(func, ...)`.
-- Use f-strings for string formatting, and prefer the f"{var=}" syntax to show the variable name and its value.
+- Use f-strings for string formatting, and use the f"{var=}" syntax to show the variable name and its value.
 - A functional programming approach is preferred over an object-oriented one. Use classes when appropriate.
-- Use Pydantic models when appropriate.
+- Use Pydantic data models when appropriate.
 
 ## Critical Thinking
 
@@ -45,6 +45,7 @@ This file contains guidelines for AI agents to follow when writing code in this 
 ## Tests
 
 - Use `pytest` for testing
+- Use `pytest-cov` for code coverage reporting
 - Follow the naming convention: test_*.py
 - Use fixtures for test setup and teardown
 - Place test files in `./tests/<package_name>/`
