@@ -1407,8 +1407,11 @@ def test_completion_menu_tracks_selected_item_beyond_visible_window(tmp_path: Pa
                 await pilot.press("/")
                 await pilot.pause()
                 assert menu.display is True
-                assert menu.option_count == 8
-                before_prompts = [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)]
+                expected_commands = set(engine.helper_commands())
+                displayed_commands = {
+                    str(menu.get_option_at_index(i).prompt).split("  [", 1)[0] for i in range(menu.option_count)
+                }
+                assert displayed_commands == expected_commands
 
                 await pilot.press("ctrl+space")
                 await pilot.pause()
@@ -1416,8 +1419,6 @@ def test_completion_menu_tracks_selected_item_beyond_visible_window(tmp_path: Pa
                     await pilot.press("down")
                     await pilot.pause()
 
-                after_prompts = [str(menu.get_option_at_index(i).prompt) for i in range(menu.option_count)]
-                assert after_prompts != before_prompts
                 highlighted_index = menu.highlighted
                 assert highlighted_index is not None
                 highlighted_prompt = str(menu.get_option_at_index(highlighted_index).prompt)
@@ -1549,7 +1550,7 @@ def test_completion_menu_highlight_then_select_uses_clicked_window_item(tmp_path
                 await pilot.press("/")
                 await pilot.pause()
                 assert menu.display is True
-                assert menu.option_count == 8
+                assert menu.option_count == len(engine.helper_commands())
 
                 await pilot.press("ctrl+space")
                 await pilot.pause()

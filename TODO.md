@@ -5,7 +5,6 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-
 - Review all commands, and ensure they have unit tests, and are in the help text
 - Perf review copy TSV from uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
 - Key binding: Write marimo notebook and uvx open it
@@ -25,8 +24,6 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 ## App code quality
 
 - Review pypi publish workflow
-- Add "use asserts" to AGENTS.md
-- Add "no documentation additions/updates unless explicitly requested" to AGENTS.md
 - Add LLM:
     - Fix Binder Errors
 
