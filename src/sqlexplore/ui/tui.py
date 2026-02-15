@@ -19,13 +19,15 @@ from textual.events import Blur, Focus, Key
 from textual.widget import Widget
 from textual.widgets import DataTable, Footer, Header, OptionList, Static, TextArea
 
-from sqlexplore.engine import (
+from sqlexplore.completion.models import (
     DEFAULT_HELPER_COMMANDS,
     HELPER_PREFIX_RE,
     IDENT_PREFIX_RE,
     QUOTED_PREFIX_RE,
     CompletionItem,
     CompletionResult,
+)
+from sqlexplore.core.engine import (
     EngineResponse,
     QueryResult,
     ResultStatus,
@@ -37,7 +39,7 @@ from sqlexplore.engine import (
     result_columns,
     sort_cell_key,
 )
-from sqlexplore.image_cells import format_image_cell_token, format_image_preview_metadata, summarize_image_cell
+from sqlexplore.ui.image_cells import format_image_cell_token, format_image_preview_metadata, summarize_image_cell
 
 CellValue = object
 RenderedCell = str | Text

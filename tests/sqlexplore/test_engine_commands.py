@@ -1,6 +1,10 @@
+import inspect
 from pathlib import Path
 
-from sqlexplore.engine import (
+import sqlexplore.commands.handlers as command_handlers_module
+import sqlexplore.commands.registry as commands_module
+import sqlexplore.completion.completions as completion_module
+from sqlexplore.core.engine import (
     SqlExplorerEngine,
     flatten_struct_paths,
     is_struct_type,
@@ -70,6 +74,18 @@ def _completion_result(engine: SqlExplorerEngine, text: str):
     return engine.completion_result(text, (0, len(text)))
 
 
+def test_completion_module_does_not_import_engine() -> None:
+    source = inspect.getsource(completion_module)
+    assert "from sqlexplore.core.engine import" not in source
+
+
+def test_command_modules_do_not_import_engine() -> None:
+    command_source = inspect.getsource(commands_module)
+    handler_source = inspect.getsource(command_handlers_module)
+    assert "from sqlexplore.core.engine import" not in command_source
+    assert "from sqlexplore.core.engine import" not in handler_source
+
+
 def test_struct_type_helpers_parse_nested_fields(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
@@ -125,6 +141,27 @@ def test_refresh_schema_populates_struct_metadata_by_column(tmp_path: Path) -> N
         engine.close()
 
 
+def test_refresh_schema_invalidates_completion_caches(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        before = _completion_values(engine, "SELECT ")
+        assert "col_name" in before
+        assert "x" in before
+
+        engine.conn.execute("CREATE TABLE refreshed_source AS SELECT 1 AS y, 2 AS z")
+        engine.conn.execute('DROP VIEW "data"')
+        engine.conn.execute('CREATE VIEW "data" AS SELECT * FROM refreshed_source')
+        engine.refresh_schema()
+
+        after = _completion_values(engine, "SELECT ")
+        assert "y" in after
+        assert "z" in after
+        assert "col_name" not in after
+        assert "x" not in after
+    finally:
+        engine.close()
+
+
 def test_group_shorthand_generates_count_query(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
@@ -165,6 +202,172 @@ def test_help_text_is_generated_from_command_registry(tmp_path: Path) -> None:
         assert "/summary [n_cols] [| where]" in help_text
         assert "/save <path.csv|path.parquet|path.json>" in help_text
         assert "/exit or /quit" in help_text
+    finally:
+        engine.close()
+
+
+def test_help_and_schema_commands_validate_args_and_return_tables(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        help_out = engine.run_input("/help")
+        assert help_out.status == "info"
+        assert "/summary [n_cols] [| where]" in help_out.message
+
+        help_usage = engine.run_input("/help extra")
+        assert help_usage.status == "error"
+        assert help_usage.message == "Usage: /help"
+
+        schema_out = engine.run_input("/schema")
+        assert schema_out.status == "ok"
+        assert schema_out.result is not None
+        assert schema_out.result.columns == ["column", "type", "nullable"]
+        schema_rows = {tuple(row) for row in schema_out.result.rows}
+        assert ("col_name", "VARCHAR", "YES") in schema_rows
+        assert ("x", "BIGINT", "YES") in schema_rows
+    finally:
+        engine.close()
+
+
+def test_history_and_rerun_commands_cover_success_and_errors(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        engine.run_sql('SELECT * FROM "data" LIMIT 1')
+        engine.run_sql('SELECT COUNT(*) AS n FROM "data"')
+
+        history = engine.run_input("/history 1")
+        assert history.status == "ok"
+        assert history.result is not None
+        assert history.result.columns == ["#", "sql"]
+        assert len(history.result.rows) == 1
+        assert tuple(history.result.rows[0]) == (2, 'SELECT COUNT(*) AS n FROM "data"')
+
+        rerun = engine.run_input("/rerun 2")
+        assert rerun.status == "ok"
+        assert rerun.generated_sql == 'SELECT COUNT(*) AS n FROM "data"'
+        assert rerun.result is not None
+        assert tuple(rerun.result.rows[0]) == (3,)
+
+        rerun_bad = engine.run_input("/rerun nope")
+        assert rerun_bad.status == "error"
+        assert rerun_bad.message == "/rerun expects an integer index"
+
+        rerun_oob = engine.run_input("/rerun 99")
+        assert rerun_oob.status == "error"
+        assert rerun_oob.message == "History index out of range"
+    finally:
+        engine.close()
+
+
+def test_setting_editor_and_exit_commands_update_engine_state(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        rows_out = engine.run_input("/rows 7")
+        assert rows_out.status == "ok"
+        assert rows_out.message == "Row display limit set to 7"
+        assert engine.max_rows_display == 7
+
+        values_out = engine.run_input("/values 32")
+        assert values_out.status == "ok"
+        assert values_out.message == "Value display limit set to 32"
+        assert engine.max_value_chars == 32
+
+        limit_out = engine.run_input("/limit 9")
+        assert limit_out.status == "ok"
+        assert limit_out.message == "Default helper query limit set to 9; row display limit set to 9"
+        assert limit_out.load_query == 'SELECT * FROM "data" LIMIT 9'
+        assert engine.default_limit == 9
+        assert engine.max_rows_display == 9
+
+        engine.run_sql('SELECT * FROM "data" LIMIT 2')
+        last_out = engine.run_input("/last")
+        assert last_out.status == "info"
+        assert last_out.load_query == 'SELECT * FROM "data" LIMIT 2'
+
+        clear_out = engine.run_input("/clear")
+        assert clear_out.status == "info"
+        assert clear_out.clear_editor is True
+
+        exit_out = engine.run_input("/exit")
+        assert exit_out.status == "info"
+        assert exit_out.should_exit is True
+
+        quit_out = engine.run_input("/quit")
+        assert quit_out.status == "info"
+        assert quit_out.should_exit is True
+    finally:
+        engine.close()
+
+
+def test_limit_command_updates_row_display_for_custom_sql(tmp_path: Path) -> None:
+    csv_rows = "".join(f"a,{idx}\n" for idx in range(1, 121))
+    engine = _build_engine(tmp_path, csv_text=f"col_name,x\n{csv_rows}")
+    try:
+        engine.max_rows_display = 50
+        limit_out = engine.run_input("/limit 80")
+        assert limit_out.status == "ok"
+        assert engine.default_limit == 80
+        assert engine.max_rows_display == 80
+
+        out = engine.run_sql('SELECT * FROM "data" ORDER BY x')
+        assert out.status == "ok"
+        assert out.result is not None
+        assert len(out.result.rows) == 80
+        assert out.result.total_rows == 120
+        assert out.result.truncated is True
+        assert "(row display limit=80)" in out.message
+    finally:
+        engine.close()
+
+
+def test_save_command_requires_result_and_supports_csv_and_json(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        empty_save = engine.run_input("/save out.csv")
+        assert empty_save.status == "error"
+        assert empty_save.message == "No query result to save yet"
+
+        query_out = engine.run_sql('SELECT col_name, x FROM "data" ORDER BY x')
+        assert query_out.status == "ok"
+        assert engine.last_result_sql == 'SELECT col_name, x FROM "data" ORDER BY x'
+
+        csv_path = tmp_path / "out.csv"
+        csv_out = engine.run_input(f"/save {csv_path}")
+        assert csv_out.status == "ok"
+        assert csv_path.exists() is True
+        csv_text = csv_path.read_text(encoding="utf-8")
+        assert "col_name,x" in csv_text
+        assert "a,1" in csv_text
+
+        json_path = tmp_path / "out.json"
+        json_out = engine.run_input(f"/save {json_path}")
+        assert json_out.status == "ok"
+        assert json_path.exists() is True
+        json_text = json_path.read_text(encoding="utf-8")
+        assert '"col_name": "a"' in json_text
+        assert '"x": 1' in json_text
+    finally:
+        engine.close()
+
+
+def test_describe_and_profile_commands_return_expected_shapes(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        describe_out = engine.run_input("/describe")
+        assert describe_out.status == "ok"
+        assert describe_out.result is not None
+        assert describe_out.result.columns == ["column", "type", "distinct", "nulls", "null_%"]
+        assert any(tuple(row)[:2] == ("col_name", "VARCHAR") for row in describe_out.result.rows)
+
+        profile_out = engine.run_input("/profile x")
+        assert profile_out.status == "ok"
+        assert profile_out.result is not None
+        assert profile_out.result.columns == ["metric", "value"]
+        metric_names = {str(row[0]) for row in profile_out.result.rows}
+        assert {"column", "type", "rows", "distinct", "nulls", "min", "max", "p25", "p50", "p75"} <= metric_names
+
+        unknown_profile = engine.run_input("/profile nope")
+        assert unknown_profile.status == "error"
+        assert unknown_profile.message == "Unknown column: nope"
     finally:
         engine.close()
 

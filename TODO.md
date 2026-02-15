@@ -5,7 +5,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Review top N display (Results (1,000/10,000 rows, 24.3 ms)  [json:on])
+- Fix default limit, and bug updating it via /limit N command
+- Code coverage!
 - Key binding: Write marimo notebook and uvx open it
 - Distinguish /describe from /summary
 - Integrate LiteLLM

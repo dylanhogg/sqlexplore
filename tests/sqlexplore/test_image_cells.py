@@ -1,4 +1,4 @@
-from sqlexplore.image_cells import (
+from sqlexplore.ui.image_cells import (
     MAX_IMAGE_BYTES,
     format_image_cell_token,
     format_image_preview_metadata,

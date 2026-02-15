@@ -13,8 +13,8 @@ from rich.panel import Panel
 from rich.table import Table
 from tqdm import tqdm
 
-from sqlexplore import stdin_io
-from sqlexplore.engine import (
+from sqlexplore.cli import stdin_io
+from sqlexplore.core.engine import (
     STATUS_STYLE_BY_RESULT,
     EngineResponse,
     QueryResult,
@@ -22,7 +22,7 @@ from sqlexplore.engine import (
     app_version,
     format_scalar,
 )
-from sqlexplore.tui import SqlExplorerTui, SqlQueryEditor
+from sqlexplore.ui.tui import SqlExplorerTui, SqlQueryEditor
 
 app = typer.Typer(
     help="Interactive DuckDB SQL explorer for CSV/TSV/TXT/Parquet files.",

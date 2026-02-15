@@ -1,4 +1,4 @@
-from sqlexplore.sql_templates import DEFAULT_LOAD_QUERY_TEMPLATE, TXT_LOAD_QUERY_TEMPLATE, render_load_query
+from sqlexplore.core.sql_templates import DEFAULT_LOAD_QUERY_TEMPLATE, TXT_LOAD_QUERY_TEMPLATE, render_load_query
 
 
 def test_render_load_query_uses_default_template() -> None:
