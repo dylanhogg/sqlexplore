@@ -15,6 +15,31 @@ from sqlexplore.core.result_utils import format_scalar, result_columns, sql_lite
 
 from .protocols import CommandEngine
 
+USAGE_HELP = "/help"
+USAGE_SCHEMA = "/schema"
+USAGE_SAMPLE = "/sample [n]"
+USAGE_FILTER = "/filter <where condition>"
+USAGE_SORT = "/sort <order expressions>"
+USAGE_GROUP = "/group <group cols> | <aggregates> [| having]"
+USAGE_AGG = "/agg <aggregates> [| where]"
+USAGE_TOP = "/top <column> <n>"
+USAGE_DUPES = "/dupes <key_cols_csv> [n] [| where]"
+USAGE_HIST = "/hist <numeric_col> [bins] [| where]"
+USAGE_CROSSTAB = "/crosstab <col_a> <col_b> [n] [| where]"
+USAGE_CORR = "/corr <numeric_x> <numeric_y> [| where]"
+USAGE_PROFILE = "/profile <column>"
+USAGE_DESCRIBE = "/describe"
+USAGE_SUMMARY = "/summary [n_cols] [| where]"
+USAGE_HISTORY = "/history [n]"
+USAGE_RERUN = "/rerun <history_index>"
+USAGE_ROWS = "/rows <n>"
+USAGE_VALUES = "/values <n>"
+USAGE_LIMIT = "/limit <n>"
+USAGE_SAVE = "/save <path.csv|path.parquet|path.pq|path.json>"
+USAGE_LAST = "/last"
+USAGE_CLEAR = "/clear"
+USAGE_EXIT = "/exit or /quit"
+
 
 def response(status: ResultStatus, message: str, **kwargs: Any) -> EngineResponse:
     return EngineResponse(status=status, message=message, **kwargs)
@@ -76,10 +101,6 @@ def resolve_required_numeric_columns(
     return resolved_columns, None
 
 
-def split_pipe_sections(raw: str) -> list[str]:
-    return [part.strip() for part in raw.split("|") if part.strip()]
-
-
 def split_optional_where(raw: str) -> tuple[str, str] | None:
     payload = raw.strip()
     if "|" not in payload:
@@ -99,19 +120,23 @@ def split_args_with_optional_where(args: str) -> tuple[list[str], str] | None:
     return base.split(), where_clause
 
 
-def resolve_unique_columns(engine: CommandEngine, raw_columns: list[str]) -> list[str] | None:
+def resolve_unique_columns(
+    engine: CommandEngine,
+    raw_columns: list[str],
+) -> tuple[list[str] | None, EngineResponse | None]:
     resolved_columns: list[str] = []
     seen: set[str] = set()
     for raw_column in raw_columns:
-        resolved = engine.resolve_column(raw_column)
-        if resolved is None:
-            return None
+        resolved, err = resolve_required_column(engine, raw_column)
+        if err is not None:
+            return None, err
+        assert resolved is not None
         key = resolved.casefold()
         if key in seen:
             continue
         seen.add(key)
         resolved_columns.append(resolved)
-    return resolved_columns
+    return resolved_columns, None
 
 
 def run_sql_helper(engine: CommandEngine, sql: str | None, usage: str) -> EngineResponse:
@@ -140,14 +165,15 @@ def build_sql_helper_handler(
 
 
 def cmd_help(engine: CommandEngine, args: str) -> EngineResponse:
-    err = require_no_args(args, "/help")
+    err = require_no_args(args, USAGE_HELP)
     if err is not None:
         return err
-    return response(status="info", message=engine.help_text())
+    rows = [(spec.name, spec.usage, spec.description) for spec in engine.command_specs()]
+    return engine.table_response(["command", "usage", "description"], rows, "Helper commands")
 
 
 def cmd_schema(engine: CommandEngine, args: str) -> EngineResponse:
-    err = require_no_args(args, "/schema")
+    err = require_no_args(args, USAGE_SCHEMA)
     if err is not None:
         return err
     rows = [(str(r[0]), str(r[1]), str(r[2])) for r in engine.schema_rows]
@@ -157,12 +183,12 @@ def cmd_schema(engine: CommandEngine, args: str) -> EngineResponse:
 def cmd_profile(engine: CommandEngine, args: str) -> EngineResponse:
     payload = args.strip()
     if not payload:
-        return usage_error("/profile <column>")
+        return usage_error(USAGE_PROFILE)
     return profile_column(engine, payload)
 
 
 def cmd_describe(engine: CommandEngine, args: str) -> EngineResponse:
-    err = require_no_args(args, "/describe")
+    err = require_no_args(args, USAGE_DESCRIBE)
     if err is not None:
         return err
     return describe_dataset(engine)
@@ -171,7 +197,7 @@ def cmd_describe(engine: CommandEngine, args: str) -> EngineResponse:
 def cmd_summary(engine: CommandEngine, args: str) -> EngineResponse:
     parsed = parse_summary_args(engine, args)
     if parsed is None:
-        return usage_error("/summary [n_cols] [| where]")
+        return usage_error(USAGE_SUMMARY)
     column_limit, where_clause = parsed
     return summarize_dataset(engine, column_limit, where_clause)
 
@@ -179,7 +205,7 @@ def cmd_summary(engine: CommandEngine, args: str) -> EngineResponse:
 def cmd_hist(engine: CommandEngine, args: str) -> EngineResponse:
     parsed = parse_hist_args(args)
     if parsed is None:
-        return usage_error("/hist <numeric_col> [bins] [| where]")
+        return usage_error(USAGE_HIST)
     raw_column, bins, where_clause = parsed
     resolved_columns, err = resolve_required_numeric_columns(engine, "/hist", (raw_column,))
     if err is not None:
@@ -192,7 +218,7 @@ def cmd_hist(engine: CommandEngine, args: str) -> EngineResponse:
 def cmd_crosstab(engine: CommandEngine, args: str) -> EngineResponse:
     parsed = parse_crosstab_args(engine, args)
     if parsed is None:
-        return usage_error("/crosstab <col_a> <col_b> [n] [| where]")
+        return usage_error(USAGE_CROSSTAB)
     raw_a, raw_b, limit, where_clause = parsed
     resolved_columns, err = resolve_required_columns(engine, (raw_a, raw_b))
     if err is not None:
@@ -205,7 +231,7 @@ def cmd_crosstab(engine: CommandEngine, args: str) -> EngineResponse:
 def cmd_corr(engine: CommandEngine, args: str) -> EngineResponse:
     parsed = parse_corr_args(args)
     if parsed is None:
-        return usage_error("/corr <numeric_x> <numeric_y> [| where]")
+        return usage_error(USAGE_CORR)
     raw_x, raw_y, where_clause = parsed
     resolved_columns, err = resolve_required_numeric_columns(engine, "/corr", (raw_x, raw_y))
     if err is not None:
@@ -215,13 +241,39 @@ def cmd_corr(engine: CommandEngine, args: str) -> EngineResponse:
     return run_generated_sql(engine, sql_for_corr(engine, col_x, col_y, where_clause))
 
 
+def cmd_top(engine: CommandEngine, args: str) -> EngineResponse:
+    parts = args.strip().split()
+    if len(parts) != 2:
+        return usage_error(USAGE_TOP)
+    resolved_column, err = resolve_required_column(engine, parts[0])
+    if err is not None:
+        return err
+    assert resolved_column is not None
+    top_n = parse_optional_positive_int(parts[1])
+    if top_n is None:
+        return usage_error(USAGE_TOP)
+    return run_generated_sql(engine, sql_for_top(engine, resolved_column, top_n))
+
+
+def cmd_dupes(engine: CommandEngine, args: str) -> EngineResponse:
+    parsed = parse_dupes_args(engine, args)
+    if parsed is None:
+        return usage_error(USAGE_DUPES)
+    raw_columns, limit, where_clause = parsed
+    resolved_columns, err = resolve_unique_columns(engine, raw_columns)
+    if err is not None:
+        return err
+    assert resolved_columns is not None
+    return run_generated_sql(engine, sql_for_dupes(engine, resolved_columns, limit, where_clause))
+
+
 def cmd_history(engine: CommandEngine, args: str) -> EngineResponse:
     payload = args.strip()
     count = 20
     if payload:
         parsed = parse_single_positive_int_arg(payload)
         if parsed is None:
-            return usage_error("/history [n]")
+            return usage_error(USAGE_HISTORY)
         count = parsed
     history = engine.executed_sql[-count:]
     start_idx = max(1, len(engine.executed_sql) - len(history) + 1)
@@ -233,7 +285,7 @@ def cmd_rerun(engine: CommandEngine, args: str) -> EngineResponse:
     payload = args.strip()
     parts = payload.split()
     if len(parts) != 1:
-        return usage_error("/rerun <n>")
+        return usage_error(USAGE_RERUN)
     try:
         idx = int(parts[0])
     except ValueError:
@@ -264,7 +316,7 @@ def cmd_rows(engine: CommandEngine, args: str) -> EngineResponse:
     return set_positive_int_setting(
         engine,
         args,
-        "/rows <n>",
+        USAGE_ROWS,
         "Row display limit",
         lambda value: setattr(engine, "max_rows_display", value),
     )
@@ -274,7 +326,7 @@ def cmd_values(engine: CommandEngine, args: str) -> EngineResponse:
     return set_positive_int_setting(
         engine,
         args,
-        "/values <n>",
+        USAGE_VALUES,
         "Value display limit",
         lambda value: setattr(engine, "max_value_chars", value),
     )
@@ -283,7 +335,7 @@ def cmd_values(engine: CommandEngine, args: str) -> EngineResponse:
 def cmd_limit(engine: CommandEngine, args: str) -> EngineResponse:
     parsed = parse_single_positive_int_arg(args)
     if parsed is None:
-        return usage_error("/limit <n>")
+        return usage_error(USAGE_LIMIT)
     engine.default_limit = parsed
     engine.max_rows_display = parsed
     return response(
@@ -296,26 +348,26 @@ def cmd_limit(engine: CommandEngine, args: str) -> EngineResponse:
 def cmd_save(engine: CommandEngine, args: str) -> EngineResponse:
     payload = args.strip()
     if not payload:
-        return usage_error("/save <path>")
+        return usage_error(USAGE_SAVE)
     return save_last_result(engine, payload)
 
 
 def cmd_last(engine: CommandEngine, args: str) -> EngineResponse:
-    err = require_no_args(args, "/last")
+    err = require_no_args(args, USAGE_LAST)
     if err is not None:
         return err
     return response(status="info", message="Loaded last SQL in editor.", load_query=engine.last_sql)
 
 
 def cmd_clear(engine: CommandEngine, args: str) -> EngineResponse:
-    err = require_no_args(args, "/clear")
+    err = require_no_args(args, USAGE_CLEAR)
     if err is not None:
         return err
     return response(status="info", message="Editor cleared.", clear_editor=True)
 
 
 def cmd_exit(engine: CommandEngine, args: str) -> EngineResponse:
-    err = require_no_args(args, "/exit")
+    err = require_no_args(args, USAGE_EXIT)
     if err is not None:
         return err
     return response(status="info", message="Exiting SQL explorer.", should_exit=True)
@@ -345,8 +397,12 @@ def sql_for_sort(engine: CommandEngine, args: str) -> str | None:
 
 def sql_for_group(engine: CommandEngine, args: str) -> str | None:
     payload = args.strip()
-    parts = split_pipe_sections(payload)
-    if not parts:
+    if not payload:
+        return None
+    parts = [part.strip() for part in payload.split("|")]
+    if any(not part for part in parts):
+        return None
+    if len(parts) > 3:
         return None
     group_cols = parts[0]
     if len(parts) == 1:
@@ -365,8 +421,12 @@ def sql_for_group(engine: CommandEngine, args: str) -> str | None:
 
 def sql_for_agg(engine: CommandEngine, args: str) -> str | None:
     payload = args.strip()
-    parts = split_pipe_sections(payload)
-    if not parts:
+    if not payload:
+        return None
+    parts = [part.strip() for part in payload.split("|")]
+    if any(not part for part in parts):
+        return None
+    if len(parts) > 2:
         return None
     aggs = parts[0]
     where = parts[1] if len(parts) > 1 else ""
@@ -376,25 +436,15 @@ def sql_for_agg(engine: CommandEngine, args: str) -> str | None:
     return sql
 
 
-def sql_for_top(engine: CommandEngine, args: str) -> str | None:
-    parts = args.strip().split()
-    if len(parts) != 2:
-        return None
-    resolved = engine.resolve_column(parts[0])
-    if resolved is None:
-        return None
-    try:
-        top_n = max(1, int(parts[1]))
-    except ValueError:
-        return None
-    qcol = quote_ident(resolved)
+def sql_for_top(engine: CommandEngine, column: str, top_n: int) -> str:
+    qcol = quote_ident(column)
     return (
         f'SELECT {qcol} AS value, COUNT(*) AS count FROM "{engine.table_name}" '
         f"GROUP BY {qcol} ORDER BY count DESC, value LIMIT {top_n}"
     )
 
 
-def sql_for_dupes(engine: CommandEngine, args: str) -> str | None:
+def parse_dupes_args(engine: CommandEngine, args: str) -> tuple[list[str], int, str] | None:
     split = split_optional_where(args)
     if split is None:
         return None
@@ -421,11 +471,10 @@ def sql_for_dupes(engine: CommandEngine, args: str) -> str | None:
     raw_columns = [part.strip() for part in key_columns_raw.split(",") if part.strip()]
     if not raw_columns:
         return None
+    return raw_columns, limit, where_clause
 
-    resolved_columns = resolve_unique_columns(engine, raw_columns)
-    if not resolved_columns:
-        return None
 
+def sql_for_dupes(engine: CommandEngine, resolved_columns: list[str], limit: int, where_clause: str) -> str:
     group_expr = ", ".join(quote_ident(column) for column in resolved_columns)
     sql = f'SELECT {group_expr}, COUNT(*) AS count FROM "{engine.table_name}"'
     if where_clause:

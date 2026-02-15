@@ -12,8 +12,8 @@ from sqlexplore.completion.helpers import (
         ("off", None),
         ("none", None),
         (" 12 ", 12),
-        ("0", 1),
-        ("-2", 1),
+        ("0", None),
+        ("-2", None),
         ("bad", None),
     ],
 )

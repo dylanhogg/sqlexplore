@@ -200,7 +200,7 @@ def test_help_text_is_generated_from_command_registry(tmp_path: Path) -> None:
         assert "/corr <numeric_x> <numeric_y> [| where]" in help_text
         assert "/group <group cols> | <aggregates> [| having]" in help_text
         assert "/summary [n_cols] [| where]" in help_text
-        assert "/save <path.csv|path.parquet|path.json>" in help_text
+        assert "/save <path.csv|path.parquet|path.pq|path.json>" in help_text
         assert "/exit or /quit" in help_text
     finally:
         engine.close()
@@ -210,8 +210,11 @@ def test_help_and_schema_commands_validate_args_and_return_tables(tmp_path: Path
     engine = _build_engine(tmp_path)
     try:
         help_out = engine.run_input("/help")
-        assert help_out.status == "info"
-        assert "/summary [n_cols] [| where]" in help_out.message
+        assert help_out.status == "ok"
+        assert help_out.result is not None
+        assert help_out.result.columns == ["command", "usage", "description"]
+        help_rows = {tuple(row) for row in help_out.result.rows}
+        assert ("/summary", "/summary [n_cols] [| where]", "Show per-column summary statistics.") in help_rows
 
         help_usage = engine.run_input("/help extra")
         assert help_usage.status == "error"
@@ -486,6 +489,80 @@ def test_corr_completion_prefers_numeric_columns(tmp_path: Path) -> None:
         engine.close()
 
 
+def test_sample_filter_sort_and_agg_commands_run_queries(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        sample_out = engine.run_input("/sample 2")
+        assert sample_out.status == "ok"
+        assert sample_out.generated_sql == 'SELECT * FROM "data" LIMIT 2'
+        assert sample_out.result is not None
+        assert len(sample_out.result.rows) == 2
+
+        filter_out = engine.run_input("/filter x >= 2")
+        assert filter_out.status == "ok"
+        assert filter_out.generated_sql == 'SELECT * FROM "data" WHERE x >= 2 LIMIT 10'
+        assert filter_out.result is not None
+        assert [tuple(row) for row in filter_out.result.rows] == [("b", 2), ("a", 3)]
+
+        sort_out = engine.run_input("/sort x DESC")
+        assert sort_out.status == "ok"
+        assert sort_out.generated_sql == 'SELECT * FROM "data" ORDER BY x DESC LIMIT 10'
+        assert sort_out.result is not None
+        assert [tuple(row) for row in sort_out.result.rows] == [("a", 3), ("b", 2), ("a", 1)]
+
+        agg_out = engine.run_input("/agg COUNT(*) AS n | x >= 2")
+        assert agg_out.status == "ok"
+        assert agg_out.generated_sql == 'SELECT COUNT(*) AS n FROM "data" WHERE x >= 2'
+        assert agg_out.result is not None
+        assert [tuple(row) for row in agg_out.result.rows] == [(2,)]
+    finally:
+        engine.close()
+
+
+def test_sample_filter_sort_and_agg_commands_validate_args(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        sample_out = engine.run_input("/sample nope")
+        assert sample_out.status == "error"
+        assert sample_out.message == "Usage: /sample [n]"
+
+        filter_out = engine.run_input("/filter")
+        assert filter_out.status == "error"
+        assert filter_out.message == "Usage: /filter <where condition>"
+
+        sort_out = engine.run_input("/sort")
+        assert sort_out.status == "error"
+        assert sort_out.message == "Usage: /sort <order expressions>"
+
+        agg_out = engine.run_input("/agg")
+        assert agg_out.status == "error"
+        assert agg_out.message == "Usage: /agg <aggregates> [| where]"
+    finally:
+        engine.close()
+
+
+def test_group_and_agg_commands_reject_extra_or_empty_pipe_sections(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        bad_agg = engine.run_input("/agg SUM(x) | x > 1 | y > 2")
+        assert bad_agg.status == "error"
+        assert bad_agg.message == "Usage: /agg <aggregates> [| where]"
+
+        bad_group = engine.run_input("/group col_name | SUM(x) AS total | SUM(x) > 2 | extra")
+        assert bad_group.status == "error"
+        assert bad_group.message == "Usage: /group <group cols> | <aggregates> [| having]"
+
+        trailing_pipe = engine.run_input("/agg SUM(x) |")
+        assert trailing_pipe.status == "error"
+        assert trailing_pipe.message == "Usage: /agg <aggregates> [| where]"
+
+        empty_middle = engine.run_input("/group col_name || SUM(x) AS total")
+        assert empty_middle.status == "error"
+        assert empty_middle.message == "Usage: /group <group cols> | <aggregates> [| having]"
+    finally:
+        engine.close()
+
+
 def test_top_command_requires_explicit_n(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
@@ -509,6 +586,46 @@ def test_top_command_uses_supplied_n(tmp_path: Path) -> None:
         engine.close()
 
 
+def test_top_and_dupes_commands_return_unknown_column_errors(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        top_out = engine.run_input("/top nope 3")
+        assert top_out.status == "error"
+        assert top_out.message == "Unknown column: nope"
+
+        dupes_out = engine.run_input("/dupes nope")
+        assert dupes_out.status == "error"
+        assert dupes_out.message == "Unknown column: nope"
+
+        dupes_multi = engine.run_input("/dupes col_name,nope")
+        assert dupes_multi.status == "error"
+        assert dupes_multi.message == "Unknown column: nope"
+    finally:
+        engine.close()
+
+
+def test_commands_reject_non_positive_integer_args(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        cases = [
+            ("/rows 0", "Usage: /rows <n>"),
+            ("/values -5", "Usage: /values <n>"),
+            ("/limit 0", "Usage: /limit <n>"),
+            ("/history 0", "Usage: /history [n]"),
+            ("/sample 0", "Usage: /sample [n]"),
+            ("/top col_name 0", "Usage: /top <column> <n>"),
+            ("/dupes col_name 0", "Usage: /dupes <key_cols_csv> [n] [| where]"),
+            ("/hist x 0", "Usage: /hist <numeric_col> [bins] [| where]"),
+            ("/crosstab col_name x 0", "Usage: /crosstab <col_a> <col_b> [n] [| where]"),
+        ]
+        for command, message in cases:
+            out = engine.run_input(command)
+            assert out.status == "error"
+            assert out.message == message
+    finally:
+        engine.close()
+
+
 def test_dupes_command_finds_duplicate_key_rows(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
@@ -519,6 +636,29 @@ def test_dupes_command_finds_duplicate_key_rows(tmp_path: Path) -> None:
         assert out.result is not None
         assert out.result.columns == ["col_name", "count"]
         assert [tuple(row) for row in out.result.rows] == [("a", 2)]
+    finally:
+        engine.close()
+
+
+def test_usage_errors_match_help_usage_lines(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        rerun_out = engine.run_input("/rerun")
+        assert rerun_out.status == "error"
+        assert rerun_out.message == "Usage: /rerun <history_index>"
+
+        save_out = engine.run_input("/save")
+        assert save_out.status == "error"
+        assert save_out.message == "Usage: /save <path.csv|path.parquet|path.pq|path.json>"
+
+        quit_out = engine.run_input("/quit extra")
+        assert quit_out.status == "error"
+        assert quit_out.message == "Usage: /exit or /quit"
+
+        help_text = engine.help_text()
+        assert "/rerun <history_index>" in help_text
+        assert "/save <path.csv|path.parquet|path.pq|path.json>" in help_text
+        assert "/exit or /quit" in help_text
     finally:
         engine.close()
 
