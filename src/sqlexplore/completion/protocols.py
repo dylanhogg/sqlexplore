@@ -1,6 +1,6 @@
 from typing import Callable, Protocol, Sequence
 
-from .completion_types import CompletionItem, SqlClause
+from .models import CompletionItem, SqlClause
 
 
 class CommandSpecLike(Protocol):

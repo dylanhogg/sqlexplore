@@ -19,7 +19,7 @@ from textual.events import Blur, Focus, Key
 from textual.widget import Widget
 from textual.widgets import DataTable, Footer, Header, OptionList, Static, TextArea
 
-from sqlexplore.completion.completion_types import (
+from sqlexplore.completion.models import (
     DEFAULT_HELPER_COMMANDS,
     HELPER_PREFIX_RE,
     IDENT_PREFIX_RE,

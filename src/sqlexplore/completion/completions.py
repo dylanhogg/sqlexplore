@@ -3,8 +3,13 @@ from typing import Callable, Literal, Sequence
 
 from sqlglot.tokens import Tokenizer as SqlglotTokenizer
 
-from .completion_interfaces import CommandSpecLike, CompletionCatalogSource, CompletionEngineSource
-from .completion_types import (
+from .helpers import (
+    is_numeric_type,
+    is_simple_ident,
+    parse_single_positive_int_arg,
+    quote_ident,
+)
+from .models import (
     AGGREGATE_FUNCTIONS,
     IDENT_PREFIX_RE,
     QUOTED_PREFIX_RE,
@@ -15,12 +20,7 @@ from .completion_types import (
     CompletionResult,
     SqlClause,
 )
-from .completion_utils import (
-    is_numeric_type,
-    is_simple_ident,
-    parse_single_positive_int_arg,
-    quote_ident,
-)
+from .protocols import CommandSpecLike, CompletionCatalogSource, CompletionEngineSource
 
 
 def _is_temporal_type(type_name: str) -> bool:

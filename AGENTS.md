@@ -7,6 +7,7 @@ This file contains guidelines for AI agents to follow when writing code in this 
 - Always be extremely concise. Sacrifice grammar for the sake of being concise.
 - Write simple, clean and minimal code.
 - Don't over complicate or over engineer solutions.
+- Prefer implicit namespace packages and avoid creating __init__.py files unless there is a clear, justified need.
 - Keep sensitive information in `.env` files.
 - Keep functions small and focused on a single responsibility.
 - Use type hints for all function parameters and return values.

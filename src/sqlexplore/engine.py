@@ -1,6 +1,4 @@
-import json
 import math
-import re
 import time
 import tomllib
 from dataclasses import dataclass
@@ -8,38 +6,52 @@ from functools import cache
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as importlib_version
 from pathlib import Path
-from typing import Any, Callable, Literal, cast
+from typing import Any, cast
 
 import duckdb
 import typer
 
-from sqlexplore.completion.completion_types import CompletionItem, CompletionResult, SqlClause
-from sqlexplore.completion.completion_utils import (
-    is_numeric_type,
-    is_simple_ident,
-    parse_optional_positive_int,
-    parse_single_positive_int_arg,
-    quote_ident,
+from sqlexplore.commands.registry import (
+    CommandSpec,
+    build_command_specs,
+    command_usage_lines,
+    helper_commands,
+    index_command_specs,
+    run_command,
 )
 from sqlexplore.completion.completions import CompletionEngine, EngineCompletionCatalog
+from sqlexplore.completion.models import CompletionItem, CompletionResult, SqlClause
+from sqlexplore.engine_models import EngineResponse, QueryResult, ResultStatus
+from sqlexplore.result_utils import format_scalar, result_column_types, result_columns, sql_literal
 from sqlexplore.sql_templates import (
     DEFAULT_LOAD_QUERY_TEMPLATE,
     TXT_LOAD_QUERY_TEMPLATE,
     render_load_query,
 )
 
-ResultStatus = Literal["ok", "info", "sql", "error"]
 STATUS_STYLE_BY_RESULT: dict[ResultStatus, str] = {
     "ok": "green",
     "info": "cyan",
     "sql": "cyan",
     "error": "red",
 }
-QUALIFIED_FUNCTION_LABEL_RE = re.compile(
-    r'^(?P<prefix>(?:"(?:""|[^"]+)"|[A-Za-z_][A-Za-z0-9_$]*)\.)+(?P<func>"(?:""|[^"]+)"|[A-Za-z_][A-Za-z0-9_$]*)\('
-)
-QUOTED_FUNCTION_LABEL_RE = re.compile(r'^(?P<func>"(?:""|[^"]+)")\(')
 UNKNOWN_VERSION = "0.0.0+unknown"
+__all__ = [
+    "EngineResponse",
+    "QueryResult",
+    "ResultStatus",
+    "STATUS_STYLE_BY_RESULT",
+    "SqlExplorerEngine",
+    "app_version",
+    "flatten_struct_paths",
+    "format_scalar",
+    "is_struct_type",
+    "is_struct_type_name",
+    "is_varchar_type",
+    "parse_struct_fields",
+    "result_columns",
+    "sort_cell_key",
+]
 
 
 @cache
@@ -69,55 +81,6 @@ def _version_from_pyproject() -> str | None:
         if isinstance(version_value, str) and version_value.strip():
             return version_value.strip()
     return None
-
-
-@dataclass(slots=True)
-class QueryResult:
-    sql: str
-    columns: list[str]
-    column_types: list[str]
-    rows: list[tuple[Any, ...]]
-    elapsed_ms: float
-    total_rows: int
-    truncated: bool
-
-
-@dataclass(slots=True)
-class EngineResponse:
-    status: ResultStatus
-    message: str
-    result: QueryResult | None = None
-    generated_sql: str | None = None
-    executed_sql: str | None = None
-    should_exit: bool = False
-    load_query: str | None = None
-    clear_editor: bool = False
-
-    def activity_sql_log(self) -> tuple[str, str] | None:
-        if self.generated_sql is not None:
-            return "Generated", self.generated_sql
-        if self.executed_sql is not None:
-            return "Executed", self.executed_sql
-        return None
-
-
-@dataclass(slots=True)
-class CommandSpec:
-    name: str
-    usage: str
-    description: str
-    handler: Callable[[str], EngineResponse]
-    completer: Callable[[str, bool], list[CompletionItem]] | None = None
-    aliases: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class SqlHelperCommandSpec:
-    name: str
-    usage: str
-    description: str
-    sql_builder: Callable[[str], str | None]
-    completer: Callable[[str, bool], list[CompletionItem]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,69 +115,6 @@ def _detect_reader(file_path: Path) -> FileReader:
             query_template=TXT_LOAD_QUERY_TEMPLATE,
         )
     raise typer.BadParameter("Only .csv, .tsv, .txt, and .parquet/.pq files are supported.")
-
-
-def _sql_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _normalize_function_ident(token: str) -> str:
-    if not (token.startswith('"') and token.endswith('"') and len(token) > 1):
-        return token
-    unquoted = token[1:-1].replace('""', '"')
-    return unquoted if is_simple_ident(unquoted) else token
-
-
-def _normalize_result_column_label(name: str) -> str:
-    qualified_match = QUALIFIED_FUNCTION_LABEL_RE.match(name)
-    if qualified_match is not None:
-        func_token = _normalize_function_ident(qualified_match.group("func"))
-        return f"{func_token}({name[qualified_match.end() :]}"
-
-    quoted_match = QUOTED_FUNCTION_LABEL_RE.match(name)
-    if quoted_match is not None:
-        func_token = _normalize_function_ident(quoted_match.group("func"))
-        return f"{func_token}({name[quoted_match.end() :]}"
-
-    return name
-
-
-def result_columns(description: list[tuple[Any, ...]] | None) -> list[str]:
-    if not description:
-        return []
-    return [_normalize_result_column_label(str(item[0])) for item in description]
-
-
-def _result_column_types(description: list[tuple[Any, ...]] | None) -> list[str]:
-    if not description:
-        return []
-    return [str(item[1]) for item in description]
-
-
-def _split_pipe_sections(raw: str) -> list[str]:
-    return [part.strip() for part in raw.split("|") if part.strip()]
-
-
-def _split_optional_where(raw: str) -> tuple[str, str] | None:
-    payload = raw.strip()
-    if "|" not in payload:
-        return payload, ""
-    before, after = payload.split("|", maxsplit=1)
-    where_clause = after.strip()
-    if not where_clause:
-        return None
-    return before.strip(), where_clause
-
-
-def format_scalar(value: Any, max_chars: int | None = None) -> str:
-    if value is None:
-        return "NULL"
-    text = str(value)
-    if max_chars is None or len(text) <= max_chars:
-        return text
-    if max_chars <= 3:
-        return text[:max_chars]
-    return f"{text[: max_chars - 3]}..."
 
 
 def is_varchar_type(type_name: str) -> bool:
@@ -309,7 +209,7 @@ class SqlExplorerEngine:
         self.last_result_sql: str | None = None
 
         reader = _detect_reader(self.data_path)
-        source_sql = f"{reader.function_name}({_sql_literal(str(self.data_path))}{reader.args})"
+        source_sql = f"{reader.function_name}({sql_literal(str(self.data_path))}{reader.args})"
         load_query = render_load_query(source_sql, reader.query_template)
         self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
         self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {load_query}')
@@ -323,8 +223,8 @@ class SqlExplorerEngine:
         self.refresh_schema()
 
         self._completion_catalog = EngineCompletionCatalog(self)
-        self._command_specs = self._build_command_specs()
-        self._command_lookup = self._index_command_specs(self._command_specs)
+        self._command_specs = build_command_specs(self, self._completion_catalog)
+        self._command_lookup = index_command_specs(self._command_specs)
         self._completion_engine = CompletionEngine(self)
 
     @property
@@ -376,11 +276,7 @@ class SqlExplorerEngine:
             self._completion_engine.clear_cache()
 
     def helper_commands(self) -> list[str]:
-        commands: list[str] = []
-        for spec in self._command_specs:
-            commands.append(spec.name)
-            commands.extend(spec.aliases)
-        return commands
+        return helper_commands(self._command_specs)
 
     def command_specs(self) -> list[CommandSpec]:
         return self._command_specs
@@ -389,7 +285,7 @@ class SqlExplorerEngine:
         return self.lookup_command(raw_name) is not None
 
     def _command_usage_lines(self) -> list[str]:
-        return [spec.usage for spec in self._command_specs]
+        return command_usage_lines(self._command_specs)
 
     def row_count(self) -> int:
         out = self.conn.execute(f'SELECT COUNT(*) FROM "{self.table_name}"').fetchone()
@@ -464,6 +360,13 @@ class SqlExplorerEngine:
             candidate = candidate[1:-1].replace('""', '"')
         return self.column_lookup.get(candidate.lower())
 
+    def resolve_column(self, raw_column: str) -> str | None:
+        return self._resolve_column(raw_column)
+
+    @property
+    def schema_rows(self) -> list[tuple[Any, ...]]:
+        return self._schema_rows
+
     def _display_rows(self, rows: list[tuple[Any, ...]]) -> tuple[list[tuple[Any, ...]], bool]:
         if len(rows) <= self.max_rows_display:
             return rows, False
@@ -482,6 +385,9 @@ class SqlExplorerEngine:
         )
         return EngineResponse(status="ok", message=message, result=result)
 
+    def table_response(self, columns: list[str], rows: list[tuple[Any, ...]], message: str) -> EngineResponse:
+        return self._table_response(columns, rows, message)
+
     def run_sql(self, sql_text: str, remember: bool = True) -> EngineResponse:
         sql = sql_text.strip().rstrip(";")
         if not sql:
@@ -492,7 +398,7 @@ class SqlExplorerEngine:
             relation = self.conn.execute(sql)
             rows = relation.fetchall()
             columns = result_columns(relation.description)
-            column_types = _result_column_types(relation.description)
+            column_types = result_column_types(relation.description)
         except Exception as exc:  # noqa: BLE001
             return EngineResponse(status="error", message=str(exc), executed_sql=sql)
 
@@ -529,809 +435,11 @@ class SqlExplorerEngine:
         if not text:
             return EngineResponse(status="info", message="Type SQL or /help.")
         if text.startswith("/"):
-            return self._run_command(text)
+            return run_command(self, text)
         return self.run_sql(text)
-
-    def _index_command_specs(self, specs: list[CommandSpec]) -> dict[str, CommandSpec]:
-        lookup: dict[str, CommandSpec] = {}
-        for spec in specs:
-            lookup[spec.name.casefold()] = spec
-            for alias in spec.aliases:
-                lookup[alias.casefold()] = spec
-        return lookup
 
     def lookup_command(self, raw_name: str) -> CommandSpec | None:
         return self._command_lookup.get(raw_name.casefold())
-
-    def _build_sql_helper_handler(
-        self,
-        usage: str,
-        sql_builder: Callable[[str], str | None],
-    ) -> Callable[[str], EngineResponse]:
-        def handler(args: str) -> EngineResponse:
-            return self._run_sql_helper(sql_builder(args), usage)
-
-        return handler
-
-    def _sql_helper_command_specs(self) -> list[CommandSpec]:
-        completion = self._completion_catalog
-        helper_defs = [
-            SqlHelperCommandSpec(
-                "/sample",
-                "/sample [n]",
-                "Select sample rows.",
-                self._sql_for_sample,
-                completion.complete_sample,
-            ),
-            SqlHelperCommandSpec(
-                "/filter",
-                "/filter <where condition>",
-                "Filter rows with a WHERE condition.",
-                self._sql_for_filter,
-                completion.complete_filter,
-            ),
-            SqlHelperCommandSpec(
-                "/sort",
-                "/sort <order expressions>",
-                "Sort rows by expression(s).",
-                self._sql_for_sort,
-                completion.complete_sort,
-            ),
-            SqlHelperCommandSpec(
-                "/group",
-                "/group <group cols> | <aggregates> [| having]",
-                "Aggregate by group columns.",
-                self._sql_for_group,
-                completion.complete_group,
-            ),
-            SqlHelperCommandSpec(
-                "/agg",
-                "/agg <aggregates> [| where]",
-                "Run aggregate expression(s).",
-                self._sql_for_agg,
-                completion.complete_agg,
-            ),
-            SqlHelperCommandSpec(
-                "/top",
-                "/top <column> <n>",
-                "Top values by frequency for a column.",
-                self._sql_for_top,
-                completion.complete_top,
-            ),
-            SqlHelperCommandSpec(
-                "/dupes",
-                "/dupes <key_cols_csv> [n] [| where]",
-                "Find duplicate key combinations.",
-                self._sql_for_dupes,
-                completion.complete_dupes,
-            ),
-        ]
-        return [
-            CommandSpec(
-                item.name,
-                item.usage,
-                item.description,
-                self._build_sql_helper_handler(item.usage, item.sql_builder),
-                item.completer,
-            )
-            for item in helper_defs
-        ]
-
-    def _build_command_specs(self) -> list[CommandSpec]:
-        completion = self._completion_catalog
-        return [
-            CommandSpec("/help", "/help", "Show helper command reference.", self._cmd_help),
-            CommandSpec("/schema", "/schema", "Show dataset schema.", self._cmd_schema),
-            *self._sql_helper_command_specs(),
-            CommandSpec(
-                "/hist",
-                "/hist <numeric_col> [bins] [| where]",
-                "Histogram bins for a numeric column.",
-                self._cmd_hist,
-                completion.complete_hist,
-            ),
-            CommandSpec(
-                "/crosstab",
-                "/crosstab <col_a> <col_b> [n] [| where]",
-                "Top value pairs by frequency.",
-                self._cmd_crosstab,
-                completion.complete_crosstab,
-            ),
-            CommandSpec(
-                "/corr",
-                "/corr <numeric_x> <numeric_y> [| where]",
-                "Correlation and non-null pair count.",
-                self._cmd_corr,
-                completion.complete_corr,
-            ),
-            CommandSpec(
-                "/profile",
-                "/profile <column>",
-                "Profile a single column.",
-                self._cmd_profile,
-                completion.complete_profile,
-            ),
-            CommandSpec("/describe", "/describe", "Describe columns and nulls.", self._cmd_describe),
-            CommandSpec(
-                "/summary",
-                "/summary [n_cols] [| where]",
-                "Show per-column summary statistics.",
-                self._cmd_summary,
-                completion.complete_summary,
-            ),
-            CommandSpec(
-                "/history",
-                "/history [n]",
-                "Show recent query history.",
-                self._cmd_history,
-                completion.complete_history,
-            ),
-            CommandSpec(
-                "/rerun",
-                "/rerun <history_index>",
-                "Rerun a query from history.",
-                self._cmd_rerun,
-                completion.complete_rerun,
-            ),
-            CommandSpec("/rows", "/rows <n>", "Set row display limit.", self._cmd_rows, completion.complete_rows),
-            CommandSpec(
-                "/values",
-                "/values <n>",
-                "Set max display length per value.",
-                self._cmd_values,
-                completion.complete_values,
-            ),
-            CommandSpec(
-                "/limit",
-                "/limit <n>",
-                "Set helper query row limit.",
-                self._cmd_limit,
-                completion.complete_limit,
-            ),
-            CommandSpec(
-                "/save",
-                "/save <path.csv|path.parquet|path.json>",
-                "Save latest result to disk.",
-                self._cmd_save,
-                completion.complete_save,
-            ),
-            CommandSpec("/last", "/last", "Load previous SQL into editor.", self._cmd_last),
-            CommandSpec("/clear", "/clear", "Clear query editor.", self._cmd_clear),
-            CommandSpec("/exit", "/exit or /quit", "Exit SQL explorer.", self._cmd_exit, aliases=("/quit",)),
-        ]
-
-    def _usage_error(self, usage: str) -> EngineResponse:
-        return EngineResponse(status="error", message=f"Usage: {usage}")
-
-    def _require_no_args(self, args: str, usage: str) -> EngineResponse | None:
-        if args.strip():
-            return self._usage_error(usage)
-        return None
-
-    @staticmethod
-    def _unknown_column_error(raw_column: str) -> EngineResponse:
-        return EngineResponse(status="error", message=f"Unknown column: {raw_column}")
-
-    @staticmethod
-    def _numeric_column_error(command_name: str, column: str) -> EngineResponse:
-        return EngineResponse(status="error", message=f"{command_name} requires numeric column: {column}")
-
-    def _resolve_required_column(self, raw_column: str) -> tuple[str | None, EngineResponse | None]:
-        resolved = self._resolve_column(raw_column)
-        if resolved is None:
-            return None, self._unknown_column_error(raw_column)
-        return resolved, None
-
-    def _resolve_required_columns(
-        self,
-        raw_columns: tuple[str, ...],
-    ) -> tuple[tuple[str, ...] | None, EngineResponse | None]:
-        resolved_columns: list[str] = []
-        for raw_column in raw_columns:
-            resolved_column, err = self._resolve_required_column(raw_column)
-            if err is not None:
-                return None, err
-            assert resolved_column is not None
-            resolved_columns.append(resolved_column)
-        return tuple(resolved_columns), None
-
-    def _resolve_required_numeric_columns(
-        self,
-        command_name: str,
-        raw_columns: tuple[str, ...],
-    ) -> tuple[tuple[str, ...] | None, EngineResponse | None]:
-        resolved_columns, err = self._resolve_required_columns(raw_columns)
-        if err is not None:
-            return None, err
-        assert resolved_columns is not None
-        for resolved_column in resolved_columns:
-            type_name = self.column_types[resolved_column]
-            if is_numeric_type(type_name):
-                continue
-            return None, self._numeric_column_error(command_name, resolved_column)
-        return resolved_columns, None
-
-    @staticmethod
-    def _split_args_with_optional_where(args: str) -> tuple[list[str], str] | None:
-        split = _split_optional_where(args)
-        if split is None:
-            return None
-        base, where_clause = split
-        return base.split(), where_clause
-
-    def _resolve_unique_columns(self, raw_columns: list[str]) -> list[str] | None:
-        resolved_columns: list[str] = []
-        seen: set[str] = set()
-        for raw_column in raw_columns:
-            resolved = self._resolve_column(raw_column)
-            if resolved is None:
-                return None
-            key = resolved.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            resolved_columns.append(resolved)
-        return resolved_columns
-
-    def _run_command(self, command: str) -> EngineResponse:
-        stripped = command.strip()
-        if not stripped:
-            return EngineResponse(status="info", message="Type SQL or /help.")
-        parts = stripped.split(maxsplit=1)
-        raw_name = parts[0]
-        args = parts[1] if len(parts) == 2 else ""
-        spec = self.lookup_command(raw_name)
-        if spec is None:
-            return EngineResponse(status="error", message=f"Unknown command: {stripped}. Use /help")
-        return spec.handler(args)
-
-    def _run_sql_helper(self, sql: str | None, usage: str) -> EngineResponse:
-        if sql is None:
-            return self._usage_error(usage)
-        out = self.run_sql(sql)
-        out.generated_sql = sql
-        return out
-
-    def _run_generated_sql(self, sql: str) -> EngineResponse:
-        out = self.run_sql(sql)
-        out.generated_sql = sql
-        return out
-
-    def _cmd_help(self, args: str) -> EngineResponse:
-        err = self._require_no_args(args, "/help")
-        if err is not None:
-            return err
-        return EngineResponse(status="info", message=self.help_text())
-
-    def _cmd_schema(self, args: str) -> EngineResponse:
-        err = self._require_no_args(args, "/schema")
-        if err is not None:
-            return err
-        rows = [(str(r[0]), str(r[1]), str(r[2])) for r in self._schema_rows]
-        return self._table_response(["column", "type", "nullable"], rows, "Schema")
-
-    def _cmd_profile(self, args: str) -> EngineResponse:
-        payload = args.strip()
-        if not payload:
-            return self._usage_error("/profile <column>")
-        return self._profile_column(payload)
-
-    def _cmd_describe(self, args: str) -> EngineResponse:
-        err = self._require_no_args(args, "/describe")
-        if err is not None:
-            return err
-        return self._describe_dataset()
-
-    def _cmd_summary(self, args: str) -> EngineResponse:
-        parsed = self._parse_summary_args(args)
-        if parsed is None:
-            return self._usage_error("/summary [n_cols] [| where]")
-        column_limit, where_clause = parsed
-        return self._summarize_dataset(column_limit, where_clause)
-
-    def _cmd_hist(self, args: str) -> EngineResponse:
-        parsed = self._parse_hist_args(args)
-        if parsed is None:
-            return self._usage_error("/hist <numeric_col> [bins] [| where]")
-        raw_column, bins, where_clause = parsed
-        resolved_columns, err = self._resolve_required_numeric_columns("/hist", (raw_column,))
-        if err is not None:
-            return err
-        assert resolved_columns is not None
-        resolved_column = resolved_columns[0]
-        return self._run_generated_sql(self._sql_for_hist(resolved_column, bins, where_clause))
-
-    def _cmd_crosstab(self, args: str) -> EngineResponse:
-        parsed = self._parse_crosstab_args(args)
-        if parsed is None:
-            return self._usage_error("/crosstab <col_a> <col_b> [n] [| where]")
-        raw_a, raw_b, limit, where_clause = parsed
-        resolved_columns, err = self._resolve_required_columns((raw_a, raw_b))
-        if err is not None:
-            return err
-        assert resolved_columns is not None
-        col_a, col_b = resolved_columns
-        return self._run_generated_sql(self._sql_for_crosstab(col_a, col_b, limit, where_clause))
-
-    def _cmd_corr(self, args: str) -> EngineResponse:
-        parsed = self._parse_corr_args(args)
-        if parsed is None:
-            return self._usage_error("/corr <numeric_x> <numeric_y> [| where]")
-        raw_x, raw_y, where_clause = parsed
-        resolved_columns, err = self._resolve_required_numeric_columns("/corr", (raw_x, raw_y))
-        if err is not None:
-            return err
-        assert resolved_columns is not None
-        col_x, col_y = resolved_columns
-        return self._run_generated_sql(self._sql_for_corr(col_x, col_y, where_clause))
-
-    def _cmd_history(self, args: str) -> EngineResponse:
-        payload = args.strip()
-        count = 20
-        if payload:
-            parsed = parse_single_positive_int_arg(payload)
-            if parsed is None:
-                return self._usage_error("/history [n]")
-            count = parsed
-        history = self.executed_sql[-count:]
-        start_idx = max(1, len(self.executed_sql) - len(history) + 1)
-        rows = [(idx, sql) for idx, sql in enumerate(history, start=start_idx)]
-        return self._table_response(["#", "sql"], rows, f"History ({len(history)} queries)")
-
-    def _cmd_rerun(self, args: str) -> EngineResponse:
-        payload = args.strip()
-        parts = payload.split()
-        if len(parts) != 1:
-            return self._usage_error("/rerun <n>")
-        try:
-            idx = int(parts[0])
-        except ValueError:
-            return EngineResponse(status="error", message="/rerun expects an integer index")
-        if idx < 1 or idx > len(self.executed_sql):
-            return EngineResponse(status="error", message="History index out of range")
-        sql = self.executed_sql[idx - 1]
-        out = self.run_sql(sql)
-        out.generated_sql = sql
-        return out
-
-    def _set_positive_int_setting(
-        self,
-        args: str,
-        usage: str,
-        label: str,
-        setter: Callable[[int], None],
-    ) -> EngineResponse:
-        parsed = parse_single_positive_int_arg(args)
-        if parsed is None:
-            return self._usage_error(usage)
-        setter(parsed)
-        return EngineResponse(status="ok", message=f"{label} set to {parsed}")
-
-    def _cmd_rows(self, args: str) -> EngineResponse:
-        return self._set_positive_int_setting(
-            args,
-            "/rows <n>",
-            "Row display limit",
-            lambda value: setattr(self, "max_rows_display", value),
-        )
-
-    def _cmd_values(self, args: str) -> EngineResponse:
-        return self._set_positive_int_setting(
-            args,
-            "/values <n>",
-            "Value display limit",
-            lambda value: setattr(self, "max_value_chars", value),
-        )
-
-    def _cmd_limit(self, args: str) -> EngineResponse:
-        return self._set_positive_int_setting(
-            args,
-            "/limit <n>",
-            "Default helper query limit",
-            lambda value: setattr(self, "default_limit", value),
-        )
-
-    def _cmd_save(self, args: str) -> EngineResponse:
-        payload = args.strip()
-        if not payload:
-            return self._usage_error("/save <path>")
-        return self._save_last_result(payload)
-
-    def _cmd_last(self, args: str) -> EngineResponse:
-        err = self._require_no_args(args, "/last")
-        if err is not None:
-            return err
-        return EngineResponse(status="info", message="Loaded last SQL in editor.", load_query=self.last_sql)
-
-    def _cmd_clear(self, args: str) -> EngineResponse:
-        err = self._require_no_args(args, "/clear")
-        if err is not None:
-            return err
-        return EngineResponse(status="info", message="Editor cleared.", clear_editor=True)
-
-    def _cmd_exit(self, args: str) -> EngineResponse:
-        err = self._require_no_args(args, "/exit")
-        if err is not None:
-            return err
-        return EngineResponse(status="info", message="Exiting SQL explorer.", should_exit=True)
-
-    def _sql_for_sample(self, args: str) -> str | None:
-        payload = args.strip()
-        sample_n = self.default_limit if not payload else parse_single_positive_int_arg(payload)
-        if sample_n is None:
-            return None
-        return f'SELECT * FROM "{self.table_name}" LIMIT {sample_n}'
-
-    def _sql_for_filter(self, args: str) -> str | None:
-        cond = args.strip()
-        if not cond:
-            return None
-        return f'SELECT * FROM "{self.table_name}" WHERE {cond} LIMIT {self.default_limit}'
-
-    def _sql_for_sort(self, args: str) -> str | None:
-        expr = args.strip()
-        if not expr:
-            return None
-        return f'SELECT * FROM "{self.table_name}" ORDER BY {expr} LIMIT {self.default_limit}'
-
-    def _sql_for_group(self, args: str) -> str | None:
-        payload = args.strip()
-        parts = _split_pipe_sections(payload)
-        if not parts:
-            return None
-        group_cols = parts[0]
-        if len(parts) == 1:
-            return (
-                f'SELECT {group_cols}, COUNT(*) AS count FROM "{self.table_name}" '
-                f"GROUP BY {group_cols} ORDER BY count DESC, {group_cols}"
-            )
-        aggs = parts[1]
-        having = parts[2] if len(parts) > 2 else ""
-        sql = f'SELECT {group_cols}, {aggs} FROM "{self.table_name}" GROUP BY {group_cols}'
-        if having:
-            sql += f" HAVING {having}"
-        sql += f" ORDER BY {group_cols}"
-        return sql
-
-    def _sql_for_agg(self, args: str) -> str | None:
-        payload = args.strip()
-        parts = _split_pipe_sections(payload)
-        if not parts:
-            return None
-        aggs = parts[0]
-        where = parts[1] if len(parts) > 1 else ""
-        sql = f'SELECT {aggs} FROM "{self.table_name}"'
-        if where:
-            sql += f" WHERE {where}"
-        return sql
-
-    def _sql_for_top(self, args: str) -> str | None:
-        parts = args.strip().split()
-        if len(parts) != 2:
-            return None
-        resolved = self._resolve_column(parts[0])
-        if resolved is None:
-            return None
-        try:
-            top_n = max(1, int(parts[1]))
-        except ValueError:
-            return None
-        qcol = quote_ident(resolved)
-        return (
-            f'SELECT {qcol} AS value, COUNT(*) AS count FROM "{self.table_name}" '
-            f"GROUP BY {qcol} ORDER BY count DESC, value LIMIT {top_n}"
-        )
-
-    def _sql_for_dupes(self, args: str) -> str | None:
-        split = _split_optional_where(args)
-        if split is None:
-            return None
-        base, where_clause = split
-        if not base:
-            return None
-
-        tokens = base.split()
-        key_columns_raw = base
-        limit = self.default_limit
-        if len(tokens) > 1:
-            parsed_limit = parse_optional_positive_int(tokens[-1])
-            if parsed_limit is not None:
-                limit = parsed_limit
-                key_columns_raw = " ".join(tokens[:-1]).strip()
-                if not key_columns_raw:
-                    return None
-
-        if "," not in key_columns_raw and len(key_columns_raw.split()) > 1:
-            trimmed = key_columns_raw.strip()
-            if not (trimmed.startswith('"') and trimmed.endswith('"')):
-                return None
-
-        raw_columns = [part.strip() for part in key_columns_raw.split(",") if part.strip()]
-        if not raw_columns:
-            return None
-
-        resolved_columns = self._resolve_unique_columns(raw_columns)
-        if not resolved_columns:
-            return None
-
-        group_expr = ", ".join(quote_ident(column) for column in resolved_columns)
-        sql = f'SELECT {group_expr}, COUNT(*) AS count FROM "{self.table_name}"'
-        if where_clause:
-            sql += f" WHERE {where_clause}"
-        sql += f" GROUP BY {group_expr} HAVING COUNT(*) > 1 ORDER BY count DESC, {group_expr} LIMIT {limit}"
-        return sql
-
-    def _parse_hist_args(self, args: str) -> tuple[str, int, str] | None:
-        parsed = self._split_args_with_optional_where(args)
-        if parsed is None:
-            return None
-        parts, where_clause = parsed
-        if len(parts) == 1:
-            return parts[0], 10, where_clause
-        if len(parts) == 2:
-            bins = parse_optional_positive_int(parts[1])
-            if bins is None:
-                return None
-            return parts[0], bins, where_clause
-        return None
-
-    def _parse_crosstab_args(self, args: str) -> tuple[str, str, int, str] | None:
-        parsed = self._split_args_with_optional_where(args)
-        if parsed is None:
-            return None
-        parts, where_clause = parsed
-        if len(parts) == 2:
-            return parts[0], parts[1], self.default_limit, where_clause
-        if len(parts) == 3:
-            limit = parse_optional_positive_int(parts[2])
-            if limit is None:
-                return None
-            return parts[0], parts[1], limit, where_clause
-        return None
-
-    def _parse_corr_args(self, args: str) -> tuple[str, str, str] | None:
-        parsed = self._split_args_with_optional_where(args)
-        if parsed is None:
-            return None
-        parts, where_clause = parsed
-        if len(parts) != 2:
-            return None
-        return parts[0], parts[1], where_clause
-
-    def _sql_for_hist(self, column: str, bins: int, where_clause: str) -> str:
-        qcol = quote_ident(column)
-        predicate = f"({where_clause}) AND " if where_clause else ""
-        return f'''WITH filtered AS (
-    SELECT CAST({qcol} AS DOUBLE) AS value
-    FROM "{self.table_name}"
-    WHERE {predicate}{qcol} IS NOT NULL
-),
-stats AS (
-    SELECT
-        MIN(value) AS min_value,
-        MAX(value) AS max_value,
-        COUNT(*) AS total_count
-    FROM filtered
-),
-binned AS (
-    SELECT
-        CASE
-            WHEN stats.max_value = stats.min_value THEN 1
-            ELSE LEAST(
-                {bins},
-                CAST(
-                    FLOOR(((value - stats.min_value) / NULLIF(stats.max_value - stats.min_value, 0)) * {bins})
-                    AS BIGINT
-                ) + 1
-            )
-        END AS bin_index
-    FROM filtered
-    CROSS JOIN stats
-),
-counts AS (
-    SELECT
-        bin_index,
-        COUNT(*) AS count
-    FROM binned
-    GROUP BY bin_index
-)
-SELECT
-    stats.min_value + ((bin_index - 1) * (stats.max_value - stats.min_value) / {bins}) AS bin_start,
-    CASE
-        WHEN bin_index = {bins} THEN stats.max_value
-        ELSE stats.min_value + (bin_index * (stats.max_value - stats.min_value) / {bins})
-    END AS bin_end,
-    count,
-    ROUND(100.0 * count / NULLIF(stats.total_count, 0), 2) AS pct
-FROM counts
-CROSS JOIN stats
-ORDER BY bin_start'''
-
-    def _sql_for_crosstab(self, col_a: str, col_b: str, limit: int, where_clause: str) -> str:
-        qcol_a = quote_ident(col_a)
-        qcol_b = quote_ident(col_b)
-        sql = f'SELECT {qcol_a}, {qcol_b}, COUNT(*) AS count FROM "{self.table_name}"'
-        if where_clause:
-            sql += f" WHERE {where_clause}"
-        sql += f" GROUP BY {qcol_a}, {qcol_b} ORDER BY count DESC, {qcol_a}, {qcol_b} LIMIT {limit}"
-        return sql
-
-    def _sql_for_corr(self, col_x: str, col_y: str, where_clause: str) -> str:
-        qcol_x = quote_ident(col_x)
-        qcol_y = quote_ident(col_y)
-        sql = (
-            f"SELECT CORR({qcol_x}, {qcol_y}) AS corr, "
-            f"COUNT(*) FILTER (WHERE {qcol_x} IS NOT NULL AND {qcol_y} IS NOT NULL) AS n_non_null "
-            f'FROM "{self.table_name}"'
-        )
-        if where_clause:
-            sql += f" WHERE {where_clause}"
-        return sql
-
-    def _parse_summary_args(self, args: str) -> tuple[int, str] | None:
-        split = _split_optional_where(args)
-        if split is None:
-            return None
-        count_part, where_clause = split
-        if not count_part:
-            return len(self.columns), where_clause
-        parsed_count = parse_single_positive_int_arg(count_part)
-        if parsed_count is None:
-            return None
-        return min(parsed_count, len(self.columns)), where_clause
-
-    def _describe_dataset(self) -> EngineResponse:
-        total_rows = self.row_count()
-        total_columns = len(self.columns)
-        column_rows: list[tuple[Any, ...]] = []
-        for column in self.columns:
-            qcol = quote_ident(column)
-            out = self.conn.execute(
-                f'''SELECT
-                    COUNT(*) AS rows,
-                    COUNT({qcol}) AS non_null,
-                    COUNT(DISTINCT {qcol}) AS distinct_count
-                FROM "{self.table_name}"'''
-            ).fetchone()
-            if out is None:
-                continue
-            rows = int(out[0])
-            non_null = int(out[1])
-            distinct_count = int(out[2])
-            nulls = rows - non_null
-            null_pct = (100.0 * nulls / rows) if rows else 0.0
-            column_rows.append((column, self.column_types[column], distinct_count, nulls, f"{null_pct:.2f}%"))
-
-        message = f"Describe: {total_rows:,} rows x {total_columns} columns"
-        return self._table_response(["column", "type", "distinct", "nulls", "null_%"], column_rows, message)
-
-    def _summarize_dataset(self, column_limit: int, where_clause: str) -> EngineResponse:
-        limited_columns = self.columns[: max(1, column_limit)]
-        where_sql = f" WHERE {where_clause}" if where_clause else ""
-        try:
-            row_out = self.conn.execute(f'SELECT COUNT(*) FROM "{self.table_name}"{where_sql}').fetchone()
-        except Exception as exc:  # noqa: BLE001
-            return EngineResponse(status="error", message=f"Summary failed: {exc}")
-        total_rows = int(row_out[0]) if row_out is not None else 0
-
-        summary_rows: list[tuple[Any, ...]] = []
-        for column in limited_columns:
-            qcol = quote_ident(column)
-            try:
-                out = self.conn.execute(
-                    f'''SELECT
-                        COUNT({qcol}) AS non_null,
-                        COUNT(DISTINCT {qcol}) AS distinct_count,
-                        ANY_VALUE(CAST({qcol} AS VARCHAR)) FILTER (WHERE {qcol} IS NOT NULL) AS sample_value,
-                        MIN(CAST({qcol} AS VARCHAR)) AS min_value,
-                        MAX(CAST({qcol} AS VARCHAR)) AS max_value,
-                        AVG(LENGTH(CAST({qcol} AS VARCHAR))) FILTER (WHERE {qcol} IS NOT NULL) AS avg_len
-                    FROM "{self.table_name}"{where_sql}'''
-                ).fetchone()
-            except Exception as exc:  # noqa: BLE001
-                return EngineResponse(status="error", message=f"Summary failed for column {column}: {exc}")
-            if out is None:
-                continue
-
-            non_null = int(out[0])
-            distinct_count = int(out[1])
-            nulls = max(total_rows - non_null, 0)
-            null_pct = (100.0 * nulls / total_rows) if total_rows else 0.0
-            avg_len = "NULL" if out[5] is None else f"{float(out[5]):.2f}"
-            summary_rows.append(
-                (
-                    column,
-                    self.column_types[column],
-                    format_scalar(out[2], self.max_value_chars),
-                    format_scalar(out[3], self.max_value_chars),
-                    format_scalar(out[4], self.max_value_chars),
-                    avg_len,
-                    distinct_count,
-                    nulls,
-                    f"{null_pct:.2f}%",
-                )
-            )
-
-        message = f"Summary ({total_rows:,} rows x {len(summary_rows)} columns)"
-        if where_clause:
-            message += " with filter"
-        return self._table_response(
-            ["column", "type", "sample", "min", "max", "avg_len", "distinct", "nulls", "null_%"],
-            summary_rows,
-            message,
-        )
-
-    def _profile_column(self, raw_column: str) -> EngineResponse:
-        column = self._resolve_column(raw_column)
-        if column is None:
-            return EngineResponse(status="error", message=f"Unknown column: {raw_column}")
-
-        qcol = quote_ident(column)
-        out = self.conn.execute(
-            f'''SELECT
-                COUNT(*) AS rows,
-                COUNT(DISTINCT {qcol}) AS distinct_count,
-                SUM(CASE WHEN {qcol} IS NULL THEN 1 ELSE 0 END) AS null_count,
-                MIN({qcol}) AS min_value,
-                MAX({qcol}) AS max_value
-            FROM "{self.table_name}"'''
-        ).fetchone()
-        if out is None:
-            return EngineResponse(status="error", message=f"Failed to profile column: {column}")
-
-        metric_rows: list[tuple[Any, ...]] = [
-            ("column", column),
-            ("type", self.column_types[column]),
-            ("rows", int(out[0])),
-            ("distinct", int(out[1])),
-            ("nulls", int(out[2])),
-            ("min", format_scalar(out[3])),
-            ("max", format_scalar(out[4])),
-        ]
-
-        if is_numeric_type(self.column_types[column]):
-            quantiles = self.conn.execute(
-                f'''SELECT
-                    QUANTILE_CONT({qcol}, 0.25),
-                    QUANTILE_CONT({qcol}, 0.50),
-                    QUANTILE_CONT({qcol}, 0.75)
-                FROM "{self.table_name}"
-                WHERE {qcol} IS NOT NULL'''
-            ).fetchone()
-            if quantiles is not None:
-                metric_rows.append(("p25", format_scalar(quantiles[0])))
-                metric_rows.append(("p50", format_scalar(quantiles[1])))
-                metric_rows.append(("p75", format_scalar(quantiles[2])))
-
-        return self._table_response(["metric", "value"], metric_rows, f"Profile for {column}")
-
-    def _save_last_result(self, path_arg: str) -> EngineResponse:
-        if self.last_result_sql is None:
-            return EngineResponse(status="error", message="No query result to save yet")
-
-        out_path = Path(path_arg).expanduser().resolve()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        suffix = out_path.suffix.lower()
-
-        try:
-            if suffix == ".csv":
-                self.conn.execute(
-                    f"COPY ({self.last_result_sql}) TO {_sql_literal(str(out_path))} (HEADER, DELIMITER ',')"
-                )
-            elif suffix in {".parquet", ".pq"}:
-                self.conn.execute(f"COPY ({self.last_result_sql}) TO {_sql_literal(str(out_path))} (FORMAT PARQUET)")
-            elif suffix == ".json":
-                relation = self.conn.execute(self.last_result_sql)
-                rows = relation.fetchall()
-                columns = result_columns(relation.description)
-                records = [dict(zip(columns, row, strict=False)) for row in rows]
-                out_path.write_text(json.dumps(records, indent=2, default=str), encoding="utf-8")
-            else:
-                return EngineResponse(status="error", message="Unsupported extension. Use .csv, .parquet/.pq, or .json")
-        except Exception as exc:  # noqa: BLE001
-            return EngineResponse(status="error", message=f"Save failed: {exc}")
-
-        return EngineResponse(status="ok", message=f"Saved result to {out_path}")
 
     def helper_command_completion_items(self) -> list[CompletionItem]:
         return self._completion_catalog.helper_command_completion_items()

@@ -1,4 +1,4 @@
-from .completion_types import SIMPLE_IDENT_RE
+from .models import SIMPLE_IDENT_RE
 
 
 def parse_optional_positive_int(raw: str) -> int | None:
