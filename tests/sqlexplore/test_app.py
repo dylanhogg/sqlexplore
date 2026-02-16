@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import threading
 from io import StringIO
 from pathlib import Path
 from typing import Any, cast
@@ -9,7 +10,7 @@ from rich.text import Text
 from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.completion.models import CompletionItem
-from sqlexplore.core.engine import SqlExplorerEngine, app_version
+from sqlexplore.core.engine import EngineResponse, SqlExplorerEngine, app_version
 from sqlexplore.ui.tui import NULL_VALUE_COLOR, URL_COLOR, ResultsPreview, SqlExplorerTui, SqlQueryEditor
 
 
@@ -228,6 +229,81 @@ def test_manual_query_sql_is_written_to_activity(tmp_path: Path) -> None:
                 await pilot.press("ctrl+enter")
                 await pilot.pause()
                 assert "[SQL] Executed: SELECT 1 AS x" in _log_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_query_editor_loading_tracks_query_execution(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_run_input(raw_input: str) -> EngineResponse:
+            started.set()
+            release.wait(timeout=2.0)
+            return EngineResponse(status="ok", message=f"done {raw_input}")
+
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                await pilot.pause()
+                assert editor.loading is False
+                editor.text = "SELECT 1 AS x"
+
+                with patch.object(engine, "run_input", side_effect=slow_run_input):
+                    await pilot.press("ctrl+enter")
+                    assert await asyncio.to_thread(started.wait, 1.0) is True
+                    await pilot.pause()
+                    assert editor.loading is True
+
+                    release.set()
+                    await pilot.pause()
+                    await pilot.pause()
+                    assert editor.loading is False
+                    assert "done SELECT 1 AS x" in _log_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_run_query_ignores_repeat_trigger_while_pending(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        started = threading.Event()
+        release = threading.Event()
+        call_count = 0
+        call_count_lock = threading.Lock()
+
+        def slow_run_input(raw_input: str) -> EngineResponse:
+            nonlocal call_count
+            with call_count_lock:
+                call_count += 1
+            started.set()
+            release.wait(timeout=2.0)
+            return EngineResponse(status="ok", message=f"done {raw_input}")
+
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                await pilot.pause()
+                editor.text = "SELECT 1 AS x"
+
+                with patch.object(engine, "run_input", side_effect=slow_run_input):
+                    await pilot.press("ctrl+enter")
+                    assert await asyncio.to_thread(started.wait, 1.0) is True
+                    await pilot.press("ctrl+enter")
+                    await pilot.pause()
+                    with call_count_lock:
+                        assert call_count == 1
+
+                    release.set()
+                    await pilot.pause()
+                    await pilot.pause()
+                    assert editor.loading is False
         finally:
             engine.close()
 

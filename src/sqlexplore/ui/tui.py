@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import json
 import math
@@ -820,6 +821,7 @@ class SqlExplorerTui(App[None]):
         self._activity_lines: list[str] = []
         self._json_highlighter = JSONHighlighter()
         self._json_rendering_enabled = True
+        self._query_task: asyncio.Task[None] | None = None
 
     def _reset_history_cursor(self) -> None:
         self._history_cursor = None
@@ -962,7 +964,7 @@ class SqlExplorerTui(App[None]):
                 )
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         table = self._results_table()
         table.zebra_stripes = True
         self.query_one("#sidebar", Vertical).display = False
@@ -974,6 +976,8 @@ class SqlExplorerTui(App[None]):
             self._log(message, "info")
         self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
         self.action_run_query()
+        if self._query_task is not None:
+            await self._query_task
         self._query_editor().focus()
 
     def _set_editor_text(self, text: str, *, log_message: str | None = None) -> None:
@@ -988,10 +992,23 @@ class SqlExplorerTui(App[None]):
     def action_run_query(self) -> None:
         editor = self._query_editor()
         editor.dismiss_completion_menu()
+        if self._query_task is not None and not self._query_task.done():
+            return
         query = editor.text
-        response = self.engine.run_input(query)
-        self._reset_history_cursor()
-        self._apply_response(response)
+        self._query_task = asyncio.create_task(self._run_query(query))
+
+    async def _run_query(self, query: str) -> None:
+        editor = self._query_editor()
+        editor.loading = True
+        try:
+            response = await asyncio.to_thread(self.engine.run_input, query)
+            self._reset_history_cursor()
+            self._apply_response(response)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Query failed: {exc}", "error")
+        finally:
+            editor.loading = False
+            self._query_task = None
 
     def action_load_sample(self) -> None:
         self._set_editor_text(self.engine.default_query, log_message="Loaded sample query.")
