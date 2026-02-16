@@ -6,7 +6,7 @@ from functools import cache
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as importlib_version
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import duckdb
 import typer
@@ -21,7 +21,13 @@ from sqlexplore.commands.registry import (
 )
 from sqlexplore.completion.completions import CompletionEngine, EngineCompletionCatalog
 from sqlexplore.completion.models import CompletionItem, CompletionResult, SqlClause
-from sqlexplore.core.engine_models import EngineResponse, QueryResult, ResultStatus
+from sqlexplore.core.engine_models import (
+    EngineResponse,
+    HistoryQueryType,
+    QueryHistoryEntry,
+    QueryResult,
+    ResultStatus,
+)
 from sqlexplore.core.result_utils import format_scalar, result_column_types, result_columns, sql_literal
 from sqlexplore.core.sql_templates import (
     DEFAULT_LOAD_QUERY_TEMPLATE,
@@ -205,6 +211,7 @@ class SqlExplorerEngine:
 
         self.conn = duckdb.connect(database=database)
         self.executed_sql: list[str] = []
+        self.query_history: list[QueryHistoryEntry] = []
         self.last_sql = self.default_query
         self.last_result_sql: str | None = None
 
@@ -388,7 +395,23 @@ class SqlExplorerEngine:
     def table_response(self, columns: list[str], rows: list[tuple[Any, ...]], message: str) -> EngineResponse:
         return self._table_response(columns, rows, message)
 
-    def run_sql(self, sql_text: str, remember: bool = True) -> EngineResponse:
+    def _append_history(
+        self,
+        query_text: str,
+        query_type: HistoryQueryType,
+        query_status: Literal["success", "error"],
+    ) -> None:
+        self.query_history.append(
+            QueryHistoryEntry(query_text=query_text, query_type=query_type, query_status=query_status)
+        )
+
+    def run_sql(
+        self,
+        sql_text: str,
+        remember: bool = True,
+        add_to_query_history: bool = True,
+        query_type: HistoryQueryType = "user_entered_sql",
+    ) -> EngineResponse:
         sql = sql_text.strip().rstrip(";")
         if not sql:
             return EngineResponse(status="info", message="Query is empty.")
@@ -400,12 +423,16 @@ class SqlExplorerEngine:
             columns = result_columns(relation.description)
             column_types = result_column_types(relation.description)
         except Exception as exc:  # noqa: BLE001
+            if remember and add_to_query_history:
+                self._append_history(sql, query_type, "error")
             return EngineResponse(status="error", message=str(exc), executed_sql=sql)
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         self.last_sql = sql
         if remember:
             self.executed_sql.append(sql)
+            if add_to_query_history:
+                self._append_history(sql, query_type, "success")
 
         if not columns:
             return EngineResponse(
@@ -430,13 +457,17 @@ class SqlExplorerEngine:
             message += f" (row display limit={self.max_rows_display})"
         return EngineResponse(status="ok", message=message, result=result, executed_sql=sql)
 
-    def run_input(self, raw_input: str) -> EngineResponse:
+    def run_input(self, raw_input: str, add_to_query_history: bool = True) -> EngineResponse:
         text = raw_input.strip()
         if not text:
             return EngineResponse(status="info", message="Type SQL or /help.")
         if text.startswith("/"):
-            return run_command(self, text)
-        return self.run_sql(text)
+            out = run_command(self, text)
+            if add_to_query_history:
+                query_status: Literal["success", "error"] = "error" if out.status == "error" else "success"
+                self._append_history(text, "user_entered_command", query_status)
+            return out
+        return self.run_sql(text, add_to_query_history=add_to_query_history, query_type="user_entered_sql")
 
     def lookup_command(self, raw_name: str) -> CommandSpec | None:
         return self._command_lookup.get(raw_name.casefold())

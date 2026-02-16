@@ -1,5 +1,7 @@
 from typing import Callable, Protocol, Sequence
 
+from sqlexplore.core.engine_models import QueryHistoryEntry
+
 from .models import CompletionItem, SqlClause
 
 
@@ -17,6 +19,7 @@ class CompletionCatalogSource(Protocol):
     table_name: str
     default_limit: int
     executed_sql: list[str]
+    query_history: list[QueryHistoryEntry]
 
     def command_specs(self) -> Sequence[CommandSpecLike]: ...
 

@@ -243,9 +243,14 @@ def test_history_and_rerun_commands_cover_success_and_errors(tmp_path: Path) -> 
         history = engine.run_input("/history 1")
         assert history.status == "ok"
         assert history.result is not None
-        assert history.result.columns == ["#", "sql"]
+        assert history.result.columns == ["#", "type", "status", "sql"]
         assert len(history.result.rows) == 1
-        assert tuple(history.result.rows[0]) == (2, 'SELECT COUNT(*) AS n FROM "data"')
+        assert tuple(history.result.rows[0]) == (
+            2,
+            "user_entered_sql",
+            "success",
+            'SELECT COUNT(*) AS n FROM "data"',
+        )
 
         rerun = engine.run_input("/rerun 2")
         assert rerun.status == "ok"
@@ -260,6 +265,50 @@ def test_history_and_rerun_commands_cover_success_and_errors(tmp_path: Path) -> 
         rerun_oob = engine.run_input("/rerun 99")
         assert rerun_oob.status == "error"
         assert rerun_oob.message == "History index out of range"
+
+        rerun_rerun = engine.run_input("/rerun 5")
+        assert rerun_rerun.status == "error"
+        assert rerun_rerun.message == "Cannot rerun a /rerun entry"
+    finally:
+        engine.close()
+
+
+def test_history_includes_helper_commands_and_rerun_replays_them(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        out = engine.run_input('SELECT COUNT(*) AS n FROM "data"')
+        assert out.status == "ok"
+
+        out = engine.run_input("/sample 1")
+        assert out.status == "ok"
+
+        history = engine.run_input("/history 5")
+        assert history.status == "ok"
+        assert history.result is not None
+        assert [tuple(row) for row in history.result.rows] == [
+            (1, "user_entered_sql", "success", 'SELECT COUNT(*) AS n FROM "data"'),
+            (2, "command_generated_sql", "success", 'SELECT * FROM "data" LIMIT 1'),
+            (3, "user_entered_command", "success", "/sample 1"),
+        ]
+
+        rerun_helper = engine.run_input("/rerun 3")
+        assert rerun_helper.status == "ok"
+        assert rerun_helper.generated_sql == 'SELECT * FROM "data" LIMIT 1'
+        assert rerun_helper.result is not None
+        assert len(rerun_helper.result.rows) == 1
+    finally:
+        engine.close()
+
+
+def test_failed_user_sql_is_recorded_with_error_status(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        out = engine.run_input("SELECT nope FROM data")
+        assert out.status == "error"
+        latest = engine.query_history[-1]
+        assert latest.query_text == "SELECT nope FROM data"
+        assert latest.query_type == "user_entered_sql"
+        assert latest.query_status == "error"
     finally:
         engine.close()
 
@@ -402,6 +451,9 @@ def test_llm_command_validates_usage(tmp_path: Path) -> None:
             out = engine.run_input(command)
             assert out.status == "error"
             assert out.message == "Usage: /llm query <natural language query>"
+        assert [entry.query_text for entry in engine.query_history] == [item.strip() for item in cases]
+        assert {entry.query_type for entry in engine.query_history} == {"user_entered_command"}
+        assert {entry.query_status for entry in engine.query_history} == {"error"}
     finally:
         engine.close()
 
@@ -488,6 +540,12 @@ def test_llm_command_executes_generated_sql_via_existing_path(tmp_path: Path, mo
         assert captured["model"] == "openai/gpt-5-mini"
         assert captured["messages"][1]["role"] == "user"
         assert "count rows by col_name" in captured["messages"][1]["content"]
+        assert [entry.query_text for entry in engine.query_history[-2:]] == [sql, "/llm query count rows by col_name"]
+        assert [entry.query_type for entry in engine.query_history[-2:]] == [
+            "llm_generated_sql",
+            "user_entered_command",
+        ]
+        assert [entry.query_status for entry in engine.query_history[-2:]] == ["success", "success"]
     finally:
         engine.close()
 

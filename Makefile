@@ -28,6 +28,9 @@ run-example-images-1:
 run-example-images-2:
 	uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
 
+run-example-mteb-1:
+	uv run sqlexplore https://huggingface.co/datasets/mteb/tweet_sentiment_extraction/resolve/main/data/train-00000-of-00001.parquet
+
 run-example-pipe-1:
 	ps aux | uv run sqlexplore
 

@@ -205,6 +205,29 @@ def test_startup_sample_query_is_in_history_immediately(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_helper_command_is_in_up_arrow_history(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                await pilot.pause()
+                editor.text = "/sample 1"
+                editor.focus()
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                editor.text = ""
+                editor.focus()
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == "/sample 1"
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_startup_query_sql_is_written_to_activity_for_txt_template(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_txt_app(tmp_path, txt_text="alpha\nbeta\n")

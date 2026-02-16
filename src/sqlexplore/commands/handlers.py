@@ -157,13 +157,17 @@ def resolve_unique_columns(
 def run_sql_helper(engine: CommandEngine, sql: str | None, usage: str) -> EngineResponse:
     if sql is None:
         return usage_error(usage)
-    out = engine.run_sql(sql)
+    out = engine.run_sql(sql, query_type="command_generated_sql")
     out.generated_sql = sql
     return out
 
 
-def run_generated_sql(engine: CommandEngine, sql: str) -> EngineResponse:
-    out = engine.run_sql(sql)
+def run_generated_sql(
+    engine: CommandEngine,
+    sql: str,
+    query_type: Literal["command_generated_sql", "llm_generated_sql"] = "command_generated_sql",
+) -> EngineResponse:
+    out = engine.run_sql(sql, query_type=query_type)
     out.generated_sql = sql
     return out
 
@@ -244,7 +248,7 @@ def cmd_llm(engine: CommandEngine, args: str) -> EngineResponse:
     sql_error = validate_generated_sql(sql, engine.table_name)
     if sql_error is not None:
         return llm_error_response("invalid_sql", detail=sql_error, generated_sql=sql)
-    return run_generated_sql(engine, sql)
+    return run_generated_sql(engine, sql, query_type="llm_generated_sql")
 
 
 def cmd_schema(engine: CommandEngine, args: str) -> EngineResponse:
@@ -350,10 +354,13 @@ def cmd_history(engine: CommandEngine, args: str) -> EngineResponse:
         if parsed is None:
             return usage_error(USAGE_HISTORY)
         count = parsed
-    history = engine.executed_sql[-count:]
-    start_idx = max(1, len(engine.executed_sql) - len(history) + 1)
-    rows = [(idx, sql) for idx, sql in enumerate(history, start=start_idx)]
-    return engine.table_response(["#", "sql"], rows, f"History ({len(history)} queries)")
+    history = engine.query_history[-count:]
+    start_idx = max(1, len(engine.query_history) - len(history) + 1)
+    rows = [
+        (idx, entry.query_type, entry.query_status, entry.query_text)
+        for idx, entry in enumerate(history, start=start_idx)
+    ]
+    return engine.table_response(["#", "type", "status", "sql"], rows, f"History ({len(history)} queries)")
 
 
 def cmd_rerun(engine: CommandEngine, args: str) -> EngineResponse:
@@ -365,11 +372,15 @@ def cmd_rerun(engine: CommandEngine, args: str) -> EngineResponse:
         idx = int(parts[0])
     except ValueError:
         return response(status="error", message="/rerun expects an integer index")
-    if idx < 1 or idx > len(engine.executed_sql):
+    if idx < 1 or idx > len(engine.query_history):
         return response(status="error", message="History index out of range")
-    sql = engine.executed_sql[idx - 1]
-    out = engine.run_sql(sql)
-    out.generated_sql = sql
+    query = engine.query_history[idx - 1].query_text
+    command_name = query.split(maxsplit=1)[0].casefold()
+    if command_name == "/rerun":
+        return response(status="error", message="Cannot rerun a /rerun entry")
+    out = engine.run_input(query)
+    if not query.startswith("/"):
+        out.generated_sql = query
     return out
 
 
