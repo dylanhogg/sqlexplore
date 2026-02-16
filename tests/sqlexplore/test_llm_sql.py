@@ -89,6 +89,7 @@ def test_fetch_sample_rows_returns_first_three_rows_by_default(tmp_path: Path) -
     assert len(samples.rows) == DEFAULT_SAMPLE_ROWS
     assert samples.rows[0] == ("seattle", 10)
     assert samples.rows[-1] == ("seattle", 7)
+    assert ("boise", 2) not in samples.rows
 
 
 def test_build_prompt_includes_constraints_schema_and_sample_rows() -> None:
