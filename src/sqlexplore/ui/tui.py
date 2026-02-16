@@ -810,7 +810,6 @@ class SqlExplorerTui(App[None]):
         self._startup_activity_messages = tuple(startup_activity_messages or [])
         self._startup_query = startup_query if startup_query is not None else self.engine.default_query
         self._history_cursor: int | None = None
-        self._completion_window_start = 0
         self._active_result: QueryResult | None = None
         self._base_rows: list[tuple[CellValue, ...]] = []
         self._sort_column_index: int | None = None
@@ -894,16 +893,11 @@ class SqlExplorerTui(App[None]):
             menu.display = False
             menu.clear_options()
             hint.display = False
-            self._completion_window_start = 0
             return
         selected = min(max(0, selected_index), len(items) - 1)
-        window_size = 8
-        max_window_start = max(0, len(items) - window_size)
-        self._completion_window_start = min(max(0, selected - window_size + 1), max_window_start)
-        visible_items = items[self._completion_window_start : self._completion_window_start + window_size]
-        prompts = [self.completion_option_prompt(item) for item in visible_items]
+        prompts = [self.completion_option_prompt(item) for item in items]
         menu.set_options(prompts)
-        menu.highlighted = selected - self._completion_window_start
+        menu.highlighted = selected
         menu.display = True
         hint.display = True
 
@@ -934,7 +928,7 @@ class SqlExplorerTui(App[None]):
         menu = self._completion_menu()
         if option_index < 0 or option_index >= menu.option_count:
             return None
-        return self._completion_window_start + option_index
+        return option_index
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)

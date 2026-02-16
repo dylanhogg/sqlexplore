@@ -6,9 +6,12 @@ def parse_optional_positive_int(raw: str) -> int | None:
     if lowered in {"off", "none"}:
         return None
     try:
-        return max(1, int(lowered))
+        value = int(lowered)
     except ValueError:
         return None
+    if value <= 0:
+        return None
+    return value
 
 
 def parse_single_positive_int_arg(raw: str) -> int | None:
