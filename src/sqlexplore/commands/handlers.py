@@ -12,10 +12,20 @@ from sqlexplore.completion.helpers import (
 )
 from sqlexplore.core.engine_models import EngineResponse, ResultStatus
 from sqlexplore.core.result_utils import format_scalar, result_columns, sql_literal
+from sqlexplore.llm.llm_sql import (
+    build_prompt,
+    build_schema_context,
+    fetch_sample_rows,
+    generate_sql,
+    resolve_llm_model,
+    validate_generated_sql,
+    validate_llm_api_key,
+)
 
 from .protocols import CommandEngine
 
 USAGE_HELP = "/help"
+USAGE_LLM = "/llm query <natural language query>"
 USAGE_SCHEMA = "/schema"
 USAGE_SAMPLE = "/sample [n]"
 USAGE_FILTER = "/filter <where condition>"
@@ -170,6 +180,49 @@ def cmd_help(engine: CommandEngine, args: str) -> EngineResponse:
         return err
     rows = [(spec.name, spec.usage, spec.description) for spec in engine.command_specs()]
     return engine.table_response(["command", "usage", "description"], rows, "Helper commands")
+
+
+def _parse_llm_query_args(args: str) -> str | None:
+    payload = args.strip()
+    if not payload:
+        return None
+    parts = payload.split(maxsplit=1)
+    if len(parts) != 2:
+        return None
+    subcommand, query = parts
+    if subcommand.casefold() != "query":
+        return None
+    query_payload = query.strip()
+    return query_payload or None
+
+
+def cmd_llm(engine: CommandEngine, args: str) -> EngineResponse:
+    nl_query = _parse_llm_query_args(args)
+    if nl_query is None:
+        return usage_error(USAGE_LLM)
+
+    api_key_error = validate_llm_api_key()
+    if api_key_error is not None:
+        return response(status="error", message=api_key_error)
+
+    model = resolve_llm_model()
+    schema_context = build_schema_context(engine)
+    sample_rows = fetch_sample_rows(engine)
+    prompt = build_prompt(
+        user_query=nl_query,
+        table_name=engine.table_name,
+        schema_context=schema_context,
+        sample_rows=sample_rows,
+    )
+    try:
+        sql = generate_sql(prompt=prompt, model=model)
+    except Exception as exc:  # noqa: BLE001
+        return response(status="error", message=f"LLM provider error: {exc}")
+
+    sql_error = validate_generated_sql(sql, engine.table_name)
+    if sql_error is not None:
+        return response(status="error", message=sql_error)
+    return run_generated_sql(engine, sql)
 
 
 def cmd_schema(engine: CommandEngine, args: str) -> EngineResponse:

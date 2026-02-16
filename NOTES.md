@@ -3,6 +3,12 @@
 Note: This is a working notes list for a human developer, not for an LLM AI Agent.
       If you are an LLM AI Agent like gpt-codex, please ignore this file now.
 
+## LLM SQL Generation
+
+```
+/llm query display the most popular repos
+```
+
 ## LLM SQL Fixing
 
 ```

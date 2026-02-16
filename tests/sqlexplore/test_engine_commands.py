@@ -1,5 +1,6 @@
 import inspect
 from pathlib import Path
+from typing import Any
 
 import sqlexplore.commands.handlers as command_handlers_module
 import sqlexplore.commands.registry as commands_module
@@ -191,7 +192,9 @@ def test_group_pipe_syntax_still_works(tmp_path: Path) -> None:
 def test_help_text_is_generated_from_command_registry(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
+        assert engine.lookup_command("/llm") is not None
         help_text = engine.help_text()
+        assert "/llm query <natural language query>" in help_text
         assert "/sample [n]" in help_text
         assert "/top <column> <n>" in help_text
         assert "/dupes <key_cols_csv> [n] [| where]" in help_text
@@ -380,6 +383,89 @@ def test_helper_completion_suggests_command_names(tmp_path: Path) -> None:
     try:
         completions = _completion_values(engine, "/to")
         assert "/top" in completions
+        llm_completions = _completion_values(engine, "/ll")
+        assert "/llm" in llm_completions
+    finally:
+        engine.close()
+
+
+def test_llm_command_validates_usage(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        cases = [
+            "/llm",
+            "/llm query",
+            "/llm explain counts",
+        ]
+        for command in cases:
+            out = engine.run_input(command)
+            assert out.status == "error"
+            assert out.message == "Usage: /llm query <natural language query>"
+    finally:
+        engine.close()
+
+
+def test_llm_command_returns_missing_key_error(tmp_path: Path, monkeypatch: Any) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        monkeypatch.setattr(
+            command_handlers_module, "validate_llm_api_key", lambda: "LLM API key not found in environment."
+        )
+        out = engine.run_input("/llm query top values by count")
+        assert out.status == "error"
+        assert out.message == "LLM API key not found in environment."
+    finally:
+        engine.close()
+
+
+def test_llm_command_returns_provider_error(tmp_path: Path, monkeypatch: Any) -> None:
+    engine = _build_engine(tmp_path)
+
+    def raise_provider_error(prompt: str, model: str) -> str:
+        raise RuntimeError("rate limit")
+
+    try:
+        monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
+        monkeypatch.setattr(command_handlers_module, "generate_sql", raise_provider_error)
+        out = engine.run_input("/llm query top values by count")
+        assert out.status == "error"
+        assert out.message == "LLM provider error: rate limit"
+    finally:
+        engine.close()
+
+
+def test_llm_command_returns_invalid_sql_error(tmp_path: Path, monkeypatch: Any) -> None:
+    engine = _build_engine(tmp_path)
+
+    def invalid_sql(prompt: str, model: str) -> str:
+        return 'DELETE FROM "data"'
+
+    try:
+        monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
+        monkeypatch.setattr(command_handlers_module, "generate_sql", invalid_sql)
+        out = engine.run_input("/llm query delete everything")
+        assert out.status == "error"
+        assert out.message == "Generated SQL must be SELECT or WITH ... SELECT."
+    finally:
+        engine.close()
+
+
+def test_llm_command_executes_generated_sql_via_existing_path(tmp_path: Path, monkeypatch: Any) -> None:
+    engine = _build_engine(tmp_path)
+    sql = 'SELECT col_name, COUNT(*) AS count FROM "data" GROUP BY col_name ORDER BY count DESC, col_name'
+
+    def generated_sql(prompt: str, model: str) -> str:
+        return sql
+
+    try:
+        monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
+        monkeypatch.setattr(command_handlers_module, "resolve_llm_model", lambda: "openai/gpt-5-mini")
+        monkeypatch.setattr(command_handlers_module, "generate_sql", generated_sql)
+        out = engine.run_input("/llm query count rows by col_name")
+        assert out.status == "ok"
+        assert out.generated_sql == sql
+        assert out.result is not None
+        assert [tuple(row) for row in out.result.rows] == [("a", 2), ("b", 1)]
     finally:
         engine.close()
 

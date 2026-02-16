@@ -21,6 +21,7 @@ from .handlers import (
     USAGE_HISTORY,
     USAGE_LAST,
     USAGE_LIMIT,
+    USAGE_LLM,
     USAGE_PROFILE,
     USAGE_RERUN,
     USAGE_ROWS,
@@ -43,6 +44,7 @@ from .handlers import (
     cmd_history,
     cmd_last,
     cmd_limit,
+    cmd_llm,
     cmd_profile,
     cmd_rerun,
     cmd_rows,
@@ -148,6 +150,12 @@ def build_command_specs(engine: CommandEngine, completion: CommandCompletionCata
     ]
     return [
         CommandSpec("/help", USAGE_HELP, "Show helper command reference.", _bind(engine, cmd_help)),
+        CommandSpec(
+            "/llm",
+            USAGE_LLM,
+            "Generate DuckDB SQL from natural language.",
+            _bind(engine, cmd_llm),
+        ),
         CommandSpec("/schema", USAGE_SCHEMA, "Show dataset schema.", _bind(engine, cmd_schema)),
         *[
             CommandSpec(

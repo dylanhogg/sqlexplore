@@ -23,6 +23,7 @@ classifiers = [
 requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.4.4",
+    "litellm>=1.81.12",
     "rich>=14.0.0",
     "sqlglot>=26.0.0",
     "textual>=7.5.0",
