@@ -832,8 +832,8 @@ class SqlExplorerTui(App[None]):
             return None
         if self._history_cursor is None:
             self._history_cursor = len(history) - 1
-        else:
-            self._history_cursor = (self._history_cursor - 1) % len(history)
+        elif self._history_cursor > 0:
+            self._history_cursor -= 1
         return history[self._history_cursor].query_text
 
     def _history_next(self) -> str | None:
@@ -842,8 +842,8 @@ class SqlExplorerTui(App[None]):
             return None
         if self._history_cursor is None:
             self._history_cursor = 0
-        else:
-            self._history_cursor = (self._history_cursor + 1) % len(history)
+        elif self._history_cursor < len(history) - 1:
+            self._history_cursor += 1
         return history[self._history_cursor].query_text
 
     def _results_table(self) -> DataTable[RenderedCell]:

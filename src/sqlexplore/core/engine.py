@@ -452,7 +452,9 @@ class SqlExplorerEngine:
             total_rows=len(rows),
             truncated=truncated,
         )
-        message = f"{len(shown):,}/{len(rows):,} rows shown in {elapsed_ms:.1f} ms"
+        out_of_rows = len(rows)
+        out_of_rows = max(out_of_rows, self.row_count())
+        message = f"{len(shown):,}/{out_of_rows:,} rows shown in {elapsed_ms:.1f} ms"
         if truncated:
             message += f" (row display limit={self.max_rows_display})"
         return EngineResponse(status="ok", message=message, result=result, executed_sql=sql)

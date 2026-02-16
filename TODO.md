@@ -5,12 +5,12 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
+- Enable persistent file log in appropriate user writable location according to operating system (include all activity logging, and include debugging info, esp with LLM calls (full request/response, etc.))
 - /llm query to include docs data? https://duckdb.org/docs/stable/data/json/json_functions etc
-
-- Enable persistent file log in appropriate location (include more debugging info, esp with LLM calls (request/response, etc.))
 - Perf review copy TSV from uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
 - Key binding: Write marimo notebook and uvx open it
 - Distinguish /describe from /summary
+- Add CLI arg for default number of rows to display (i.e. limit)
 - Integrate LiteLLM
     - Simple /llm <cmd> "prompt"
         - /llm query "my query in natural language"
@@ -55,6 +55,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 - https://github.com/pydata/pandas-datareader : Extract data from a wide range of Internet sources into a pandas DataFrame.
 - Add tar/zip support for reading archive contents (or maybe best to pip in tar/zip results instead?) [e.g. https://huggingface.co/datasets/ma-xu/fine-t2i/resolve/main/synthetic_original_prompt_random_resolution/train-000000.tar]
+- If parquet file, include ability to see metadata: https://duckdb.org/docs/stable/data/parquet/metadata
 
 ## Data formatting & schema introspection
 
@@ -80,7 +81,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## Integrations / “open in …”
 
-- Add open in marimo notebooks
+- Add open in marimo notebooks [https://duckdb.org/docs/stable/guides/python/marimo]
 - Open in Jupyter Notebook
 - Open in Google Colab
 

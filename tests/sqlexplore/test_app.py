@@ -97,7 +97,7 @@ def test_ctrl_shortcuts_work_in_editor_focus(tmp_path: Path) -> None:
                 editor.text = "SELECT 1 AS x"
                 await pilot.press("ctrl+enter")
                 await pilot.pause()
-                assert "1/1 rows shown" in _log_text(app)
+                assert "1/2 rows shown" in _log_text(app)
 
                 editor.text = "junk"
                 await pilot.press("ctrl+n")
@@ -131,7 +131,7 @@ def test_function_key_shortcuts_work_in_editor_focus(tmp_path: Path) -> None:
                 editor.text = "SELECT 1 AS x"
                 await pilot.press("f5")
                 await pilot.pause()
-                assert "1/1 rows shown" in _log_text(app)
+                assert "1/2 rows shown" in _log_text(app)
 
                 editor.text = "junk"
                 await pilot.press("f6")
@@ -222,6 +222,59 @@ def test_helper_command_is_in_up_arrow_history(tmp_path: Path) -> None:
                 await pilot.press("up")
                 await pilot.pause()
                 assert editor.text == "/sample 1"
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_query_history_up_down_stops_at_boundaries(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                await pilot.pause()
+
+                editor.text = "SELECT 11 AS x"
+                editor.focus()
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                editor.text = "SELECT 22 AS y"
+                editor.focus()
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                editor.text = ""
+                editor.focus()
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == "SELECT 22 AS y"
+
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == "SELECT 11 AS x"
+
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == engine.default_query
+
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == engine.default_query
+
+                await pilot.press("down")
+                await pilot.pause()
+                assert editor.text == "SELECT 11 AS x"
+
+                await pilot.press("down")
+                await pilot.pause()
+                assert editor.text == "SELECT 22 AS y"
+
+                await pilot.press("down")
+                await pilot.pause()
+                assert editor.text == "SELECT 22 AS y"
         finally:
             engine.close()
 
@@ -448,6 +501,7 @@ def test_results_header_out_of_uses_full_data_length_when_rows_limit_is_set(tmp_
 
                 header = app.query_one("#results_header", Static)
                 assert "Results (1/5 rows," in str(header.render())
+                assert "1/5 rows shown" in _log_text(app)
         finally:
             engine.close()
 
