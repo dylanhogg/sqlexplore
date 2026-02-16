@@ -864,6 +864,11 @@ class SqlExplorerTui(App[None]):
     def _activity_log(self) -> TextArea:
         return self.query_one("#activity_log", TextArea)
 
+    def _set_results_loading(self, loading: bool) -> None:
+        if not self.screen.is_mounted:
+            return
+        self._results_table().loading = loading
+
     @staticmethod
     def completion_option_prompt(item: CompletionItem) -> str:
         kind = item.kind.replace("_", " ")
@@ -970,6 +975,7 @@ class SqlExplorerTui(App[None]):
         self.query_one("#sidebar", Vertical).display = False
         self._completion_menu().display = False
         self._completion_hint().display = False
+        self._set_results_loading(False)
         self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
         self._log(f"sqlexplore {app_version()}", "info")
         for message in self._startup_activity_messages:
@@ -998,8 +1004,7 @@ class SqlExplorerTui(App[None]):
         self._query_task = asyncio.create_task(self._run_query(query))
 
     async def _run_query(self, query: str) -> None:
-        editor = self._query_editor()
-        editor.loading = True
+        self._set_results_loading(True)
         try:
             response = await asyncio.to_thread(self.engine.run_input, query)
             self._reset_history_cursor()
@@ -1007,7 +1012,7 @@ class SqlExplorerTui(App[None]):
         except Exception as exc:  # noqa: BLE001
             self._log(f"Query failed: {exc}", "error")
         finally:
-            editor.loading = False
+            self._set_results_loading(False)
             self._query_task = None
 
     def action_load_sample(self) -> None:

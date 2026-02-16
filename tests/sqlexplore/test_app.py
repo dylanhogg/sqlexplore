@@ -249,20 +249,26 @@ def test_query_editor_loading_tracks_query_execution(tmp_path: Path) -> None:
         try:
             async with app.run_test() as pilot:
                 editor = app.query_one("#query_editor", SqlQueryEditor)
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
                 await pilot.pause()
-                assert editor.loading is False
+                assert results.loading is False
+                assert results.row_count == 2
+                assert str(results.get_row_at(0)[0]) == "1"
                 editor.text = "SELECT 1 AS x"
 
                 with patch.object(engine, "run_input", side_effect=slow_run_input):
                     await pilot.press("ctrl+enter")
                     assert await asyncio.to_thread(started.wait, 1.0) is True
                     await pilot.pause()
-                    assert editor.loading is True
+                    assert results.loading is True
+                    assert editor.text == "SELECT 1 AS x"
+                    assert results.row_count == 2
+                    assert str(results.get_row_at(0)[0]) == "1"
 
                     release.set()
                     await pilot.pause()
                     await pilot.pause()
-                    assert editor.loading is False
+                    assert results.loading is False
                     assert "done SELECT 1 AS x" in _log_text(app)
         finally:
             engine.close()
@@ -289,6 +295,7 @@ def test_run_query_ignores_repeat_trigger_while_pending(tmp_path: Path) -> None:
         try:
             async with app.run_test() as pilot:
                 editor = app.query_one("#query_editor", SqlQueryEditor)
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
                 await pilot.pause()
                 editor.text = "SELECT 1 AS x"
 
@@ -297,13 +304,14 @@ def test_run_query_ignores_repeat_trigger_while_pending(tmp_path: Path) -> None:
                     assert await asyncio.to_thread(started.wait, 1.0) is True
                     await pilot.press("ctrl+enter")
                     await pilot.pause()
+                    assert results.loading is True
                     with call_count_lock:
                         assert call_count == 1
 
                     release.set()
                     await pilot.pause()
                     await pilot.pause()
-                    assert editor.loading is False
+                    assert results.loading is False
         finally:
             engine.close()
 
