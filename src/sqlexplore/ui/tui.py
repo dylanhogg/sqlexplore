@@ -40,6 +40,7 @@ from sqlexplore.core.engine import (
     result_columns,
     sort_cell_key,
 )
+from sqlexplore.core.logging_utils import get_logger, truncate_for_log
 from sqlexplore.ui.image_cells import format_image_cell_token, format_image_preview_metadata, summarize_image_cell
 
 CellValue = object
@@ -112,6 +113,8 @@ NULL_VALUE_COLOR = "#9CB0C2"
 NULL_VALUE_STYLE = Style(color=NULL_VALUE_COLOR)
 URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
 URL_RE = re.compile(r"(?P<url>(?:https?|ftp)://[^\s<>'\"`]+)", re.IGNORECASE)
+MAX_ACTIVITY_LOG_CHARS = 8_000
+logger = get_logger(__name__)
 
 
 def _iter_url_matches(text: str) -> list[tuple[int, int, str]]:
@@ -805,11 +808,13 @@ class SqlExplorerTui(App[None]):
         engine: SqlExplorerEngine,
         startup_activity_messages: list[str] | None = None,
         startup_query: str | None = None,
+        log_file_path: str | None = None,
     ) -> None:
         super().__init__()
         self.engine = engine
         self._startup_activity_messages = tuple(startup_activity_messages or [])
         self._startup_query = startup_query if startup_query is not None else self.engine.default_query
+        self._log_file_path = log_file_path
         self._history_cursor: int | None = None
         self._active_result: QueryResult | None = None
         self._base_rows: list[tuple[CellValue, ...]] = []
@@ -978,6 +983,7 @@ class SqlExplorerTui(App[None]):
         self._set_results_loading(False)
         self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
         self._log(f"sqlexplore {app_version()}", "info")
+        self._log(f"Log file: {self._log_file_path or 'unavailable'}", "info")
         for message in self._startup_activity_messages:
             self._log(message, "info")
         self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
@@ -1390,9 +1396,16 @@ class SqlExplorerTui(App[None]):
         return text
 
     def _log(self, message: str, status: ResultStatus) -> None:
-        logger = self._activity_log()
+        activity_log = self._activity_log()
         self._activity_lines.append(f"[{status.upper()}] {message}")
-        logger.load_text("\n".join(self._activity_lines))
-        if logger.document.line_count:
-            last_line = logger.document.line_count - 1
-            logger.move_cursor((last_line, len(logger.document[last_line])))
+        activity_log.load_text("\n".join(self._activity_lines))
+        if activity_log.document.line_count:
+            last_line = activity_log.document.line_count - 1
+            activity_log.move_cursor((last_line, len(activity_log.document[last_line])))
+        payload = truncate_for_log(message, max_chars=MAX_ACTIVITY_LOG_CHARS)
+        if status == "error":
+            logger.error("activity status=%s message=%s", status, payload)
+        elif status == "sql":
+            logger.info("activity status=%s sql=%s", status, payload)
+        else:
+            logger.info("activity status=%s message=%s", status, payload)

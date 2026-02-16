@@ -11,6 +11,7 @@ from sqlexplore.completion.helpers import (
     quote_ident,
 )
 from sqlexplore.core.engine_models import EngineResponse, ResultStatus
+from sqlexplore.core.logging_utils import get_logger, truncate_for_log
 from sqlexplore.core.result_utils import format_scalar, result_columns, sql_literal
 from sqlexplore.llm.llm_sql import (
     build_prompt,
@@ -51,6 +52,8 @@ USAGE_CLEAR = "/clear"
 USAGE_EXIT = "/exit or /quit"
 LLM_MISSING_KEY_MESSAGE = "LLM API key not found in environment."
 LLM_PROVIDER_ERROR_MESSAGE = "LLM request failed. Check API key and network, then try again."
+MAX_LLM_QUERY_LOG_CHARS = 8_000
+logger = get_logger(__name__)
 
 
 type LlmErrorKind = Literal["missing_key", "provider", "invalid_sql"]
@@ -225,9 +228,11 @@ def cmd_llm(engine: CommandEngine, args: str) -> EngineResponse:
     nl_query = _parse_llm_query_args(args)
     if nl_query is None:
         return usage_error(USAGE_LLM)
+    logger.info("llm command query=%s", truncate_for_log(nl_query, max_chars=MAX_LLM_QUERY_LOG_CHARS))
 
     api_key_error = validate_llm_api_key()
     if api_key_error is not None:
+        logger.error("llm command missing api key")
         return llm_error_response("missing_key")
 
     model = resolve_llm_model()
@@ -243,11 +248,14 @@ def cmd_llm(engine: CommandEngine, args: str) -> EngineResponse:
         sql = generate_sql(prompt=prompt, model=model)
     except Exception as exc:  # noqa: BLE001
         _ = exc
+        logger.exception("llm command provider error model=%s", model)
         return llm_error_response("provider")
 
     sql_error = validate_generated_sql(sql, engine.table_name)
     if sql_error is not None:
+        logger.error("llm command invalid sql reason=%s", sql_error)
         return llm_error_response("invalid_sql", detail=sql_error, generated_sql=sql)
+    logger.info("llm command generated sql chars=%s", len(sql))
     return run_generated_sql(engine, sql, query_type="llm_generated_sql")
 
 

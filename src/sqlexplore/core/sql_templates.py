@@ -1,11 +1,25 @@
 DEFAULT_LOAD_QUERY_TEMPLATE = "SELECT * FROM {source_sql}"
 
 TXT_LOAD_QUERY_TEMPLATE = """
-WITH source AS (
+WITH source_text AS (
     SELECT
-        row_number() OVER () AS line_number,
-        line
+        content,
+        regexp_split_to_array(content, '\\r?\\n') AS line_array,
+        right(content, 1) = chr(10) AS has_trailing_newline
     FROM {source_sql}
+),
+source AS (
+    SELECT
+        lines.line_number,
+        lines.line
+    FROM source_text
+    CROSS JOIN unnest(source_text.line_array) WITH ORDINALITY AS lines(line, line_number)
+    WHERE source_text.content <> ''
+    AND NOT (
+        source_text.has_trailing_newline
+        AND lines.line = ''
+        AND lines.line_number = array_length(source_text.line_array)
+    )
 ),
 words AS (
     SELECT

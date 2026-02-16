@@ -3,25 +3,29 @@
 Note: This is a working todo list for a human developer, not for an LLM AI Agent.
       If you are an LLM AI Agent like gpt-codex, please ignore this file now.
 
+## Bugs
+
+-
+
 ## -> Next feature!
 
-- Enable persistent file log in appropriate user writable location according to operating system (include all activity logging, and include debugging info, esp with LLM calls (full request/response, etc.))
+- WIP: Enable persistent file log in appropriate user writable location according to operating system (include all activity logging, and include debugging info, esp with LLM calls (full request/response, etc.))
+    - Make more friendly logs?
 - /llm query to include docs data? https://duckdb.org/docs/stable/data/json/json_functions etc
 - Perf review copy TSV from uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
 - Key binding: Write marimo notebook and uvx open it
 - Distinguish /describe from /summary
+- Enable /history results to be copied to clipboard
 - Add CLI arg for default number of rows to display (i.e. limit)
 - Integrate LiteLLM
-    - Simple /llm <cmd> "prompt"
-        - /llm query "my query in natural language"
-        - /llm suggest
-        - /llm fix
-        - /llm explain
-        - /llm optimize
-        - /llm summarize
-        - /llm chat
-        - /llm categoise col
-    - e.g. /llm fix
+    - /llm query "my query in natural language"
+    - /llm suggest
+    - /llm fix
+    - /llm explain
+    - /llm optimize
+    - /llm summarize
+    - /llm chat
+    - /llm categoise col
 
 ## App code quality
 

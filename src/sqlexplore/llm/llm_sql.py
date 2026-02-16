@@ -1,4 +1,5 @@
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
@@ -9,6 +10,7 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from sqlexplore.completion.helpers import quote_ident
+from sqlexplore.core.logging_utils import get_logger, to_json_for_log, truncate_for_log
 
 # drop_params handles dropping non applicable params (e.g. temperature parameter for GPT-5 models)
 litellm.drop_params = True
@@ -31,6 +33,9 @@ COMMON_PROVIDER_API_KEY_ENV_VARS = (
 )
 LLM_API_KEY_ENV_VARS = (LITELLM_API_KEY_ENV_VAR, *COMMON_PROVIDER_API_KEY_ENV_VARS)
 DEFAULT_SAMPLE_ROWS = 3
+MAX_PROMPT_LOG_CHARS = 64_000
+MAX_RESPONSE_LOG_CHARS = 256_000
+logger = get_logger(__name__)
 
 
 class LlmSqlEngine(Protocol):
@@ -163,17 +168,94 @@ def _llm_response_content(response: Any) -> str:
     return text
 
 
+def _value_from_object(obj: Any, key: str) -> Any:
+    if isinstance(obj, Mapping):
+        mapping_obj = cast(Mapping[str, Any], obj)
+        return mapping_obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _extract_usage_stats(response: Any) -> dict[str, int | None]:
+    usage = _value_from_object(response, "usage")
+    prompt_tokens = _value_from_object(usage, "prompt_tokens")
+    completion_tokens = _value_from_object(usage, "completion_tokens")
+    total_tokens = _value_from_object(usage, "total_tokens")
+    return {
+        "prompt_tokens": int(prompt_tokens) if isinstance(prompt_tokens, int) else None,
+        "completion_tokens": int(completion_tokens) if isinstance(completion_tokens, int) else None,
+        "total_tokens": int(total_tokens) if isinstance(total_tokens, int) else None,
+    }
+
+
+def _response_to_log_payload(response: Any) -> Any:
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump()
+        except Exception:  # noqa: BLE001
+            return repr(response)
+    as_dict = getattr(response, "dict", None)
+    if callable(as_dict):
+        try:
+            return as_dict()
+        except Exception:  # noqa: BLE001
+            return repr(response)
+    if isinstance(response, Mapping):
+        return dict(cast(Mapping[str, Any], response))
+    return repr(response)
+
+
 def generate_sql(prompt: str, model: str) -> str:
     litellm_completion = cast(CompletionFn, getattr(litellm, "completion"))
-    response = litellm_completion(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You write DuckDB SQL from natural language requests."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0,
+    request_messages = [
+        {"role": "system", "content": "You write DuckDB SQL from natural language requests."},
+        {"role": "user", "content": prompt},
+    ]
+    request_payload = {
+        "model": model,
+        "messages": request_messages,
+        "temperature": 0,
+    }
+    logger.debug("llm request=%s", to_json_for_log(request_payload, max_chars=MAX_PROMPT_LOG_CHARS))
+
+    t0 = time.perf_counter()
+    try:
+        response = litellm_completion(**request_payload)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "llm completion failed model=%s prompt=%s",
+            model,
+            truncate_for_log(prompt, max_chars=MAX_PROMPT_LOG_CHARS),
+        )
+        raise
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    usage_stats = _extract_usage_stats(response)
+    response_model = _value_from_object(response, "model")
+    response_id = _value_from_object(response, "id")
+    logger.info(
+        "llm response model=%s response_model=%s response_id=%s elapsed_ms=%.1f prompt_tokens=%s "
+        "completion_tokens=%s total_tokens=%s",
+        model,
+        response_model,
+        response_id,
+        elapsed_ms,
+        usage_stats["prompt_tokens"],
+        usage_stats["completion_tokens"],
+        usage_stats["total_tokens"],
     )
-    return _llm_response_content(response)
+
+    sql_text = _llm_response_content(response)
+    logger.debug(
+        "llm response sql chars=%s sql=%s",
+        len(sql_text),
+        truncate_for_log(sql_text, max_chars=MAX_PROMPT_LOG_CHARS),
+    )
+    logger.debug(
+        "llm response raw=%s",
+        to_json_for_log(_response_to_log_payload(response), max_chars=MAX_RESPONSE_LOG_CHARS),
+    )
+    return sql_text
 
 
 def _has_with_clause(statement: exp.Expression) -> bool:

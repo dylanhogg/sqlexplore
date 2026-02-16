@@ -66,6 +66,26 @@ def test_txt_data_source_loads_line_metrics_columns(tmp_path: Path) -> None:
         engine.close()
 
 
+def test_txt_data_source_handles_literal_backslash_zero(tmp_path: Path) -> None:
+    txt_path = tmp_path / "data.txt"
+    txt_path.write_text("value\\0with,comma\nsecond line\n", encoding="utf-8")
+    engine = SqlExplorerEngine(
+        data_path=txt_path,
+        table_name="data",
+        database=":memory:",
+        default_limit=10,
+        max_rows_display=100,
+        max_value_chars=80,
+    )
+    try:
+        out = engine.run_sql('SELECT line, line_number FROM "data" ORDER BY line_number')
+        assert out.status == "ok"
+        assert out.result is not None
+        assert [tuple(row) for row in out.result.rows] == [("value\\0with,comma", 1), ("second line", 2)]
+    finally:
+        engine.close()
+
+
 def _completion_values(engine: SqlExplorerEngine, text: str) -> list[str]:
     items = engine.completion_items(text, (0, len(text)))
     return [item.insert_text for item in items]
