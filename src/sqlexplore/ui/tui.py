@@ -37,7 +37,6 @@ from sqlexplore.core.engine import (
     format_scalar,
     is_struct_type_name,
     is_varchar_type,
-    result_columns,
     sort_cell_key,
 )
 from sqlexplore.core.logging_utils import get_logger, truncate_for_log
@@ -1073,31 +1072,22 @@ class SqlExplorerTui(App[None]):
         return output.getvalue()
 
     def action_copy_results_tsv(self) -> None:
-        sql = self.engine.last_result_sql
-        if sql is None:
-            self._log("No query result available to copy.", "error")
+        result = self._active_result
+        if result is None or not result.columns:
+            self._log("No tabular result available to copy.", "error")
             return
 
-        try:
-            relation = self.engine.conn.execute(sql)
-            rows = relation.fetchall()
-            columns = result_columns(relation.description)
-        except Exception as exc:  # noqa: BLE001
-            self._log(f"Copy failed: {exc}", "error")
-            return
-
-        if not columns:
-            self._log("No tabular query result available to copy.", "error")
-            return
-
-        tsv_text = self._rows_to_tsv(columns, rows)
+        tsv_text = self._rows_to_tsv(result.columns, result.rows)
         self._last_results_tsv = tsv_text
         self.copy_to_clipboard(tsv_text)
 
-        message = f"Copied {len(rows):,} rows x {len(columns)} cols as TSV (full query result). Paste into Excel."
-        if self._active_result is not None and self._active_result.truncated:
-            out_of_rows = self._results_out_of_rows(self._active_result)
-            message += f" Results pane shows {len(self._active_result.rows):,}/{out_of_rows:,} rows."
+        message = (
+            f"Copied {len(result.rows):,} rows x {len(result.columns)} cols as TSV "
+            "(Results pane table). Paste into Excel."
+        )
+        if result.truncated:
+            out_of_rows = self._results_out_of_rows(result)
+            message += f" Results pane shows {len(result.rows):,}/{out_of_rows:,} rows."
         self._log(message, "ok")
 
     def _apply_response(self, response: EngineResponse) -> None:
