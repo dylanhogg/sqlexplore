@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import threading
 from io import StringIO
 from pathlib import Path
 from typing import Any, cast
@@ -9,7 +10,7 @@ from rich.text import Text
 from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.completion.models import CompletionItem
-from sqlexplore.core.engine import SqlExplorerEngine, app_version
+from sqlexplore.core.engine import EngineResponse, SqlExplorerEngine, app_version
 from sqlexplore.ui.tui import NULL_VALUE_COLOR, URL_COLOR, ResultsPreview, SqlExplorerTui, SqlQueryEditor
 
 
@@ -17,6 +18,7 @@ def _build_app(
     tmp_path: Path,
     csv_text: str = "a,b\n1,2\n3,4\n",
     max_rows_display: int = 100,
+    startup_query: str | None = None,
 ) -> tuple[SqlExplorerTui, SqlExplorerEngine]:
     csv_path = tmp_path / "data.csv"
     csv_path.write_text(csv_text, encoding="utf-8")
@@ -28,7 +30,7 @@ def _build_app(
         max_rows_display=max_rows_display,
         max_value_chars=80,
     )
-    return SqlExplorerTui(engine), engine
+    return SqlExplorerTui(engine, startup_query=startup_query), engine
 
 
 def _build_txt_app(tmp_path: Path, txt_text: str) -> tuple[SqlExplorerTui, SqlExplorerEngine]:
@@ -96,7 +98,7 @@ def test_ctrl_shortcuts_work_in_editor_focus(tmp_path: Path) -> None:
                 editor.text = "SELECT 1 AS x"
                 await pilot.press("ctrl+enter")
                 await pilot.pause()
-                assert "1/1 rows shown" in _log_text(app)
+                assert "1/2 rows shown" in _log_text(app)
 
                 editor.text = "junk"
                 await pilot.press("ctrl+n")
@@ -130,7 +132,7 @@ def test_function_key_shortcuts_work_in_editor_focus(tmp_path: Path) -> None:
                 editor.text = "SELECT 1 AS x"
                 await pilot.press("f5")
                 await pilot.pause()
-                assert "1/1 rows shown" in _log_text(app)
+                assert "1/2 rows shown" in _log_text(app)
 
                 editor.text = "junk"
                 await pilot.press("f6")
@@ -204,6 +206,82 @@ def test_startup_sample_query_is_in_history_immediately(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_helper_command_is_in_up_arrow_history(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                await pilot.pause()
+                editor.text = "/sample 1"
+                editor.focus()
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                editor.text = ""
+                editor.focus()
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == "/sample 1"
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_query_history_up_down_stops_at_boundaries(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                await pilot.pause()
+
+                editor.text = "SELECT 11 AS x"
+                editor.focus()
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                editor.text = "SELECT 22 AS y"
+                editor.focus()
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                editor.text = ""
+                editor.focus()
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == "SELECT 22 AS y"
+
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == "SELECT 11 AS x"
+
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == engine.default_query
+
+                await pilot.press("up")
+                await pilot.pause()
+                assert editor.text == engine.default_query
+
+                await pilot.press("down")
+                await pilot.pause()
+                assert editor.text == "SELECT 11 AS x"
+
+                await pilot.press("down")
+                await pilot.pause()
+                assert editor.text == "SELECT 22 AS y"
+
+                await pilot.press("down")
+                await pilot.pause()
+                assert editor.text == "SELECT 22 AS y"
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_startup_query_sql_is_written_to_activity_for_txt_template(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_txt_app(tmp_path, txt_text="alpha\nbeta\n")
@@ -234,6 +312,89 @@ def test_manual_query_sql_is_written_to_activity(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_query_editor_loading_tracks_query_execution(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_run_input(raw_input: str) -> EngineResponse:
+            started.set()
+            release.wait(timeout=2.0)
+            return EngineResponse(status="ok", message=f"done {raw_input}")
+
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                await pilot.pause()
+                assert results.loading is False
+                assert results.row_count == 2
+                assert str(results.get_row_at(0)[0]) == "1"
+                editor.text = "SELECT 1 AS x"
+
+                with patch.object(engine, "run_input", side_effect=slow_run_input):
+                    await pilot.press("ctrl+enter")
+                    assert await asyncio.to_thread(started.wait, 1.0) is True
+                    await pilot.pause()
+                    assert results.loading is True
+                    assert editor.text == "SELECT 1 AS x"
+                    assert results.row_count == 2
+                    assert str(results.get_row_at(0)[0]) == "1"
+
+                    release.set()
+                    await pilot.pause()
+                    await pilot.pause()
+                    assert results.loading is False
+                    assert "done SELECT 1 AS x" in _log_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_run_query_ignores_repeat_trigger_while_pending(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        started = threading.Event()
+        release = threading.Event()
+        call_count = 0
+        call_count_lock = threading.Lock()
+
+        def slow_run_input(raw_input: str) -> EngineResponse:
+            nonlocal call_count
+            with call_count_lock:
+                call_count += 1
+            started.set()
+            release.wait(timeout=2.0)
+            return EngineResponse(status="ok", message=f"done {raw_input}")
+
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                results = cast(DataTable[Any], app.query_one("#results_table", DataTable))
+                await pilot.pause()
+                editor.text = "SELECT 1 AS x"
+
+                with patch.object(engine, "run_input", side_effect=slow_run_input):
+                    await pilot.press("ctrl+enter")
+                    assert await asyncio.to_thread(started.wait, 1.0) is True
+                    await pilot.press("ctrl+enter")
+                    await pilot.pause()
+                    assert results.loading is True
+                    with call_count_lock:
+                        assert call_count == 1
+
+                    release.set()
+                    await pilot.pause()
+                    await pilot.pause()
+                    assert results.loading is False
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_slash_helper_query_sql_is_written_to_activity(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)
@@ -251,7 +412,7 @@ def test_slash_helper_query_sql_is_written_to_activity(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_copy_tsv_shortcut_copies_full_query_result_beyond_display_limit(tmp_path: Path) -> None:
+def test_copy_tsv_shortcut_copies_visible_results_table(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path, csv_text="a,b\n1,x\n2,y\n3,z\n4,w\n5,v\n", max_rows_display=2)
         try:
@@ -268,18 +429,15 @@ def test_copy_tsv_shortcut_copies_full_query_result_beyond_display_limit(tmp_pat
                     ["a", "b"],
                     ["1", "x"],
                     ["2", "y"],
-                    ["3", "z"],
-                    ["4", "w"],
-                    ["5", "v"],
                 ]
-                assert "full query result" in _log_text(app)
+                assert "Results pane table" in _log_text(app)
 
                 await pilot.press("ctrl+2")
                 await pilot.pause()
                 await pilot.press("f8")
                 await pilot.pause()
                 copied_rows = _parse_tsv(app.clipboard)
-                assert len(copied_rows) == 6
+                assert len(copied_rows) == 3
         finally:
             engine.close()
 
@@ -299,7 +457,6 @@ def test_copy_tsv_shortcut_escapes_excel_sensitive_values(tmp_path: Path) -> Non
                     ["id", "note"],
                     ["1", "a,b"],
                     ["2", 'he said "ok"'],
-                    ["3", "line1\nline2"],
                 ]
         finally:
             engine.close()
@@ -309,14 +466,41 @@ def test_copy_tsv_shortcut_escapes_excel_sensitive_values(tmp_path: Path) -> Non
 
 def test_copy_tsv_shortcut_shows_error_when_no_result_available(tmp_path: Path) -> None:
     async def run() -> None:
+        app, engine = _build_app(tmp_path, startup_query="")
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("f8")
+                await pilot.pause()
+                assert "No tabular result available to copy." in _log_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_copy_tsv_shortcut_uses_displayed_helper_command_results(tmp_path: Path) -> None:
+    async def run() -> None:
         app, engine = _build_app(tmp_path)
         try:
             async with app.run_test() as pilot:
                 await pilot.pause()
-                app.engine.last_result_sql = None
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+
+                editor.text = 'SELECT * FROM "data" LIMIT 1'
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                editor.text = "/history 5"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
                 await pilot.press("f8")
                 await pilot.pause()
-                assert "No query result available to copy." in _log_text(app)
+
+                copied_rows = _parse_tsv(app.clipboard)
+                assert copied_rows[0] == ["#", "type", "status", "sql"]
+                assert any(row[3] == 'SELECT * FROM "data" LIMIT 1' for row in copied_rows[1:])
         finally:
             engine.close()
 
@@ -341,6 +525,7 @@ def test_results_header_out_of_uses_full_data_length_when_rows_limit_is_set(tmp_
 
                 header = app.query_one("#results_header", Static)
                 assert "Results (1/5 rows," in str(header.render())
+                assert "1/5 rows shown" in _log_text(app)
         finally:
             engine.close()
 

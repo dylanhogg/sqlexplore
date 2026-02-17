@@ -69,7 +69,9 @@ DEFAULT_HELPER_COMMANDS = (
     "/describe",
     "/summary",
     "/history",
+    "/history-log",
     "/rerun",
+    "/rerun-log",
     "/rows",
     "/values",
     "/limit",
@@ -78,6 +80,9 @@ DEFAULT_HELPER_COMMANDS = (
     "/clear",
     "/exit",
     "/quit",
+    "/llm-query",
+    "/llm-history",
+    "/llm-show",
 )
 HELPER_PREFIX_RE = re.compile(r"(?<!\S)(/[A-Za-z_]*)$")
 IDENT_PREFIX_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_$]*)$")

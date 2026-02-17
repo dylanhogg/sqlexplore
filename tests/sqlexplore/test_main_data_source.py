@@ -521,7 +521,13 @@ def test_main_passes_download_logs_to_tui_on_start(tmp_path: Path, monkeypatch: 
             captured["closed"] = True
 
     class FakeTui:
-        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+        def __init__(
+            self,
+            engine: Any,
+            startup_activity_messages: list[str] | None = None,
+            log_file_path: str | None = None,
+        ) -> None:
+            _ = log_file_path
             captured["engine"] = engine
             captured["startup_activity_messages"] = list(startup_activity_messages or [])
 
@@ -639,7 +645,13 @@ def test_main_reads_stdin_when_data_arg_is_dash(monkeypatch: pytest.MonkeyPatch)
     captured: dict[str, Any] = {}
 
     class FakeTui:
-        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+        def __init__(
+            self,
+            engine: Any,
+            startup_activity_messages: list[str] | None = None,
+            log_file_path: str | None = None,
+        ) -> None:
+            _ = log_file_path
             captured["startup_activity_messages"] = list(startup_activity_messages or [])
 
         def run(self) -> None:
@@ -667,7 +679,13 @@ def test_main_reads_stdin_when_data_arg_is_omitted(monkeypatch: pytest.MonkeyPat
     captured: dict[str, Any] = {}
 
     class FakeTui:
-        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+        def __init__(
+            self,
+            engine: Any,
+            startup_activity_messages: list[str] | None = None,
+            log_file_path: str | None = None,
+        ) -> None:
+            _ = log_file_path
             captured["startup_activity_messages"] = list(startup_activity_messages or [])
 
         def run(self) -> None:
@@ -695,7 +713,13 @@ def test_main_runs_no_ui_for_stdin_when_requested(monkeypatch: pytest.MonkeyPatc
     captured: dict[str, Any] = {}
 
     class FakeTui:
-        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+        def __init__(
+            self,
+            engine: Any,
+            startup_activity_messages: list[str] | None = None,
+            log_file_path: str | None = None,
+        ) -> None:
+            _ = log_file_path
             raise AssertionError("TUI should not run when --no-ui is set")
 
     _patch_stdin_fake_engine(monkeypatch, captured)
@@ -719,7 +743,9 @@ def test_main_uses_execute_as_startup_query_in_tui(monkeypatch: pytest.MonkeyPat
             engine: Any,
             startup_activity_messages: list[str] | None = None,
             startup_query: str | None = None,
+            log_file_path: str | None = None,
         ) -> None:
+            _ = log_file_path
             captured["startup_activity_messages"] = list(startup_activity_messages or [])
             captured["startup_query"] = startup_query
 
@@ -746,7 +772,13 @@ def test_main_runs_execute_in_no_ui_mode(monkeypatch: pytest.MonkeyPatch) -> Non
     sql = "SELECT line FROM data WHERE line ILIKE '%python%'"
 
     class FakeTui:
-        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+        def __init__(
+            self,
+            engine: Any,
+            startup_activity_messages: list[str] | None = None,
+            log_file_path: str | None = None,
+        ) -> None:
+            _ = log_file_path
             raise AssertionError("TUI should not run when --no-ui is set")
 
     _patch_stdin_fake_engine(monkeypatch, captured)
@@ -766,7 +798,13 @@ def test_main_runs_execute_when_tty_is_unavailable(monkeypatch: pytest.MonkeyPat
     sql = "SELECT line FROM data WHERE line ILIKE '%python%'"
 
     class FakeTui:
-        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+        def __init__(
+            self,
+            engine: Any,
+            startup_activity_messages: list[str] | None = None,
+            log_file_path: str | None = None,
+        ) -> None:
+            _ = log_file_path
             raise AssertionError("TUI should not run when tty is unavailable")
 
     _patch_stdin_fake_engine(monkeypatch, captured)
@@ -798,7 +836,13 @@ def test_main_falls_back_to_no_ui_when_tty_is_unavailable(monkeypatch: pytest.Mo
     captured: dict[str, Any] = {}
 
     class FakeTui:
-        def __init__(self, engine: Any, startup_activity_messages: list[str] | None = None) -> None:
+        def __init__(
+            self,
+            engine: Any,
+            startup_activity_messages: list[str] | None = None,
+            log_file_path: str | None = None,
+        ) -> None:
+            _ = log_file_path
             raise AssertionError("TUI should not run when tty is unavailable")
 
     _patch_stdin_fake_engine(monkeypatch, captured)

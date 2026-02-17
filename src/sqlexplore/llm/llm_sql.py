@@ -1,5 +1,8 @@
 import os
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -9,6 +12,14 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from sqlexplore.completion.helpers import quote_ident
+from sqlexplore.core.logging_utils import get_logger, log_event, to_json_for_log, truncate_for_log
+from sqlexplore.llm.duckdb_guidance import (
+    BASE_DUCKDB_GUIDANCE,
+    JSON_DUCKDB_GUIDANCE,
+    REGEX_DUCKDB_GUIDANCE,
+    STRUCT_DUCKDB_GUIDANCE,
+    TEMPORAL_DUCKDB_GUIDANCE,
+)
 
 # drop_params handles dropping non applicable params (e.g. temperature parameter for GPT-5 models)
 litellm.drop_params = True
@@ -31,6 +42,11 @@ COMMON_PROVIDER_API_KEY_ENV_VARS = (
 )
 LLM_API_KEY_ENV_VARS = (LITELLM_API_KEY_ENV_VAR, *COMMON_PROVIDER_API_KEY_ENV_VARS)
 DEFAULT_SAMPLE_ROWS = 3
+DEFAULT_DUCKDB_GUIDANCE_MAX_CHARS = 1_600
+MAX_PROMPT_LOG_CHARS = 64_000
+MAX_RESPONSE_LOG_CHARS = 256_000
+logger = get_logger(__name__)
+_llm_trace_id_var: ContextVar[str | None] = ContextVar("llm_trace_id", default=None)
 
 
 class LlmSqlEngine(Protocol):
@@ -48,6 +64,47 @@ class SampleRows:
 
 
 CompletionFn = Callable[..., Any]
+REGEX_KEYWORDS = (
+    "regex",
+    "regexp",
+    "pattern",
+    "match",
+    "extract",
+    "replace",
+    "similar to",
+    "rlike",
+)
+JSON_KEYWORDS = (
+    "json",
+    "json_extract",
+    "json path",
+    "jsonpath",
+    "$.",
+)
+STRUCT_KEYWORDS = ("struct", "nested", "field", "map", "list")
+TEMPORAL_KEYWORDS = (
+    "date",
+    "time",
+    "timestamp",
+    "timestamptz",
+    "strftime",
+    "strptime",
+    "day",
+    "week",
+    "month",
+    "year",
+)
+STRUCT_SCHEMA_HINTS = ("struct", "map", "list")
+TEMPORAL_SCHEMA_HINTS = ("date", "time", "timestamp")
+
+
+@contextmanager
+def llm_trace_context(trace_id: str | None) -> Iterator[None]:
+    token = _llm_trace_id_var.set(trace_id)
+    try:
+        yield
+    finally:
+        _llm_trace_id_var.reset(token)
 
 
 def _env_values(env: Mapping[str, str] | None = None) -> Mapping[str, str]:
@@ -110,6 +167,48 @@ def _format_sample_rows(sample_rows: SampleRows) -> str:
     return "\n".join(lines)
 
 
+def _contains_any(text: str, terms: Sequence[str]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _trim_for_prompt(payload: str, max_chars: int) -> str:
+    assert max_chars > 3
+    if len(payload) <= max_chars:
+        return payload
+    return f"{payload[: max_chars - 3].rstrip()}..."
+
+
+def select_duckdb_guidance(
+    user_query: str,
+    schema_context: str,
+    max_chars: int = DEFAULT_DUCKDB_GUIDANCE_MAX_CHARS,
+) -> str:
+    payload = f"{user_query}\n{schema_context}".casefold()
+    schema_text = schema_context.casefold()
+    sections = [BASE_DUCKDB_GUIDANCE]
+    if _contains_any(payload, REGEX_KEYWORDS):
+        sections.append(REGEX_DUCKDB_GUIDANCE)
+    if _contains_any(payload, JSON_KEYWORDS) or "json" in schema_text:
+        sections.append(JSON_DUCKDB_GUIDANCE)
+    if _contains_any(payload, STRUCT_KEYWORDS) or _contains_any(schema_text, STRUCT_SCHEMA_HINTS):
+        sections.append(STRUCT_DUCKDB_GUIDANCE)
+    if _contains_any(payload, TEMPORAL_KEYWORDS) or _contains_any(schema_text, TEMPORAL_SCHEMA_HINTS):
+        sections.append(TEMPORAL_DUCKDB_GUIDANCE)
+    return _trim_for_prompt("\n\n".join(sections), max_chars=max_chars)
+
+
+def _prompt_constraints(table_name: str, columns: str) -> str:
+    return (
+        "Constraints:\n"
+        "- Use DuckDB dialect.\n"
+        f'- Use only table "{table_name}".\n'
+        f"- Use only known columns: {columns}.\n"
+        "- Return SQL only.\n"
+        "- Return exactly one statement.\n"
+        "- Statement must be SELECT or WITH ... SELECT."
+    )
+
+
 def build_prompt(
     user_query: str,
     table_name: str,
@@ -120,16 +219,45 @@ def build_prompt(
     assert payload
     columns = ", ".join(sample_rows.columns) if sample_rows.columns else "(none)"
     formatted_sample_rows = _format_sample_rows(sample_rows)
+    constraints = _prompt_constraints(table_name, columns)
+    duckdb_guidance = select_duckdb_guidance(payload, schema_context)
     return (
         "Generate SQL for DuckDB.\n"
-        "Constraints:\n"
-        "- Use DuckDB dialect.\n"
-        f'- Use only table "{table_name}".\n'
-        f"- Use only known columns: {columns}.\n"
-        "- Return SQL only.\n"
-        "- Return exactly one statement.\n"
-        "- Statement must be SELECT or WITH ... SELECT.\n\n"
+        f"{constraints}\n\n"
         f"User request:\n{payload}\n\n"
+        f"DuckDB guidance:\n{duckdb_guidance}\n\n"
+        f"{schema_context}\n\n"
+        "First rows:\n"
+        f"{formatted_sample_rows}"
+    )
+
+
+def build_repair_prompt(
+    user_query: str,
+    previous_sql: str,
+    error_message: str,
+    table_name: str,
+    schema_context: str,
+    sample_rows: SampleRows,
+) -> str:
+    payload = user_query.strip()
+    old_sql = previous_sql.strip()
+    failure = error_message.strip()
+    assert payload
+    assert old_sql
+    assert failure
+    columns = ", ".join(sample_rows.columns) if sample_rows.columns else "(none)"
+    constraints = _prompt_constraints(table_name, columns)
+    duckdb_guidance = select_duckdb_guidance(payload, schema_context)
+    formatted_sample_rows = _format_sample_rows(sample_rows)
+    return (
+        "Fix this SQL for DuckDB.\n"
+        f"{constraints}\n"
+        "- Return corrected SQL only.\n\n"
+        f"Original user request:\n{payload}\n\n"
+        f"Previous SQL:\n{old_sql}\n\n"
+        f"Error:\n{failure}\n\n"
+        f"DuckDB guidance:\n{duckdb_guidance}\n\n"
         f"{schema_context}\n\n"
         "First rows:\n"
         f"{formatted_sample_rows}"
@@ -163,17 +291,132 @@ def _llm_response_content(response: Any) -> str:
     return text
 
 
+def _value_from_object(obj: Any, key: str) -> Any:
+    if isinstance(obj, Mapping):
+        mapping_obj = cast(Mapping[str, Any], obj)
+        return mapping_obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _extract_usage_stats(response: Any) -> dict[str, int | None]:
+    usage = _value_from_object(response, "usage")
+    prompt_tokens = _value_from_object(usage, "prompt_tokens")
+    completion_tokens = _value_from_object(usage, "completion_tokens")
+    total_tokens = _value_from_object(usage, "total_tokens")
+    return {
+        "prompt_tokens": int(prompt_tokens) if isinstance(prompt_tokens, int) else None,
+        "completion_tokens": int(completion_tokens) if isinstance(completion_tokens, int) else None,
+        "total_tokens": int(total_tokens) if isinstance(total_tokens, int) else None,
+    }
+
+
+def _response_to_log_payload(response: Any) -> Any:
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump()
+        except Exception:  # noqa: BLE001
+            return repr(response)
+    as_dict = getattr(response, "dict", None)
+    if callable(as_dict):
+        try:
+            return as_dict()
+        except Exception:  # noqa: BLE001
+            return repr(response)
+    if isinstance(response, Mapping):
+        return dict(cast(Mapping[str, Any], response))
+    return repr(response)
+
+
 def generate_sql(prompt: str, model: str) -> str:
     litellm_completion = cast(CompletionFn, getattr(litellm, "completion"))
-    response = litellm_completion(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You write DuckDB SQL from natural language requests."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0,
+    request_messages = [
+        {"role": "system", "content": "You write DuckDB SQL from natural language requests."},
+        {"role": "user", "content": prompt},
+    ]
+    request_payload = {
+        "model": model,
+        "messages": request_messages,
+        "temperature": 0,
+    }
+    trace_id = _llm_trace_id_var.get()
+    if trace_id is not None:
+        log_event(
+            "llm.request",
+            {
+                "trace_id": trace_id,
+                "model": model,
+                "request": request_payload,
+            },
+            logger=logger,
+        )
+    logger.debug("llm request=%s", to_json_for_log(request_payload, max_chars=MAX_PROMPT_LOG_CHARS))
+
+    t0 = time.perf_counter()
+    try:
+        response = litellm_completion(**request_payload)
+    except Exception as exc:  # noqa: BLE001
+        if trace_id is not None:
+            log_event(
+                "llm.response",
+                {
+                    "trace_id": trace_id,
+                    "model": model,
+                    "status": "provider_error",
+                    "error": str(exc),
+                },
+                logger=logger,
+            )
+        logger.exception(
+            "llm completion failed model=%s prompt=%s",
+            model,
+            truncate_for_log(prompt, max_chars=MAX_PROMPT_LOG_CHARS),
+        )
+        raise
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    usage_stats = _extract_usage_stats(response)
+    response_model = _value_from_object(response, "model")
+    response_id = _value_from_object(response, "id")
+    logger.info(
+        "llm response model=%s response_model=%s response_id=%s elapsed_ms=%.1f prompt_tokens=%s "
+        "completion_tokens=%s total_tokens=%s",
+        model,
+        response_model,
+        response_id,
+        elapsed_ms,
+        usage_stats["prompt_tokens"],
+        usage_stats["completion_tokens"],
+        usage_stats["total_tokens"],
     )
-    return _llm_response_content(response)
+
+    sql_text = _llm_response_content(response)
+    response_payload = _response_to_log_payload(response)
+    logger.debug(
+        "llm response sql chars=%s sql=%s",
+        len(sql_text),
+        truncate_for_log(sql_text, max_chars=MAX_PROMPT_LOG_CHARS),
+    )
+    logger.debug(
+        "llm response raw=%s",
+        to_json_for_log(response_payload, max_chars=MAX_RESPONSE_LOG_CHARS),
+    )
+    if trace_id is not None:
+        log_event(
+            "llm.response",
+            {
+                "trace_id": trace_id,
+                "model": model,
+                "response_model": response_model,
+                "response_id": response_id,
+                "elapsed_ms": elapsed_ms,
+                "usage": usage_stats,
+                "sql": sql_text,
+                "response": response_payload,
+            },
+            logger=logger,
+        )
+    return sql_text
 
 
 def _has_with_clause(statement: exp.Expression) -> bool:

@@ -3,6 +3,8 @@ from typing import Callable, Literal, Sequence
 
 from sqlglot.tokens import Tokenizer as SqlglotTokenizer
 
+from sqlexplore.core.engine_models import QueryHistoryEntry
+
 from .helpers import (
     is_numeric_type,
     is_simple_ident,
@@ -57,6 +59,10 @@ class EngineCompletionCatalog:
     @property
     def executed_sql(self) -> list[str]:
         return self._engine.executed_sql
+
+    @property
+    def query_history(self) -> list[QueryHistoryEntry]:
+        return self._engine.query_history
 
     @property
     def _command_specs(self) -> Sequence[CommandSpecLike]:
@@ -468,13 +474,13 @@ class EngineCompletionCatalog:
 
     def _complete_rerun(self, args: str, trailing_space: bool) -> list[CompletionItem]:
         del args, trailing_space
-        if not self.executed_sql:
+        if not self.query_history:
             return [self._base_completion_item("1", "value", "history index", score=80)]
-        start = max(1, len(self.executed_sql) - 9)
+        start = max(1, len(self.query_history) - 9)
         items: list[CompletionItem] = []
-        for idx in range(len(self.executed_sql), start - 1, -1):
-            sql = self.executed_sql[idx - 1].replace("\n", " ")
-            detail = sql if len(sql) <= 50 else f"{sql[:47]}..."
+        for idx in range(len(self.query_history), start - 1, -1):
+            query_text = self.query_history[idx - 1].query_text.replace("\n", " ")
+            detail = query_text if len(query_text) <= 50 else f"{query_text[:47]}..."
             items.append(self._base_completion_item(str(idx), "value", detail=detail, score=140))
         return items
 

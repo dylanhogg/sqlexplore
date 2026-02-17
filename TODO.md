@@ -3,23 +3,31 @@
 Note: This is a working todo list for a human developer, not for an LLM AI Agent.
       If you are an LLM AI Agent like gpt-codex, please ignore this file now.
 
+## Bugs
+
+-
+
 ## -> Next feature!
 
-- Review all commands, and ensure they have unit tests, and are in the help text
-- Perf review copy TSV from uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
+- Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
+- Migrate logging from file to sqlite database
+- Textual double click to select row? & Cmd+A to select all? (maybe not? codex://threads/019c6a4a-4e25-7842-a7db-356a983f93b7)
+- Improve persistent file log life cycle management (rotate, cleanup, use for /llm-history, etc.)
+- Review duckdb_guidance.py for /llm-query command
+- Perf review copy TSV from uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet (add spinner?)
 - Key binding: Write marimo notebook and uvx open it
 - Distinguish /describe from /summary
+- Enable /history results to be copied to clipboard
+- Add CLI arg for default number of rows to display (i.e. limit)
 - Integrate LiteLLM
-    - Simple /llm <cmd> "prompt"
-        - /llm query "my query in natural language"
-        - /llm suggest
-        - /llm fix
-        - /llm explain
-        - /llm optimize
-        - /llm summarize
-        - /llm chat
-        - /llm categoise col
-    - e.g. /llm fix
+    - /llm query "my query in natural language"
+    - /llm suggest
+    - /llm fix
+    - /llm explain
+    - /llm optimize
+    - /llm summarize
+    - /llm chat
+    - /llm categoise col
 
 ## App code quality
 
@@ -53,6 +61,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 - https://github.com/pydata/pandas-datareader : Extract data from a wide range of Internet sources into a pandas DataFrame.
 - Add tar/zip support for reading archive contents (or maybe best to pip in tar/zip results instead?) [e.g. https://huggingface.co/datasets/ma-xu/fine-t2i/resolve/main/synthetic_original_prompt_random_resolution/train-000000.tar]
+- If parquet file, include ability to see metadata: https://duckdb.org/docs/stable/data/parquet/metadata
 
 ## Data formatting & schema introspection
 
@@ -73,12 +82,12 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## Visualisation
 
-- Column summaries like on Huggingface datasets page (also see https://github.com/deeplook/sparklines)
+- Make a plan to add column summaries like on Huggingface datasets page (also see https://github.com/deeplook/sparklines, which implements Edward Tufte's concept of sparklines, but limited to text only). Could this be a good fit for the results pane? Could it be for a helper command, or integrated as a helper command?
 - use inspiration from: https://github.com/adamerose/pandasgui
 
 ## Integrations / “open in …”
 
-- Add open in marimo notebooks
+- Add open in marimo notebooks [https://duckdb.org/docs/stable/guides/python/marimo]
 - Open in Jupyter Notebook
 - Open in Google Colab
 

@@ -8,6 +8,7 @@ from sqlexplore.completion.completions import EngineCompletionCatalog
 from sqlexplore.completion.models import CompletionItem
 from sqlexplore.completion.protocols import CommandSpecLike
 from sqlexplore.core.engine import SqlExplorerEngine
+from sqlexplore.core.engine_models import QueryHistoryEntry
 
 
 def _build_engine(tmp_path: Path, csv_text: str = "col_name,x\na,1\nb,2\na,3\n") -> SqlExplorerEngine:
@@ -100,7 +101,7 @@ def test_rerun_completion_lists_recent_queries_and_truncates_details(tmp_path: P
 
         result = engine.completion_result("/rerun ", (0, len("/rerun ")))
         items = result.items
-        history_len = len(engine.executed_sql)
+        history_len = len(engine.query_history)
         expected_recent = {str(idx) for idx in range(history_len, history_len - 10, -1)}
 
         assert len(items) == 10
@@ -128,6 +129,7 @@ class _FakeCatalogSource:
         self.table_name = "data"
         self.default_limit = 10
         self.executed_sql: list[str] = []
+        self.query_history: list[QueryHistoryEntry] = []
         self._specs: list[CommandSpecLike] = [
             _FakeCommandSpec(name="/help", usage="/help", description="help", aliases=("/HELP",)),
             _FakeCommandSpec(name="/sample", usage="/sample [n]", description="sample"),

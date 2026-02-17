@@ -1,7 +1,7 @@
 from typing import Any, Protocol
 
 from sqlexplore.completion.models import CompletionItem
-from sqlexplore.core.engine_models import EngineResponse
+from sqlexplore.core.engine_models import EngineResponse, HistoryQueryType, QueryHistoryEntry
 
 
 class CommandEngine(Protocol):
@@ -13,6 +13,7 @@ class CommandEngine(Protocol):
     columns: list[str]
     column_types: dict[str, str]
     executed_sql: list[str]
+    query_history: list[QueryHistoryEntry]
     last_sql: str
     last_result_sql: str | None
 
@@ -27,7 +28,15 @@ class CommandEngine(Protocol):
 
     def resolve_column(self, raw_column: str) -> str | None: ...
 
-    def run_sql(self, sql_text: str, remember: bool = True) -> EngineResponse: ...
+    def run_sql(
+        self,
+        sql_text: str,
+        remember: bool = True,
+        add_to_query_history: bool = True,
+        query_type: HistoryQueryType = "user_entered_sql",
+    ) -> EngineResponse: ...
+
+    def run_input(self, raw_input: str, add_to_query_history: bool = True) -> EngineResponse: ...
 
     def row_count(self) -> int: ...
 

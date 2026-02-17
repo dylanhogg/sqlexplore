@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import json
 import math
@@ -36,9 +37,9 @@ from sqlexplore.core.engine import (
     format_scalar,
     is_struct_type_name,
     is_varchar_type,
-    result_columns,
     sort_cell_key,
 )
+from sqlexplore.core.logging_utils import get_logger, truncate_for_log
 from sqlexplore.ui.image_cells import format_image_cell_token, format_image_preview_metadata, summarize_image_cell
 
 CellValue = object
@@ -111,6 +112,8 @@ NULL_VALUE_COLOR = "#9CB0C2"
 NULL_VALUE_STYLE = Style(color=NULL_VALUE_COLOR)
 URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
 URL_RE = re.compile(r"(?P<url>(?:https?|ftp)://[^\s<>'\"`]+)", re.IGNORECASE)
+MAX_ACTIVITY_LOG_CHARS = 8_000
+logger = get_logger(__name__)
 
 
 def _iter_url_matches(text: str) -> list[tuple[int, int, str]]:
@@ -804,11 +807,13 @@ class SqlExplorerTui(App[None]):
         engine: SqlExplorerEngine,
         startup_activity_messages: list[str] | None = None,
         startup_query: str | None = None,
+        log_file_path: str | None = None,
     ) -> None:
         super().__init__()
         self.engine = engine
         self._startup_activity_messages = tuple(startup_activity_messages or [])
         self._startup_query = startup_query if startup_query is not None else self.engine.default_query
+        self._log_file_path = log_file_path
         self._history_cursor: int | None = None
         self._active_result: QueryResult | None = None
         self._base_rows: list[tuple[CellValue, ...]] = []
@@ -820,29 +825,30 @@ class SqlExplorerTui(App[None]):
         self._activity_lines: list[str] = []
         self._json_highlighter = JSONHighlighter()
         self._json_rendering_enabled = True
+        self._query_task: asyncio.Task[None] | None = None
 
     def _reset_history_cursor(self) -> None:
         self._history_cursor = None
 
     def _history_prev(self) -> str | None:
-        history = self.engine.executed_sql
+        history = self.engine.query_history
         if not history:
             return None
         if self._history_cursor is None:
             self._history_cursor = len(history) - 1
-        else:
-            self._history_cursor = (self._history_cursor - 1) % len(history)
-        return history[self._history_cursor]
+        elif self._history_cursor > 0:
+            self._history_cursor -= 1
+        return history[self._history_cursor].query_text
 
     def _history_next(self) -> str | None:
-        history = self.engine.executed_sql
+        history = self.engine.query_history
         if not history:
             return None
         if self._history_cursor is None:
             self._history_cursor = 0
-        else:
-            self._history_cursor = (self._history_cursor + 1) % len(history)
-        return history[self._history_cursor]
+        elif self._history_cursor < len(history) - 1:
+            self._history_cursor += 1
+        return history[self._history_cursor].query_text
 
     def _results_table(self) -> DataTable[RenderedCell]:
         return cast(DataTable[RenderedCell], self.query_one("#results_table", DataTable))
@@ -861,6 +867,11 @@ class SqlExplorerTui(App[None]):
 
     def _activity_log(self) -> TextArea:
         return self.query_one("#activity_log", TextArea)
+
+    def _set_results_loading(self, loading: bool) -> None:
+        if not self.screen.is_mounted:
+            return
+        self._results_table().loading = loading
 
     @staticmethod
     def completion_option_prompt(item: CompletionItem) -> str:
@@ -962,18 +973,22 @@ class SqlExplorerTui(App[None]):
                 )
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         table = self._results_table()
         table.zebra_stripes = True
         self.query_one("#sidebar", Vertical).display = False
         self._completion_menu().display = False
         self._completion_hint().display = False
+        self._set_results_loading(False)
         self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
         self._log(f"sqlexplore {app_version()}", "info")
+        self._log(f"Log file: {self._log_file_path or 'unavailable'}", "info")
         for message in self._startup_activity_messages:
             self._log(message, "info")
         self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
         self.action_run_query()
+        if self._query_task is not None:
+            await self._query_task
         self._query_editor().focus()
 
     def _set_editor_text(self, text: str, *, log_message: str | None = None) -> None:
@@ -988,10 +1003,22 @@ class SqlExplorerTui(App[None]):
     def action_run_query(self) -> None:
         editor = self._query_editor()
         editor.dismiss_completion_menu()
+        if self._query_task is not None and not self._query_task.done():
+            return
         query = editor.text
-        response = self.engine.run_input(query)
-        self._reset_history_cursor()
-        self._apply_response(response)
+        self._query_task = asyncio.create_task(self._run_query(query))
+
+    async def _run_query(self, query: str) -> None:
+        self._set_results_loading(True)
+        try:
+            response = await asyncio.to_thread(self.engine.run_input, query)
+            self._reset_history_cursor()
+            self._apply_response(response)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Query failed: {exc}", "error")
+        finally:
+            self._set_results_loading(False)
+            self._query_task = None
 
     def action_load_sample(self) -> None:
         self._set_editor_text(self.engine.default_query, log_message="Loaded sample query.")
@@ -1045,31 +1072,22 @@ class SqlExplorerTui(App[None]):
         return output.getvalue()
 
     def action_copy_results_tsv(self) -> None:
-        sql = self.engine.last_result_sql
-        if sql is None:
-            self._log("No query result available to copy.", "error")
+        result = self._active_result
+        if result is None or not result.columns:
+            self._log("No tabular result available to copy.", "error")
             return
 
-        try:
-            relation = self.engine.conn.execute(sql)
-            rows = relation.fetchall()
-            columns = result_columns(relation.description)
-        except Exception as exc:  # noqa: BLE001
-            self._log(f"Copy failed: {exc}", "error")
-            return
-
-        if not columns:
-            self._log("No tabular query result available to copy.", "error")
-            return
-
-        tsv_text = self._rows_to_tsv(columns, rows)
+        tsv_text = self._rows_to_tsv(result.columns, result.rows)
         self._last_results_tsv = tsv_text
         self.copy_to_clipboard(tsv_text)
 
-        message = f"Copied {len(rows):,} rows x {len(columns)} cols as TSV (full query result). Paste into Excel."
-        if self._active_result is not None and self._active_result.truncated:
-            out_of_rows = self._results_out_of_rows(self._active_result)
-            message += f" Results pane shows {len(self._active_result.rows):,}/{out_of_rows:,} rows."
+        message = (
+            f"Copied {len(result.rows):,} rows x {len(result.columns)} cols as TSV "
+            "(Results pane table). Paste into Excel."
+        )
+        if result.truncated:
+            out_of_rows = self._results_out_of_rows(result)
+            message += f" Results pane shows {len(result.rows):,}/{out_of_rows:,} rows."
         self._log(message, "ok")
 
     def _apply_response(self, response: EngineResponse) -> None:
@@ -1368,9 +1386,16 @@ class SqlExplorerTui(App[None]):
         return text
 
     def _log(self, message: str, status: ResultStatus) -> None:
-        logger = self._activity_log()
+        activity_log = self._activity_log()
         self._activity_lines.append(f"[{status.upper()}] {message}")
-        logger.load_text("\n".join(self._activity_lines))
-        if logger.document.line_count:
-            last_line = logger.document.line_count - 1
-            logger.move_cursor((last_line, len(logger.document[last_line])))
+        activity_log.load_text("\n".join(self._activity_lines))
+        if activity_log.document.line_count:
+            last_line = activity_log.document.line_count - 1
+            activity_log.move_cursor((last_line, len(activity_log.document[last_line])))
+        payload = truncate_for_log(message, max_chars=MAX_ACTIVITY_LOG_CHARS)
+        if status == "error":
+            logger.error("activity status=%s message=%s", status, payload)
+        elif status == "sql":
+            logger.info("activity status=%s sql=%s", status, payload)
+        else:
+            logger.info("activity status=%s message=%s", status, payload)

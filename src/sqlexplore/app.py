@@ -22,6 +22,7 @@ from sqlexplore.core.engine import (
     app_version,
     format_scalar,
 )
+from sqlexplore.core.logging_utils import configure_file_logging, get_logger, truncate_for_log
 from sqlexplore.ui.tui import SqlExplorerTui, SqlQueryEditor
 
 app = typer.Typer(
@@ -32,6 +33,8 @@ app = typer.Typer(
 
 _REMOTE_FILENAME_SAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _REMOTE_DOWNLOAD_CHUNK_SIZE = 5 * 1024 * 1024
+MAX_SQL_LOG_CHARS = 8_000
+logger = get_logger(__name__)
 
 
 __all__ = [
@@ -88,6 +91,10 @@ def _emit_download_log(
         typer.echo(message, err=err)
     if include_activity and activity_messages is not None:
         activity_messages.append(message)
+    if err:
+        logger.error(message)
+    else:
+        logger.info(message)
 
 
 def _remote_content_length(response: Any) -> int | None:
@@ -163,6 +170,12 @@ def _download_remote_data_file(
                 progress_bar.update(len(chunk))
     except Exception as exc:
         destination.unlink(missing_ok=True)
+        logger.exception(
+            "download failed url=%s destination=%s overwrite=%s",
+            url,
+            destination,
+            overwrite,
+        )
         raise typer.BadParameter(f"Failed to download data file from {url} to {destination}: {exc}") from exc
     finally:
         if progress_bar is not None:
@@ -192,6 +205,7 @@ def _resolve_data_path(
         raise typer.BadParameter("Data path cannot be empty.")
     if _is_http_url(value):
         resolved_download_dir = download_dir.expanduser().resolve()
+        logger.info("resolving remote data source url=%s download_dir=%s", value, resolved_download_dir)
         return _download_remote_data_file(
             value,
             resolved_download_dir,
@@ -200,6 +214,7 @@ def _resolve_data_path(
         )
 
     file_path = Path(value).expanduser().resolve()
+    logger.info("resolving local data source path=%s", file_path)
     if not file_path.exists():
         raise typer.BadParameter(f"Data file not found: {file_path}")
     if not file_path.is_file():
@@ -210,6 +225,17 @@ def _resolve_data_path(
     except OSError as exc:
         raise typer.BadParameter(f"Data file is not readable: {file_path}: {exc}") from exc
     return file_path
+
+
+def _file_debug_metadata(file_path: Path) -> dict[str, Any]:
+    stat = file_path.stat()
+    return {
+        "path": str(file_path),
+        "suffix": file_path.suffix.lower(),
+        "size_bytes": stat.st_size,
+        "mtime_epoch": stat.st_mtime,
+        "is_symlink": file_path.is_symlink(),
+    }
 
 
 def _render_console_response(console: Console, response: EngineResponse, max_value_chars: int) -> int:
@@ -236,10 +262,17 @@ def _render_console_response(console: Console, response: EngineResponse, max_val
 
 
 def _run_console_query_and_exit(engine: SqlExplorerEngine, query: str | None) -> None:
+    logger.info("console mode query_provided=%s", query is not None)
     if query is None:
         response = engine.run_sql(engine.default_query, remember=False)
     else:
         response = engine.run_input(query)
+    logger.info(
+        "console query complete status=%s has_result=%s message=%s",
+        response.status,
+        response.result is not None,
+        truncate_for_log(response.message, max_chars=2_000),
+    )
     exit_code = _render_console_response(Console(), response, engine.max_value_chars)
     raise typer.Exit(code=exit_code)
 
@@ -328,6 +361,24 @@ def main(
         help="Show sqlexplore version and exit.",
     ),
 ) -> None:
+    log_path = configure_file_logging()
+    logger.info("startup version=%s log_path=%s", app_version(), log_path)
+    logger.debug(
+        "startup args data=%s table_name=%s limit=%s max_rows=%s max_value_chars=%s database=%s no_ui=%s overwrite=%s "
+        "download_dir=%s execute_chars=%s query_file=%s",
+        data,
+        table_name,
+        limit,
+        max_rows,
+        max_value_chars,
+        database,
+        no_ui,
+        overwrite,
+        download_dir,
+        len(execute) if execute is not None else 0,
+        query_file,
+    )
+
     if execute and query_file:
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
@@ -338,6 +389,11 @@ def main(
         overwrite=overwrite,
         startup_activity_messages=startup_activity_messages,
     )
+    logger.info("data source resolved path=%s use_stdin=%s", file_path, use_stdin)
+    try:
+        logger.debug("data file metadata=%s", _file_debug_metadata(file_path))
+    except OSError:
+        logger.exception("failed to stat data file path=%s", file_path)
 
     engine = SqlExplorerEngine(
         data_path=file_path,
@@ -347,11 +403,24 @@ def main(
         max_rows_display=max_rows,
         max_value_chars=max_value_chars,
     )
+    logger.info("engine initialized table=%s database=%s", table_name, database)
 
     try:
         non_interactive_sql = execute
         if query_file is not None:
             non_interactive_sql = query_file.read_text(encoding="utf-8").strip()
+            logger.info(
+                "loaded startup query file=%s chars=%s query=%s",
+                query_file,
+                len(non_interactive_sql),
+                truncate_for_log(non_interactive_sql, max_chars=MAX_SQL_LOG_CHARS),
+            )
+        elif non_interactive_sql is not None:
+            logger.info(
+                "startup --execute chars=%s query=%s",
+                len(non_interactive_sql),
+                truncate_for_log(non_interactive_sql, max_chars=MAX_SQL_LOG_CHARS),
+            )
 
         if no_ui:
             _run_console_query_and_exit(engine, non_interactive_sql)
@@ -359,19 +428,31 @@ def main(
         with stdin_io.stdin_tty_for_tui(use_stdin) as can_run_tui:
             if not can_run_tui:
                 typer.echo(stdin_io.STDIN_TTY_FALLBACK_MESSAGE)
+                logger.info("stdin tty unavailable, falling back to console mode")
                 _run_console_query_and_exit(engine, non_interactive_sql)
             if non_interactive_sql is None:
-                SqlExplorerTui(engine, startup_activity_messages=startup_activity_messages).run()
+                logger.info("launching tui with default startup query")
+                SqlExplorerTui(
+                    engine,
+                    startup_activity_messages=startup_activity_messages,
+                    log_file_path=str(log_path) if log_path is not None else None,
+                ).run()
             else:
+                logger.info("launching tui with startup query chars=%s", len(non_interactive_sql))
                 SqlExplorerTui(
                     engine,
                     startup_activity_messages=startup_activity_messages,
                     startup_query=non_interactive_sql,
+                    log_file_path=str(log_path) if log_path is not None else None,
                 ).run()
     finally:
+        logger.info("shutdown begin")
         engine.close()
+        logger.info("engine closed")
         if stdin_capture is not None:
             stdin_capture.cleanup()
+            logger.info("stdin temp file cleaned path=%s", stdin_capture.path)
+        logger.info("shutdown complete")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from functools import cache
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as importlib_version
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import duckdb
 import typer
@@ -21,7 +21,14 @@ from sqlexplore.commands.registry import (
 )
 from sqlexplore.completion.completions import CompletionEngine, EngineCompletionCatalog
 from sqlexplore.completion.models import CompletionItem, CompletionResult, SqlClause
-from sqlexplore.core.engine_models import EngineResponse, QueryResult, ResultStatus
+from sqlexplore.core.engine_models import (
+    EngineResponse,
+    HistoryQueryType,
+    QueryHistoryEntry,
+    QueryResult,
+    ResultStatus,
+)
+from sqlexplore.core.logging_utils import get_logger, log_event, new_trace_id, truncate_for_log
 from sqlexplore.core.result_utils import format_scalar, result_column_types, result_columns, sql_literal
 from sqlexplore.core.sql_templates import (
     DEFAULT_LOAD_QUERY_TEMPLATE,
@@ -35,6 +42,8 @@ STATUS_STYLE_BY_RESULT: dict[ResultStatus, str] = {
     "sql": "cyan",
     "error": "red",
 }
+MAX_SQL_LOG_CHARS = 8_000
+logger = get_logger(__name__)
 UNKNOWN_VERSION = "0.0.0+unknown"
 __all__ = [
     "EngineResponse",
@@ -110,8 +119,8 @@ def _detect_reader(file_path: Path) -> FileReader:
         return FileReader(function_name="read_parquet", args="")
     if suffix == ".txt":
         return FileReader(
-            function_name="read_csv",
-            args=", auto_detect=false, header=false, delim='\\0', columns={'line':'VARCHAR'}, force_not_null=['line']",
+            function_name="read_text",
+            args="",
             query_template=TXT_LOAD_QUERY_TEMPLATE,
         )
     raise typer.BadParameter("Only .csv, .tsv, .txt, and .parquet/.pq files are supported.")
@@ -196,6 +205,16 @@ class SqlExplorerEngine:
         max_rows_display: int,
         max_value_chars: int,
     ) -> None:
+        logger.info(
+            "engine init start data_path=%s table_name=%s database=%s default_limit=%s max_rows_display=%s "
+            "max_value_chars=%s",
+            data_path,
+            table_name,
+            database,
+            default_limit,
+            max_rows_display,
+            max_value_chars,
+        )
         self.data_path = data_path
         self.table_name = table_name.replace('"', "")
         self.database = database
@@ -205,12 +224,19 @@ class SqlExplorerEngine:
 
         self.conn = duckdb.connect(database=database)
         self.executed_sql: list[str] = []
+        self.query_history: list[QueryHistoryEntry] = []
         self.last_sql = self.default_query
         self.last_result_sql: str | None = None
 
         reader = _detect_reader(self.data_path)
         source_sql = f"{reader.function_name}({sql_literal(str(self.data_path))}{reader.args})"
         load_query = render_load_query(source_sql, reader.query_template)
+        logger.debug(
+            "engine data load reader=%s source_sql=%s load_query=%s",
+            reader.function_name,
+            truncate_for_log(source_sql, max_chars=MAX_SQL_LOG_CHARS),
+            truncate_for_log(load_query, max_chars=MAX_SQL_LOG_CHARS),
+        )
         self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
         self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {load_query}')
 
@@ -226,12 +252,14 @@ class SqlExplorerEngine:
         self._command_specs = build_command_specs(self, self._completion_catalog)
         self._command_lookup = index_command_specs(self._command_specs)
         self._completion_engine = CompletionEngine(self)
+        logger.info("engine init complete columns=%s", len(self.columns))
 
     @property
     def default_query(self) -> str:
         return f'SELECT * FROM "{self.table_name}" LIMIT {self.default_limit}'
 
     def close(self) -> None:
+        logger.info("engine close database=%s", self.database)
         self.conn.close()
 
     def refresh_schema(self) -> None:
@@ -243,6 +271,12 @@ class SqlExplorerEngine:
         self.struct_fields_by_column, self.struct_paths_by_column = self._build_struct_metadata(type_objects)
         self.column_lookup = {col.lower(): col for col in self.columns}
         self._invalidate_completion_caches()
+        logger.debug(
+            "schema refreshed table=%s columns=%s struct_columns=%s",
+            self.table_name,
+            len(self.columns),
+            len(self.struct_fields_by_column),
+        )
 
     def _column_type_objects_from_table(self) -> dict[str, Any]:
         description = self.conn.execute(f'SELECT * FROM "{self.table_name}" LIMIT 0').description
@@ -388,10 +422,36 @@ class SqlExplorerEngine:
     def table_response(self, columns: list[str], rows: list[tuple[Any, ...]], message: str) -> EngineResponse:
         return self._table_response(columns, rows, message)
 
-    def run_sql(self, sql_text: str, remember: bool = True) -> EngineResponse:
+    def _append_history(
+        self,
+        query_text: str,
+        query_type: HistoryQueryType,
+        query_status: Literal["success", "error"],
+    ) -> None:
+        self.query_history.append(
+            QueryHistoryEntry(query_text=query_text, query_type=query_type, query_status=query_status)
+        )
+
+    def run_sql(
+        self,
+        sql_text: str,
+        remember: bool = True,
+        add_to_query_history: bool = True,
+        query_type: HistoryQueryType = "user_entered_sql",
+    ) -> EngineResponse:
         sql = sql_text.strip().rstrip(";")
         if not sql:
+            logger.info("run_sql skipped empty query")
             return EngineResponse(status="info", message="Query is empty.")
+        trace_id = new_trace_id()
+        logger.debug(
+            "run_sql start query_type=%s remember=%s add_to_query_history=%s sql_chars=%s sql=%s",
+            query_type,
+            remember,
+            add_to_query_history,
+            len(sql),
+            truncate_for_log(sql, max_chars=MAX_SQL_LOG_CHARS),
+        )
 
         t0 = time.perf_counter()
         try:
@@ -400,14 +460,49 @@ class SqlExplorerEngine:
             columns = result_columns(relation.description)
             column_types = result_column_types(relation.description)
         except Exception as exc:  # noqa: BLE001
+            if remember and add_to_query_history:
+                self._append_history(sql, query_type, "error")
+            log_event(
+                "query.execute",
+                {
+                    "trace_id": trace_id,
+                    "query_type": query_type,
+                    "status": "error",
+                    "sql": sql,
+                    "error": str(exc),
+                },
+                logger=logger,
+            )
+            logger.exception(
+                "run_sql error query_type=%s sql=%s",
+                query_type,
+                truncate_for_log(sql, max_chars=MAX_SQL_LOG_CHARS),
+            )
             return EngineResponse(status="error", message=str(exc), executed_sql=sql)
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         self.last_sql = sql
         if remember:
             self.executed_sql.append(sql)
+            if add_to_query_history:
+                self._append_history(sql, query_type, "success")
 
         if not columns:
+            log_event(
+                "query.execute",
+                {
+                    "trace_id": trace_id,
+                    "query_type": query_type,
+                    "status": "success",
+                    "sql": sql,
+                    "elapsed_ms": elapsed_ms,
+                    "rows": 0,
+                    "columns": 0,
+                    "truncated": False,
+                },
+                logger=logger,
+            )
+            logger.info("run_sql complete non-tabular elapsed_ms=%.1f", elapsed_ms)
             return EngineResponse(
                 status="ok",
                 message=f"Statement executed in {elapsed_ms:.1f} ms",
@@ -425,18 +520,48 @@ class SqlExplorerEngine:
             total_rows=len(rows),
             truncated=truncated,
         )
-        message = f"{len(shown):,}/{len(rows):,} rows shown in {elapsed_ms:.1f} ms"
+        out_of_rows = len(rows)
+        out_of_rows = max(out_of_rows, self.row_count())
+        message = f"{len(shown):,}/{out_of_rows:,} rows shown in {elapsed_ms:.1f} ms"
         if truncated:
             message += f" (row display limit={self.max_rows_display})"
+        log_event(
+            "query.execute",
+            {
+                "trace_id": trace_id,
+                "query_type": query_type,
+                "status": "success",
+                "sql": sql,
+                "elapsed_ms": elapsed_ms,
+                "rows": len(rows),
+                "columns": len(columns),
+                "truncated": truncated,
+            },
+            logger=logger,
+        )
+        logger.info(
+            "run_sql complete rows=%s shown=%s columns=%s elapsed_ms=%.1f truncated=%s",
+            len(rows),
+            len(shown),
+            len(columns),
+            elapsed_ms,
+            truncated,
+        )
         return EngineResponse(status="ok", message=message, result=result, executed_sql=sql)
 
-    def run_input(self, raw_input: str) -> EngineResponse:
+    def run_input(self, raw_input: str, add_to_query_history: bool = True) -> EngineResponse:
         text = raw_input.strip()
         if not text:
+            logger.info("run_input empty")
             return EngineResponse(status="info", message="Type SQL or /help.")
         if text.startswith("/"):
-            return run_command(self, text)
-        return self.run_sql(text)
+            logger.info("run_input helper_command command=%s", text.split(maxsplit=1)[0])
+            out = run_command(self, text)
+            if add_to_query_history:
+                query_status: Literal["success", "error"] = "error" if out.status == "error" else "success"
+                self._append_history(text, "user_entered_command", query_status)
+            return out
+        return self.run_sql(text, add_to_query_history=add_to_query_history, query_type="user_entered_sql")
 
     def lookup_command(self, raw_name: str) -> CommandSpec | None:
         return self._command_lookup.get(raw_name.casefold())

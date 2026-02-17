@@ -2,6 +2,13 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 ResultStatus = Literal["ok", "info", "sql", "error"]
+HistoryQueryType = Literal[
+    "user_entered_sql",
+    "user_entered_command",
+    "command_generated_sql",
+    "llm_generated_sql",
+]
+HistoryQueryStatus = Literal["success", "error"]
 
 
 @dataclass(slots=True)
@@ -32,3 +39,10 @@ class EngineResponse:
         if self.executed_sql is not None:
             return "Executed", self.executed_sql
         return None
+
+
+@dataclass(slots=True)
+class QueryHistoryEntry:
+    query_text: str
+    query_type: HistoryQueryType
+    query_status: HistoryQueryStatus
