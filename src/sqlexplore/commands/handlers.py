@@ -449,6 +449,13 @@ def _parse_count_arg(args: str, usage: str, default_count: int = 20) -> tuple[in
     return parsed, None
 
 
+def _parse_single_arg(args: str, usage: str) -> tuple[str | None, EngineResponse | None]:
+    parts = args.strip().split()
+    if len(parts) != 1:
+        return None, usage_error(usage)
+    return parts[0], None
+
+
 def cmd_history(engine: CommandEngine, args: str) -> EngineResponse:
     count, err = _parse_count_arg(args, USAGE_HISTORY)
     if err is not None:
@@ -504,29 +511,35 @@ def _resolve_query_type_from_event(event: dict[str, Any]) -> HistoryQueryType:
     return raw_query_type
 
 
-def _events_by_kind(events: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
-    return [event for event in events if _event_text(event, "kind") == kind]
+def _events_by_kind(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        kind = _event_text(event, "kind")
+        if kind not in grouped:
+            grouped[kind] = []
+        grouped[kind].append(event)
+    return grouped
 
 
-def _last_event(events: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
-    by_kind = _events_by_kind(events, kind)
+def _last_event(grouped_events: dict[str, list[dict[str, Any]]], kind: str) -> dict[str, Any] | None:
+    by_kind = grouped_events.get(kind, [])
     if not by_kind:
         return None
     return by_kind[-1]
 
 
-def _bundle_generated_sql(events: list[dict[str, Any]]) -> str | None:
-    llm_result = _last_event(events, "llm.result")
+def _bundle_generated_sql(grouped_events: dict[str, list[dict[str, Any]]]) -> str | None:
+    llm_result = _last_event(grouped_events, "llm.result")
     if llm_result is not None:
         generated_sql = _event_text(llm_result, "generated_sql").strip()
         if generated_sql:
             return generated_sql
-    llm_exec = _last_event(events, "llm.sql_execution")
+    llm_exec = _last_event(grouped_events, "llm.sql_execution")
     if llm_exec is not None:
         generated_sql = _event_text(llm_exec, "sql").strip()
         if generated_sql:
             return generated_sql
-    llm_response = _last_event(events, "llm.response")
+    llm_response = _last_event(grouped_events, "llm.response")
     if llm_response is not None:
         generated_sql = _event_text(llm_response, "sql").strip()
         if generated_sql:
@@ -534,37 +547,37 @@ def _bundle_generated_sql(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _llm_trace_summary(events: list[dict[str, Any]]) -> tuple[str, str, str, str]:
-    llm_query = _last_event(events, "llm.query")
-    llm_result = _last_event(events, "llm.result")
+def _llm_trace_summary(grouped_events: dict[str, list[dict[str, Any]]]) -> tuple[str, str, str, str]:
+    llm_query = _last_event(grouped_events, "llm.query")
+    llm_result = _last_event(grouped_events, "llm.result")
     query = _event_text(llm_query or {}, "query")
     model = _event_text(llm_query or {}, "model")
     status = _event_text(llm_result or {}, "status")
-    generated_sql = _bundle_generated_sql(events) or ""
+    generated_sql = _bundle_generated_sql(grouped_events) or ""
     return query, model, status, generated_sql
 
 
 def cmd_llm_show(engine: CommandEngine, args: str) -> EngineResponse:
-    payload = args.strip()
-    parts = payload.split()
-    if len(parts) != 1:
-        return usage_error(USAGE_LLM_SHOW)
-    trace_id = parts[0]
+    trace_id, err = _parse_single_arg(args, USAGE_LLM_SHOW)
+    if err is not None:
+        return err
+    assert trace_id is not None
     events = read_log_events_for_trace(trace_id)
     if not events:
         return response(status="error", message=f"LLM trace not found: {trace_id}")
 
-    query, model, status, generated_sql = _llm_trace_summary(events)
-    llm_result = _last_event(events, "llm.result")
+    grouped_events = _events_by_kind(events)
+    query, model, status, generated_sql = _llm_trace_summary(grouped_events)
+    llm_result = _last_event(grouped_events, "llm.result")
     bundle = {
         "trace_id": trace_id,
         "query": query,
         "model": model,
         "result": llm_result or {},
-        "requests": _events_by_kind(events, "llm.request"),
-        "responses": _events_by_kind(events, "llm.response"),
-        "retries": _events_by_kind(events, "llm.retry"),
-        "sql_executions": _events_by_kind(events, "llm.sql_execution"),
+        "requests": grouped_events.get("llm.request", []),
+        "responses": grouped_events.get("llm.response", []),
+        "retries": grouped_events.get("llm.retry", []),
+        "sql_executions": grouped_events.get("llm.sql_execution", []),
     }
     bundle_json = json.dumps(bundle, ensure_ascii=True, default=str, indent=2, sort_keys=True)
     rows = [
@@ -626,11 +639,10 @@ def cmd_rerun(engine: CommandEngine, args: str) -> EngineResponse:
 
 
 def cmd_rerun_log(engine: CommandEngine, args: str) -> EngineResponse:
-    payload = args.strip()
-    parts = payload.split()
-    if len(parts) != 1:
-        return usage_error(USAGE_RERUN_LOG)
-    event_id = parts[0]
+    event_id, err = _parse_single_arg(args, USAGE_RERUN_LOG)
+    if err is not None:
+        return err
+    assert event_id is not None
     event = find_log_event(event_id, event_type="query.execute")
     if event is None:
         return response(status="error", message=f"Log event not found: {event_id}")

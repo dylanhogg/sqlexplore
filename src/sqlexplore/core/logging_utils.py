@@ -212,14 +212,13 @@ def find_log_event(
     if path is None:
         return None
 
-    found: dict[str, Any] | None = None
     for event in _iter_parsed_log_events(path):
         if event_type is not None and event.get("kind") != event_type:
             continue
         if event.get("event_id") != payload:
             continue
-        found = event
-    return found
+        return event
+    return None
 
 
 def read_log_events_for_trace(
