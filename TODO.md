@@ -9,14 +9,12 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Make F8 on /llm-history & /history-log & any command that shows results in a table to copy to clipboard
-- Rename /llm query <text> to /llm-query <text>
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
 - Migrate logging from file to sqlite database
 - Textual double click to select row? & Cmd+A to select all?
-- Improve persistent file log to be more user friendly
+- Improve persistent file log life cycle management (rotate, cleanup, use for /llm-history, etc.)
 - Review duckdb_guidance.py for /llm query
-- Perf review copy TSV from uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
+- Perf review copy TSV from uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet (add spinner?)
 - Key binding: Write marimo notebook and uvx open it
 - Distinguish /describe from /summary
 - Enable /history results to be copied to clipboard

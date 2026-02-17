@@ -80,6 +80,7 @@ DEFAULT_HELPER_COMMANDS = (
     "/clear",
     "/exit",
     "/quit",
+    "/llm-query",
     "/llm-history",
     "/llm-show",
 )

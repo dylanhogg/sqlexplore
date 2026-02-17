@@ -159,7 +159,7 @@ def build_command_specs(engine: CommandEngine, completion: CommandCompletionCata
     return [
         CommandSpec("/help", USAGE_HELP, "Show helper command reference.", _bind(engine, cmd_help)),
         CommandSpec(
-            "/llm",
+            "/llm-query",
             USAGE_LLM,
             "Generate DuckDB SQL from natural language.",
             _bind(engine, cmd_llm),

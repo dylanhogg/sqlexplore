@@ -218,9 +218,9 @@ def test_group_pipe_syntax_still_works(tmp_path: Path) -> None:
 def test_help_text_is_generated_from_command_registry(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
-        assert engine.lookup_command("/llm") is not None
+        assert engine.lookup_command("/llm-query") is not None
         help_text = engine.help_text()
-        assert "/llm query <natural language query>" in help_text
+        assert "/llm-query <natural language query>" in help_text
         assert "/sample [n]" in help_text
         assert "/top <column> <n>" in help_text
         assert "/dupes <key_cols_csv> [n] [| where]" in help_text
@@ -511,7 +511,7 @@ def test_helper_completion_suggests_command_names(tmp_path: Path) -> None:
         completions = _completion_values(engine, "/to")
         assert "/top" in completions
         llm_completions = _completion_values(engine, "/ll")
-        assert "/llm" in llm_completions
+        assert "/llm-query" in llm_completions
     finally:
         engine.close()
 
@@ -520,16 +520,16 @@ def test_llm_command_validates_usage(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
         cases = [
-            "/llm",
-            "/llm query",
-            "/llm query   ",
-            "/llm explain counts",
+            ("/llm-query", "Usage: /llm-query <natural language query>"),
+            ("/llm-query   ", "Usage: /llm-query <natural language query>"),
+            ("/llm", "Unknown command: /llm. Use /help"),
+            ("/llm explain counts", "Unknown command: /llm explain counts. Use /help"),
         ]
-        for command in cases:
+        for command, expected_message in cases:
             out = engine.run_input(command)
             assert out.status == "error"
-            assert out.message == "Usage: /llm query <natural language query>"
-        assert [entry.query_text for entry in engine.query_history] == [item.strip() for item in cases]
+            assert out.message == expected_message
+        assert [entry.query_text for entry in engine.query_history] == [item.strip() for item, _ in cases]
         assert {entry.query_type for entry in engine.query_history} == {"user_entered_command"}
         assert {entry.query_status for entry in engine.query_history} == {"error"}
     finally:
@@ -542,7 +542,7 @@ def test_llm_command_returns_missing_key_error(tmp_path: Path, monkeypatch: Any)
         monkeypatch.setattr(
             command_handlers_module, "validate_llm_api_key", lambda: "LLM API key not found in environment."
         )
-        out = engine.run_input("/llm query top values by count")
+        out = engine.run_input("/llm-query top values by count")
         assert out.status == "error"
         assert out.message == "LLM API key not found in environment."
     finally:
@@ -558,7 +558,7 @@ def test_llm_command_returns_provider_error(tmp_path: Path, monkeypatch: Any) ->
     try:
         monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
         monkeypatch.setattr(llm_runner_module, "generate_sql", raise_provider_error)
-        out = engine.run_input("/llm query top values by count")
+        out = engine.run_input("/llm-query top values by count")
         assert out.status == "error"
         assert out.message == "LLM request failed. Check API key and network, then try again."
     finally:
@@ -574,7 +574,7 @@ def test_llm_command_returns_invalid_sql_error(tmp_path: Path, monkeypatch: Any)
     try:
         monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
         monkeypatch.setattr(llm_runner_module, "generate_sql", invalid_sql)
-        out = engine.run_input("/llm query delete everything")
+        out = engine.run_input("/llm-query delete everything")
         assert out.status == "error"
         assert out.generated_sql == 'DELETE FROM "data"'
         assert out.message == (
@@ -600,7 +600,7 @@ def test_llm_command_retries_validation_once_then_succeeds(tmp_path: Path, monke
     try:
         monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
         monkeypatch.setattr(llm_runner_module, "generate_sql", retry_once)
-        out = engine.run_input("/llm query count rows by col_name")
+        out = engine.run_input("/llm-query count rows by col_name")
         assert out.status == "ok"
         assert out.result is not None
         assert [tuple(row) for row in out.result.rows] == [("a", 2), ("b", 1)]
@@ -625,7 +625,7 @@ def test_llm_command_retries_duckdb_error_once_then_succeeds(tmp_path: Path, mon
     try:
         monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
         monkeypatch.setattr(llm_runner_module, "generate_sql", retry_once)
-        out = engine.run_input("/llm query show two names")
+        out = engine.run_input("/llm-query show two names")
         assert out.status == "ok"
         assert out.result is not None
         assert [tuple(row) for row in out.result.rows] == [("a",), ("a",)]
@@ -648,7 +648,7 @@ def test_llm_command_retry_is_capped_at_one(tmp_path: Path, monkeypatch: Any) ->
     try:
         monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
         monkeypatch.setattr(llm_runner_module, "generate_sql", always_invalid)
-        out = engine.run_input("/llm query delete everything")
+        out = engine.run_input("/llm-query delete everything")
         assert out.status == "error"
         assert len(attempts) == 2
     finally:
@@ -680,7 +680,7 @@ def test_llm_command_executes_generated_sql_via_existing_path(tmp_path: Path, mo
         monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
         monkeypatch.setattr(command_handlers_module, "resolve_llm_model", lambda: "openai/gpt-5-mini")
         monkeypatch.setattr("sqlexplore.llm.llm_sql.litellm.completion", fake_completion)
-        out = engine.run_input("/llm query count rows by col_name")
+        out = engine.run_input("/llm-query count rows by col_name")
         assert out.status == "ok"
         assert out.generated_sql == sql
         assert out.result is not None
@@ -688,7 +688,7 @@ def test_llm_command_executes_generated_sql_via_existing_path(tmp_path: Path, mo
         assert captured["model"] == "openai/gpt-5-mini"
         assert captured["messages"][1]["role"] == "user"
         assert "count rows by col_name" in captured["messages"][1]["content"]
-        assert [entry.query_text for entry in engine.query_history[-2:]] == [sql, "/llm query count rows by col_name"]
+        assert [entry.query_text for entry in engine.query_history[-2:]] == [sql, "/llm-query count rows by col_name"]
         assert [entry.query_type for entry in engine.query_history[-2:]] == [
             "llm_generated_sql",
             "user_entered_command",
@@ -727,7 +727,7 @@ def test_llm_history_and_show_commands_replay_logged_bundle(tmp_path: Path, monk
         monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
         monkeypatch.setattr("sqlexplore.llm.llm_sql.litellm.completion", fake_completion)
 
-        llm_out = engine.run_input("/llm query count rows by col_name")
+        llm_out = engine.run_input("/llm-query count rows by col_name")
         assert llm_out.status == "ok"
         assert llm_out.generated_sql == sql
 

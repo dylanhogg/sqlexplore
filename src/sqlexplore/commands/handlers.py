@@ -27,7 +27,7 @@ from .llm_runner import run_llm_query_with_retry
 from .protocols import CommandEngine
 
 USAGE_HELP = "/help"
-USAGE_LLM = "/llm query <natural language query>"
+USAGE_LLM = "/llm-query <natural language query>"
 USAGE_LLM_HISTORY = "/llm-history [n]"
 USAGE_LLM_SHOW = "/llm-show <trace_id>"
 USAGE_SCHEMA = "/schema"
@@ -207,20 +207,6 @@ def cmd_help(engine: CommandEngine, args: str) -> EngineResponse:
     return engine.table_response(["command", "usage", "description"], rows, "Helper commands")
 
 
-def _parse_llm_query_args(args: str) -> str | None:
-    payload = args.strip()
-    if not payload:
-        return None
-    parts = payload.split(maxsplit=1)
-    if len(parts) != 2:
-        return None
-    subcommand, query = parts
-    if subcommand.casefold() != "query":
-        return None
-    query_payload = query.strip()
-    return query_payload or None
-
-
 def llm_error_response(
     kind: LlmErrorKind,
     detail: str | None = None,
@@ -280,8 +266,8 @@ def _log_llm_result_event(
 
 
 def cmd_llm(engine: CommandEngine, args: str) -> EngineResponse:
-    nl_query = _parse_llm_query_args(args)
-    if nl_query is None:
+    nl_query = args.strip()
+    if not nl_query:
         return usage_error(USAGE_LLM)
     logger.info("llm command query=%s", truncate_for_log(nl_query, max_chars=MAX_LLM_QUERY_LOG_CHARS))
     trace_id = new_trace_id()
