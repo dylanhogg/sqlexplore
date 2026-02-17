@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from sqlexplore.core.engine_models import EngineResponse
-from sqlexplore.core.logging_utils import get_logger
+from sqlexplore.core.logging_utils import get_logger, log_event
 from sqlexplore.llm.llm_sql import (
     SampleRows,
     build_prompt,
@@ -13,6 +13,7 @@ from sqlexplore.llm.llm_sql import (
     build_schema_context,
     fetch_sample_rows,
     generate_sql,
+    llm_trace_context,
     validate_generated_sql,
 )
 
@@ -104,6 +105,49 @@ def _build_repair_prompt(
     )
 
 
+def _log_retry_event(
+    trace_id: str | None,
+    retry_count: int,
+    reason: str,
+    error: str,
+    previous_sql: str,
+) -> None:
+    if trace_id is None:
+        return
+    log_event(
+        "llm.retry",
+        {
+            "trace_id": trace_id,
+            "retry_count": retry_count,
+            "reason": reason,
+            "error": error,
+            "previous_sql": previous_sql,
+        },
+        logger=logger,
+    )
+
+
+def _log_sql_execution_event(
+    trace_id: str | None,
+    retry_count: int,
+    sql: str,
+    result: EngineResponse,
+) -> None:
+    if trace_id is None:
+        return
+    log_event(
+        "llm.sql_execution",
+        {
+            "trace_id": trace_id,
+            "retry_count": retry_count,
+            "status": result.status,
+            "sql": sql,
+            "message": result.message,
+        },
+        logger=logger,
+    )
+
+
 def _default_runner_deps() -> LlmRunnerDeps:
     return LlmRunnerDeps(
         build_schema_context=build_schema_context,
@@ -121,6 +165,7 @@ def run_llm_query_with_retry(
     model: str,
     config: LlmRunnerConfig | None = None,
     deps: LlmRunnerDeps | None = None,
+    trace_id: str | None = None,
 ) -> LlmRunResult:
     active_config = config or LlmRunnerConfig()
     if active_config.max_retries < 0:
@@ -137,48 +182,52 @@ def run_llm_query_with_retry(
     )
     retry_count = 0
     sql: str
-    while True:
-        try:
-            sql = active_deps.generate_sql(current_prompt, model)
-        except Exception:  # noqa: BLE001
-            logger.exception("llm command provider error model=%s retry_count=%s", model, retry_count)
-            return LlmRunResult.provider_error(retry_count)
+    with llm_trace_context(trace_id):
+        while True:
+            try:
+                sql = active_deps.generate_sql(current_prompt, model)
+            except Exception:  # noqa: BLE001
+                logger.exception("llm command provider error model=%s retry_count=%s", model, retry_count)
+                return LlmRunResult.provider_error(retry_count)
 
-        sql_error = active_deps.validate_generated_sql(sql, engine.table_name)
-        if sql_error is not None:
-            if retry_count >= active_config.max_retries:
-                logger.error("llm command invalid sql reason=%s", sql_error)
-                return LlmRunResult.invalid_sql(retry_count, sql_error, sql)
+            sql_error = active_deps.validate_generated_sql(sql, engine.table_name)
+            if sql_error is not None:
+                if retry_count >= active_config.max_retries:
+                    logger.error("llm command invalid sql reason=%s", sql_error)
+                    return LlmRunResult.invalid_sql(retry_count, sql_error, sql)
+                retry_count += 1
+                logger.info("llm command retry=%s reason=validation error=%s", retry_count, sql_error)
+                _log_retry_event(trace_id, retry_count, "validation_error", sql_error, sql)
+                current_prompt = _build_repair_prompt(
+                    active_deps,
+                    user_query,
+                    sql,
+                    sql_error,
+                    engine.table_name,
+                    schema_context,
+                    sample_rows,
+                )
+                continue
+
+            logger.info("llm command generated sql chars=%s retry_count=%s", len(sql), retry_count)
+            out = _run_generated_sql(engine, sql)
+            _log_sql_execution_event(trace_id, retry_count, sql, out)
+            if out.status != "error":
+                return LlmRunResult.response_result(retry_count, out)
+            if retry_count >= active_config.max_retries or not is_retryable_duckdb_sql_error(
+                out.message,
+                active_config.retryable_error_markers,
+            ):
+                return LlmRunResult.response_result(retry_count, out)
             retry_count += 1
-            logger.info("llm command retry=%s reason=validation error=%s", retry_count, sql_error)
+            logger.info("llm command retry=%s reason=duckdb_error error=%s", retry_count, out.message)
+            _log_retry_event(trace_id, retry_count, "duckdb_error", out.message, sql)
             current_prompt = _build_repair_prompt(
                 active_deps,
                 user_query,
                 sql,
-                sql_error,
+                out.message,
                 engine.table_name,
                 schema_context,
                 sample_rows,
             )
-            continue
-
-        logger.info("llm command generated sql chars=%s retry_count=%s", len(sql), retry_count)
-        out = _run_generated_sql(engine, sql)
-        if out.status != "error":
-            return LlmRunResult.response_result(retry_count, out)
-        if retry_count >= active_config.max_retries or not is_retryable_duckdb_sql_error(
-            out.message,
-            active_config.retryable_error_markers,
-        ):
-            return LlmRunResult.response_result(retry_count, out)
-        retry_count += 1
-        logger.info("llm command retry=%s reason=duckdb_error error=%s", retry_count, out.message)
-        current_prompt = _build_repair_prompt(
-            active_deps,
-            user_query,
-            sql,
-            out.message,
-            engine.table_name,
-            schema_context,
-            sample_rows,
-        )

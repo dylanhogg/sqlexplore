@@ -12,6 +12,7 @@ from sqlexplore.core.engine import (
     is_struct_type,
     parse_struct_fields,
 )
+from sqlexplore.core.logging_utils import configure_file_logging, read_log_events_for_trace, reset_file_logging
 
 
 def _build_engine(tmp_path: Path, csv_text: str = "col_name,x\na,1\nb,2\na,3\n") -> SqlExplorerEngine:
@@ -25,6 +26,10 @@ def _build_engine(tmp_path: Path, csv_text: str = "col_name,x\na,1\nb,2\na,3\n")
         max_rows_display=100,
         max_value_chars=80,
     )
+
+
+def _reset_log_state() -> None:
+    reset_file_logging()
 
 
 def test_txt_data_source_loads_line_metrics_columns(tmp_path: Path) -> None:
@@ -319,6 +324,58 @@ def test_history_includes_helper_commands_and_rerun_replays_them(tmp_path: Path)
         assert len(rerun_helper.result.rows) == 1
     finally:
         engine.close()
+
+
+def test_history_log_and_rerun_log_replay_sql_from_log(tmp_path: Path) -> None:
+    _reset_log_state()
+    configure_file_logging(log_dir=tmp_path / "logs")
+    engine = _build_engine(tmp_path)
+    try:
+        first = engine.run_input('SELECT COUNT(*) AS n FROM "data"')
+        assert first.status == "ok"
+        second = engine.run_input('SELECT * FROM "data" LIMIT 1')
+        assert second.status == "ok"
+
+        history_log = engine.run_input("/history-log 1")
+        assert history_log.status == "ok"
+        assert history_log.result is not None
+        assert history_log.result.columns == ["event_id", "type", "status", "sql"]
+        assert len(history_log.result.rows) == 1
+        event_id, query_type, query_status, sql_text = history_log.result.rows[0]
+        assert isinstance(event_id, str) and event_id
+        assert query_type == "user_entered_sql"
+        assert query_status == "success"
+        assert sql_text == 'SELECT * FROM "data" LIMIT 1'
+
+        rerun = engine.run_input(f"/rerun-log {event_id}")
+        assert rerun.status == "ok"
+        assert rerun.generated_sql == 'SELECT * FROM "data" LIMIT 1'
+        assert rerun.result is not None
+        assert len(rerun.result.rows) == 1
+    finally:
+        engine.close()
+        _reset_log_state()
+
+
+def test_history_log_and_rerun_log_usage_and_missing_event_errors(tmp_path: Path) -> None:
+    _reset_log_state()
+    configure_file_logging(log_dir=tmp_path / "logs")
+    engine = _build_engine(tmp_path)
+    try:
+        history_bad = engine.run_input("/history-log 0")
+        assert history_bad.status == "error"
+        assert history_bad.message == "Usage: /history-log [n]"
+
+        rerun_usage = engine.run_input("/rerun-log")
+        assert rerun_usage.status == "error"
+        assert rerun_usage.message == "Usage: /rerun-log <event_id>"
+
+        rerun_missing = engine.run_input("/rerun-log missing")
+        assert rerun_missing.status == "error"
+        assert rerun_missing.message == "Log event not found: missing"
+    finally:
+        engine.close()
+        _reset_log_state()
 
 
 def test_failed_user_sql_is_recorded_with_error_status(tmp_path: Path) -> None:
@@ -641,6 +698,94 @@ def test_llm_command_executes_generated_sql_via_existing_path(tmp_path: Path, mo
         engine.close()
 
 
+def test_llm_history_and_show_commands_replay_logged_bundle(tmp_path: Path, monkeypatch: Any) -> None:
+    _reset_log_state()
+    configure_file_logging(log_dir=tmp_path / "logs")
+    engine = _build_engine(tmp_path)
+    sql = 'SELECT col_name, COUNT(*) AS count FROM "data" GROUP BY col_name ORDER BY count DESC, col_name LIMIT 10'
+
+    class _Message:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class _Choice:
+        def __init__(self, content: str) -> None:
+            self.message = _Message(content)
+
+    class _Response:
+        def __init__(self, content: str) -> None:
+            self.choices = [_Choice(content)]
+            self.model = "openai/gpt-5-mini"
+            self.id = "resp-123"
+            self.usage = {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
+
+    def fake_completion(**kwargs: Any) -> _Response:
+        _ = kwargs
+        return _Response(f"```sql\n{sql}\n```")
+
+    try:
+        monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
+        monkeypatch.setattr("sqlexplore.llm.llm_sql.litellm.completion", fake_completion)
+
+        llm_out = engine.run_input("/llm query count rows by col_name")
+        assert llm_out.status == "ok"
+        assert llm_out.generated_sql == sql
+
+        history_out = engine.run_input("/llm-history 1")
+        assert history_out.status == "ok"
+        assert history_out.result is not None
+        assert history_out.result.columns == ["trace_id", "status", "retries", "model", "query"]
+        assert len(history_out.result.rows) == 1
+
+        trace_id, status, retries, _model, query = history_out.result.rows[0]
+        assert isinstance(trace_id, str) and trace_id
+        assert status == "success"
+        assert retries == "0"
+        assert query == "count rows by col_name"
+
+        trace_events = read_log_events_for_trace(trace_id)
+        assert any(event.get("kind") == "llm.query" for event in trace_events)
+        assert any(event.get("kind") == "llm.request" for event in trace_events)
+        assert any(event.get("kind") == "llm.response" for event in trace_events)
+        assert any(event.get("kind") == "llm.result" for event in trace_events)
+
+        show_out = engine.run_input(f"/llm-show {trace_id}")
+        assert show_out.status == "ok"
+        assert show_out.result is not None
+        fields = {str(row[0]): str(row[1]) for row in show_out.result.rows}
+        assert fields["trace_id"] == trace_id
+        assert fields["status"] == "success"
+        assert fields["query"] == "count rows by col_name"
+        assert fields["generated_sql"] == sql
+        assert '"requests"' in fields["bundle_json"]
+        assert '"responses"' in fields["bundle_json"]
+        assert show_out.load_query == sql
+    finally:
+        engine.close()
+        _reset_log_state()
+
+
+def test_llm_history_and_show_command_usage_and_missing_trace(tmp_path: Path) -> None:
+    _reset_log_state()
+    configure_file_logging(log_dir=tmp_path / "logs")
+    engine = _build_engine(tmp_path)
+    try:
+        history_usage = engine.run_input("/llm-history 0")
+        assert history_usage.status == "error"
+        assert history_usage.message == "Usage: /llm-history [n]"
+
+        show_usage = engine.run_input("/llm-show")
+        assert show_usage.status == "error"
+        assert show_usage.message == "Usage: /llm-show <trace_id>"
+
+        show_missing = engine.run_input("/llm-show missing")
+        assert show_missing.status == "error"
+        assert show_missing.message == "LLM trace not found: missing"
+    finally:
+        engine.close()
+        _reset_log_state()
+
+
 def test_helper_completion_suggests_summary_and_dupes_commands(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:
@@ -869,6 +1014,8 @@ def test_commands_reject_non_positive_integer_args(tmp_path: Path) -> None:
             ("/values -5", "Usage: /values <n>"),
             ("/limit 0", "Usage: /limit <n>"),
             ("/history 0", "Usage: /history [n]"),
+            ("/history-log 0", "Usage: /history-log [n]"),
+            ("/llm-history 0", "Usage: /llm-history [n]"),
             ("/sample 0", "Usage: /sample [n]"),
             ("/top col_name 0", "Usage: /top <column> <n>"),
             ("/dupes col_name 0", "Usage: /dupes <key_cols_csv> [n] [| where]"),
@@ -904,6 +1051,14 @@ def test_usage_errors_match_help_usage_lines(tmp_path: Path) -> None:
         assert rerun_out.status == "error"
         assert rerun_out.message == "Usage: /rerun <history_index>"
 
+        rerun_log_out = engine.run_input("/rerun-log")
+        assert rerun_log_out.status == "error"
+        assert rerun_log_out.message == "Usage: /rerun-log <event_id>"
+
+        llm_show_out = engine.run_input("/llm-show")
+        assert llm_show_out.status == "error"
+        assert llm_show_out.message == "Usage: /llm-show <trace_id>"
+
         save_out = engine.run_input("/save")
         assert save_out.status == "error"
         assert save_out.message == "Usage: /save <path.csv|path.parquet|path.pq|path.json>"
@@ -914,6 +1069,8 @@ def test_usage_errors_match_help_usage_lines(tmp_path: Path) -> None:
 
         help_text = engine.help_text()
         assert "/rerun <history_index>" in help_text
+        assert "/rerun-log <event_id>" in help_text
+        assert "/llm-show <trace_id>" in help_text
         assert "/save <path.csv|path.parquet|path.pq|path.json>" in help_text
         assert "/exit or /quit" in help_text
     finally:

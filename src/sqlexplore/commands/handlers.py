@@ -10,8 +10,16 @@ from sqlexplore.completion.helpers import (
     parse_single_positive_int_arg,
     quote_ident,
 )
-from sqlexplore.core.engine_models import EngineResponse, ResultStatus
-from sqlexplore.core.logging_utils import get_logger, truncate_for_log
+from sqlexplore.core.engine_models import EngineResponse, HistoryQueryType, ResultStatus
+from sqlexplore.core.logging_utils import (
+    find_log_event,
+    get_logger,
+    log_event,
+    new_trace_id,
+    read_log_events,
+    read_log_events_for_trace,
+    truncate_for_log,
+)
 from sqlexplore.core.result_utils import format_scalar, result_columns, sql_literal
 from sqlexplore.llm.llm_sql import resolve_llm_model, validate_llm_api_key
 
@@ -20,6 +28,8 @@ from .protocols import CommandEngine
 
 USAGE_HELP = "/help"
 USAGE_LLM = "/llm query <natural language query>"
+USAGE_LLM_HISTORY = "/llm-history [n]"
+USAGE_LLM_SHOW = "/llm-show <trace_id>"
 USAGE_SCHEMA = "/schema"
 USAGE_SAMPLE = "/sample [n]"
 USAGE_FILTER = "/filter <where condition>"
@@ -36,6 +46,8 @@ USAGE_DESCRIBE = "/describe"
 USAGE_SUMMARY = "/summary [n_cols] [| where]"
 USAGE_HISTORY = "/history [n]"
 USAGE_RERUN = "/rerun <history_index>"
+USAGE_HISTORY_LOG = "/history-log [n]"
+USAGE_RERUN_LOG = "/rerun-log <event_id>"
 USAGE_ROWS = "/rows <n>"
 USAGE_VALUES = "/values <n>"
 USAGE_LIMIT = "/limit <n>"
@@ -51,6 +63,13 @@ logger = get_logger(__name__)
 
 
 type LlmErrorKind = Literal["missing_key", "provider", "invalid_sql"]
+KNOWN_QUERY_TYPES: set[HistoryQueryType] = {
+    "user_entered_sql",
+    "user_entered_command",
+    "command_generated_sql",
+    "llm_generated_sql",
+}
+LlmEventStatus = Literal["success", "provider_error", "invalid_sql", "missing_key"]
 
 
 def response(status: ResultStatus, message: str, **kwargs: Any) -> EngineResponse:
@@ -218,22 +237,89 @@ def llm_error_response(
     assert False, kind
 
 
+def _log_llm_query_event(trace_id: str, query: str, model: str) -> None:
+    log_event(
+        "llm.query",
+        {
+            "trace_id": trace_id,
+            "query": query,
+            "model": model,
+        },
+        logger=logger,
+    )
+
+
+def _log_llm_result_event(
+    *,
+    trace_id: str,
+    query: str,
+    model: str,
+    status: LlmEventStatus,
+    retry_count: int,
+    response: EngineResponse | None = None,
+    invalid_sql_detail: str | None = None,
+    generated_sql: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "trace_id": trace_id,
+        "query": query,
+        "model": model,
+        "status": status,
+        "retry_count": retry_count,
+    }
+    if invalid_sql_detail is not None:
+        payload["invalid_sql_detail"] = invalid_sql_detail
+    if generated_sql is not None:
+        payload["generated_sql"] = generated_sql
+    if response is not None:
+        payload["response_status"] = response.status
+        payload["response_message"] = response.message
+        if response.generated_sql is not None:
+            payload["generated_sql"] = response.generated_sql
+    log_event("llm.result", payload, logger=logger)
+
+
 def cmd_llm(engine: CommandEngine, args: str) -> EngineResponse:
     nl_query = _parse_llm_query_args(args)
     if nl_query is None:
         return usage_error(USAGE_LLM)
     logger.info("llm command query=%s", truncate_for_log(nl_query, max_chars=MAX_LLM_QUERY_LOG_CHARS))
+    trace_id = new_trace_id()
 
     api_key_error = validate_llm_api_key()
+    model = resolve_llm_model()
+    _log_llm_query_event(trace_id, nl_query, model)
     if api_key_error is not None:
         logger.error("llm command missing api key")
+        _log_llm_result_event(
+            trace_id=trace_id,
+            query=nl_query,
+            model=model,
+            status="missing_key",
+            retry_count=0,
+        )
         return llm_error_response("missing_key")
 
-    model = resolve_llm_model()
-    run_result = run_llm_query_with_retry(engine, nl_query, model)
+    run_result = run_llm_query_with_retry(engine, nl_query, model, trace_id=trace_id)
     if run_result.status == "provider_error":
+        _log_llm_result_event(
+            trace_id=trace_id,
+            query=nl_query,
+            model=model,
+            status="provider_error",
+            retry_count=run_result.retry_count,
+        )
         return llm_error_response("provider")
     if run_result.status == "invalid_sql":
+        _log_llm_result_event(
+            trace_id=trace_id,
+            query=nl_query,
+            model=model,
+            status="invalid_sql",
+            retry_count=run_result.retry_count,
+            invalid_sql_detail=run_result.invalid_sql_detail,
+            generated_sql=run_result.generated_sql,
+        )
         return llm_error_response(
             "invalid_sql",
             detail=run_result.invalid_sql_detail,
@@ -247,6 +333,14 @@ def cmd_llm(engine: CommandEngine, args: str) -> EngineResponse:
             out.message = f"{out.message}\n{LLM_SQL_RETRY_INFO_MESSAGE}"
         else:
             out.message = LLM_SQL_RETRY_INFO_MESSAGE
+    _log_llm_result_event(
+        trace_id=trace_id,
+        query=nl_query,
+        model=model,
+        status="success",
+        retry_count=run_result.retry_count,
+        response=out,
+    )
     return out
 
 
@@ -345,14 +439,21 @@ def cmd_dupes(engine: CommandEngine, args: str) -> EngineResponse:
     return run_generated_sql(engine, sql_for_dupes(engine, resolved_columns, limit, where_clause))
 
 
-def cmd_history(engine: CommandEngine, args: str) -> EngineResponse:
+def _parse_count_arg(args: str, usage: str, default_count: int = 20) -> tuple[int | None, EngineResponse | None]:
     payload = args.strip()
-    count = 20
-    if payload:
-        parsed = parse_single_positive_int_arg(payload)
-        if parsed is None:
-            return usage_error(USAGE_HISTORY)
-        count = parsed
+    if not payload:
+        return default_count, None
+    parsed = parse_single_positive_int_arg(payload)
+    if parsed is None:
+        return None, usage_error(usage)
+    return parsed, None
+
+
+def cmd_history(engine: CommandEngine, args: str) -> EngineResponse:
+    count, err = _parse_count_arg(args, USAGE_HISTORY)
+    if err is not None:
+        return err
+    assert count is not None
     history = engine.query_history[-count:]
     start_idx = max(1, len(engine.query_history) - len(history) + 1)
     rows = [
@@ -360,6 +461,147 @@ def cmd_history(engine: CommandEngine, args: str) -> EngineResponse:
         for idx, entry in enumerate(history, start=start_idx)
     ]
     return engine.table_response(["#", "type", "status", "sql"], rows, f"History ({len(history)} queries)")
+
+
+def cmd_llm_history(engine: CommandEngine, args: str) -> EngineResponse:
+    count, err = _parse_count_arg(args, USAGE_LLM_HISTORY)
+    if err is not None:
+        return err
+    assert count is not None
+    events = read_log_events(event_type="llm.result", limit=count)
+    rows = [
+        (
+            _event_text(event, "trace_id"),
+            _event_text(event, "status"),
+            _event_text(event, "retry_count"),
+            _event_text(event, "model"),
+            _event_text(event, "query"),
+        )
+        for event in events
+    ]
+    return engine.table_response(
+        ["trace_id", "status", "retries", "model", "query"],
+        rows,
+        f"LLM history ({len(rows)} traces)",
+    )
+
+
+def _event_text(event: dict[str, Any], key: str) -> str:
+    value = event.get(key)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _resolve_query_type_from_event(event: dict[str, Any]) -> HistoryQueryType:
+    raw_query_type = event.get("query_type")
+    if not isinstance(raw_query_type, str):
+        return "user_entered_sql"
+    if raw_query_type not in KNOWN_QUERY_TYPES:
+        return "user_entered_sql"
+    return raw_query_type
+
+
+def _events_by_kind(events: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
+    return [event for event in events if _event_text(event, "kind") == kind]
+
+
+def _last_event(events: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
+    by_kind = _events_by_kind(events, kind)
+    if not by_kind:
+        return None
+    return by_kind[-1]
+
+
+def _bundle_generated_sql(events: list[dict[str, Any]]) -> str | None:
+    llm_result = _last_event(events, "llm.result")
+    if llm_result is not None:
+        generated_sql = _event_text(llm_result, "generated_sql").strip()
+        if generated_sql:
+            return generated_sql
+    llm_exec = _last_event(events, "llm.sql_execution")
+    if llm_exec is not None:
+        generated_sql = _event_text(llm_exec, "sql").strip()
+        if generated_sql:
+            return generated_sql
+    llm_response = _last_event(events, "llm.response")
+    if llm_response is not None:
+        generated_sql = _event_text(llm_response, "sql").strip()
+        if generated_sql:
+            return generated_sql
+    return None
+
+
+def _llm_trace_summary(events: list[dict[str, Any]]) -> tuple[str, str, str, str]:
+    llm_query = _last_event(events, "llm.query")
+    llm_result = _last_event(events, "llm.result")
+    query = _event_text(llm_query or {}, "query")
+    model = _event_text(llm_query or {}, "model")
+    status = _event_text(llm_result or {}, "status")
+    generated_sql = _bundle_generated_sql(events) or ""
+    return query, model, status, generated_sql
+
+
+def cmd_llm_show(engine: CommandEngine, args: str) -> EngineResponse:
+    payload = args.strip()
+    parts = payload.split()
+    if len(parts) != 1:
+        return usage_error(USAGE_LLM_SHOW)
+    trace_id = parts[0]
+    events = read_log_events_for_trace(trace_id)
+    if not events:
+        return response(status="error", message=f"LLM trace not found: {trace_id}")
+
+    query, model, status, generated_sql = _llm_trace_summary(events)
+    llm_result = _last_event(events, "llm.result")
+    bundle = {
+        "trace_id": trace_id,
+        "query": query,
+        "model": model,
+        "result": llm_result or {},
+        "requests": _events_by_kind(events, "llm.request"),
+        "responses": _events_by_kind(events, "llm.response"),
+        "retries": _events_by_kind(events, "llm.retry"),
+        "sql_executions": _events_by_kind(events, "llm.sql_execution"),
+    }
+    bundle_json = json.dumps(bundle, ensure_ascii=True, default=str, indent=2, sort_keys=True)
+    rows = [
+        ("trace_id", trace_id),
+        ("status", status),
+        ("query", query),
+        ("model", model),
+        ("generated_sql", generated_sql),
+        ("bundle_json", bundle_json),
+    ]
+    out = engine.table_response(["field", "value"], rows, f"LLM trace {trace_id}")
+    if generated_sql:
+        out.load_query = generated_sql
+        out.message = f"{out.message}\nLoaded generated SQL in editor."
+    return out
+
+
+def cmd_history_log(engine: CommandEngine, args: str) -> EngineResponse:
+    count, err = _parse_count_arg(args, USAGE_HISTORY_LOG)
+    if err is not None:
+        return err
+    assert count is not None
+    events = read_log_events(event_type="query.execute", limit=count)
+    rows = [
+        (
+            _event_text(event, "event_id"),
+            _event_text(event, "query_type"),
+            _event_text(event, "status"),
+            _event_text(event, "sql"),
+        )
+        for event in events
+    ]
+    return engine.table_response(
+        ["event_id", "type", "status", "sql"],
+        rows,
+        f"Persisted SQL history ({len(rows)} queries)",
+    )
 
 
 def cmd_rerun(engine: CommandEngine, args: str) -> EngineResponse:
@@ -380,6 +622,24 @@ def cmd_rerun(engine: CommandEngine, args: str) -> EngineResponse:
     out = engine.run_input(query)
     if not query.startswith("/"):
         out.generated_sql = query
+    return out
+
+
+def cmd_rerun_log(engine: CommandEngine, args: str) -> EngineResponse:
+    payload = args.strip()
+    parts = payload.split()
+    if len(parts) != 1:
+        return usage_error(USAGE_RERUN_LOG)
+    event_id = parts[0]
+    event = find_log_event(event_id, event_type="query.execute")
+    if event is None:
+        return response(status="error", message=f"Log event not found: {event_id}")
+    sql = _event_text(event, "sql").strip()
+    if not sql:
+        return response(status="error", message=f"Log event has no SQL text: {event_id}")
+    query_type = _resolve_query_type_from_event(event)
+    out = engine.run_sql(sql, query_type=query_type)
+    out.generated_sql = sql
     return out
 
 

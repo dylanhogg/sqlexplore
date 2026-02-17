@@ -1,6 +1,8 @@
 import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -10,7 +12,7 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from sqlexplore.completion.helpers import quote_ident
-from sqlexplore.core.logging_utils import get_logger, to_json_for_log, truncate_for_log
+from sqlexplore.core.logging_utils import get_logger, log_event, to_json_for_log, truncate_for_log
 from sqlexplore.llm.duckdb_guidance import (
     BASE_DUCKDB_GUIDANCE,
     JSON_DUCKDB_GUIDANCE,
@@ -44,6 +46,7 @@ DEFAULT_DUCKDB_GUIDANCE_MAX_CHARS = 1_600
 MAX_PROMPT_LOG_CHARS = 64_000
 MAX_RESPONSE_LOG_CHARS = 256_000
 logger = get_logger(__name__)
+_llm_trace_id_var: ContextVar[str | None] = ContextVar("llm_trace_id", default=None)
 
 
 class LlmSqlEngine(Protocol):
@@ -93,6 +96,15 @@ TEMPORAL_KEYWORDS = (
 )
 STRUCT_SCHEMA_HINTS = ("struct", "map", "list")
 TEMPORAL_SCHEMA_HINTS = ("date", "time", "timestamp")
+
+
+@contextmanager
+def llm_trace_context(trace_id: str | None) -> Iterator[None]:
+    token = _llm_trace_id_var.set(trace_id)
+    try:
+        yield
+    finally:
+        _llm_trace_id_var.reset(token)
 
 
 def _env_values(env: Mapping[str, str] | None = None) -> Mapping[str, str]:
@@ -327,12 +339,34 @@ def generate_sql(prompt: str, model: str) -> str:
         "messages": request_messages,
         "temperature": 0,
     }
+    trace_id = _llm_trace_id_var.get()
+    if trace_id is not None:
+        log_event(
+            "llm.request",
+            {
+                "trace_id": trace_id,
+                "model": model,
+                "request": request_payload,
+            },
+            logger=logger,
+        )
     logger.debug("llm request=%s", to_json_for_log(request_payload, max_chars=MAX_PROMPT_LOG_CHARS))
 
     t0 = time.perf_counter()
     try:
         response = litellm_completion(**request_payload)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if trace_id is not None:
+            log_event(
+                "llm.response",
+                {
+                    "trace_id": trace_id,
+                    "model": model,
+                    "status": "provider_error",
+                    "error": str(exc),
+                },
+                logger=logger,
+            )
         logger.exception(
             "llm completion failed model=%s prompt=%s",
             model,
@@ -357,6 +391,7 @@ def generate_sql(prompt: str, model: str) -> str:
     )
 
     sql_text = _llm_response_content(response)
+    response_payload = _response_to_log_payload(response)
     logger.debug(
         "llm response sql chars=%s sql=%s",
         len(sql_text),
@@ -364,8 +399,23 @@ def generate_sql(prompt: str, model: str) -> str:
     )
     logger.debug(
         "llm response raw=%s",
-        to_json_for_log(_response_to_log_payload(response), max_chars=MAX_RESPONSE_LOG_CHARS),
+        to_json_for_log(response_payload, max_chars=MAX_RESPONSE_LOG_CHARS),
     )
+    if trace_id is not None:
+        log_event(
+            "llm.response",
+            {
+                "trace_id": trace_id,
+                "model": model,
+                "response_model": response_model,
+                "response_id": response_id,
+                "elapsed_ms": elapsed_ms,
+                "usage": usage_stats,
+                "sql": sql_text,
+                "response": response_payload,
+            },
+            logger=logger,
+        )
     return sql_text
 
 

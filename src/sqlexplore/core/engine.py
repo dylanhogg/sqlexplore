@@ -28,7 +28,7 @@ from sqlexplore.core.engine_models import (
     QueryResult,
     ResultStatus,
 )
-from sqlexplore.core.logging_utils import get_logger, truncate_for_log
+from sqlexplore.core.logging_utils import get_logger, log_event, new_trace_id, truncate_for_log
 from sqlexplore.core.result_utils import format_scalar, result_column_types, result_columns, sql_literal
 from sqlexplore.core.sql_templates import (
     DEFAULT_LOAD_QUERY_TEMPLATE,
@@ -443,6 +443,7 @@ class SqlExplorerEngine:
         if not sql:
             logger.info("run_sql skipped empty query")
             return EngineResponse(status="info", message="Query is empty.")
+        trace_id = new_trace_id()
         logger.debug(
             "run_sql start query_type=%s remember=%s add_to_query_history=%s sql_chars=%s sql=%s",
             query_type,
@@ -461,6 +462,17 @@ class SqlExplorerEngine:
         except Exception as exc:  # noqa: BLE001
             if remember and add_to_query_history:
                 self._append_history(sql, query_type, "error")
+            log_event(
+                "query.execute",
+                {
+                    "trace_id": trace_id,
+                    "query_type": query_type,
+                    "status": "error",
+                    "sql": sql,
+                    "error": str(exc),
+                },
+                logger=logger,
+            )
             logger.exception(
                 "run_sql error query_type=%s sql=%s",
                 query_type,
@@ -476,6 +488,20 @@ class SqlExplorerEngine:
                 self._append_history(sql, query_type, "success")
 
         if not columns:
+            log_event(
+                "query.execute",
+                {
+                    "trace_id": trace_id,
+                    "query_type": query_type,
+                    "status": "success",
+                    "sql": sql,
+                    "elapsed_ms": elapsed_ms,
+                    "rows": 0,
+                    "columns": 0,
+                    "truncated": False,
+                },
+                logger=logger,
+            )
             logger.info("run_sql complete non-tabular elapsed_ms=%.1f", elapsed_ms)
             return EngineResponse(
                 status="ok",
@@ -499,6 +525,20 @@ class SqlExplorerEngine:
         message = f"{len(shown):,}/{out_of_rows:,} rows shown in {elapsed_ms:.1f} ms"
         if truncated:
             message += f" (row display limit={self.max_rows_display})"
+        log_event(
+            "query.execute",
+            {
+                "trace_id": trace_id,
+                "query_type": query_type,
+                "status": "success",
+                "sql": sql,
+                "elapsed_ms": elapsed_ms,
+                "rows": len(rows),
+                "columns": len(columns),
+                "truncated": truncated,
+            },
+            logger=logger,
+        )
         logger.info(
             "run_sql complete rows=%s shown=%s columns=%s elapsed_ms=%.1f truncated=%s",
             len(rows),
