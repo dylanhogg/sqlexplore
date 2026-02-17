@@ -483,11 +483,12 @@ def cmd_llm_history(engine: CommandEngine, args: str) -> EngineResponse:
             _event_text(event, "retry_count"),
             _event_text(event, "model"),
             _event_text(event, "query"),
+            _event_text(event, "generated_sql"),
         )
         for event in events
     ]
     return engine.table_response(
-        ["trace_id", "status", "retries", "model", "query"],
+        ["trace_id", "status", "retries", "model", "query", "generated_sql"],
         rows,
         f"LLM history ({len(rows)} traces)",
     )

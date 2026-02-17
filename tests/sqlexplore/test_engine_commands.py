@@ -734,14 +734,15 @@ def test_llm_history_and_show_commands_replay_logged_bundle(tmp_path: Path, monk
         history_out = engine.run_input("/llm-history 1")
         assert history_out.status == "ok"
         assert history_out.result is not None
-        assert history_out.result.columns == ["trace_id", "status", "retries", "model", "query"]
+        assert history_out.result.columns == ["trace_id", "status", "retries", "model", "query", "generated_sql"]
         assert len(history_out.result.rows) == 1
 
-        trace_id, status, retries, _model, query = history_out.result.rows[0]
+        trace_id, status, retries, _model, query, generated_sql = history_out.result.rows[0]
         assert isinstance(trace_id, str) and trace_id
         assert status == "success"
         assert retries == "0"
         assert query == "count rows by col_name"
+        assert generated_sql == sql
 
         trace_events = read_log_events_for_trace(trace_id)
         assert any(event.get("kind") == "llm.query" for event in trace_events)

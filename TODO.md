@@ -9,7 +9,9 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Review std naming for /llm-history and /llm-show commands with /history and /rerun
+- Make F8 on /llm-history & /history-log & any command that shows results in a table to copy to clipboard
+- Rename /llm query <text> to /llm-query <text>
+- Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
 - Migrate logging from file to sqlite database
 - Textual double click to select row? & Cmd+A to select all?
 - Improve persistent file log to be more user friendly
