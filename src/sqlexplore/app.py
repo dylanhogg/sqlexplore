@@ -1,8 +1,9 @@
 import re
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -16,6 +17,8 @@ from tqdm import tqdm
 from sqlexplore.cli import stdin_io
 from sqlexplore.core.engine import (
     STATUS_STYLE_BY_RESULT,
+    DataLoadMode,
+    DataSourceBinding,
     EngineResponse,
     QueryResult,
     SqlExplorerEngine,
@@ -33,6 +36,7 @@ app = typer.Typer(
 
 _REMOTE_FILENAME_SAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _REMOTE_DOWNLOAD_CHUNK_SIZE = 5 * 1024 * 1024
+_AUTO_TABLE_NAME_UNSAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9_]+")
 MAX_SQL_LOG_CHARS = 8_000
 logger = get_logger(__name__)
 
@@ -277,27 +281,153 @@ def _run_console_query_and_exit(engine: SqlExplorerEngine, query: str | None) ->
     raise typer.Exit(code=exit_code)
 
 
-def _resolve_main_data_source(
-    data: str | None,
+@dataclass(frozen=True, slots=True)
+class ResolvedDataSources:
+    paths: tuple[Path, ...]
+    use_stdin: bool
+    stdin_capture: stdin_io.StdinCapture | None
+
+
+def _resolve_data_sources(
+    data: list[str] | None,
     download_dir: Path,
     overwrite: bool,
     startup_activity_messages: list[str],
-) -> tuple[Path, bool, stdin_io.StdinCapture | None]:
-    use_stdin = stdin_io.should_use_stdin(data)
-    if data is None and not use_stdin:
-        raise typer.BadParameter(stdin_io.STDIN_MISSING_SOURCE_ERROR)
-    if use_stdin:
+) -> ResolvedDataSources:
+    raw_sources = list(data or [])
+    if not raw_sources:
+        use_stdin = stdin_io.should_use_stdin(None)
+        if not use_stdin:
+            raise typer.BadParameter(stdin_io.STDIN_MISSING_SOURCE_ERROR)
         capture = stdin_io.read_stdin_to_temp_file()
         startup_activity_messages.append(capture.startup_message)
-        return capture.path, True, capture
-    assert data is not None
-    file_path = _resolve_data_path(
-        data,
-        download_dir=download_dir,
-        overwrite=overwrite,
-        startup_activity_messages=startup_activity_messages,
+        return ResolvedDataSources(paths=(capture.path,), use_stdin=True, stdin_capture=capture)
+
+    stripped_sources = [source.strip() for source in raw_sources]
+    if any(not source for source in stripped_sources):
+        raise typer.BadParameter("Data path cannot be empty.")
+
+    if "-" in stripped_sources:
+        if len(stripped_sources) != 1:
+            raise typer.BadParameter("Cannot combine '-' stdin source with other data files.")
+        capture = stdin_io.read_stdin_to_temp_file()
+        startup_activity_messages.append(capture.startup_message)
+        return ResolvedDataSources(paths=(capture.path,), use_stdin=True, stdin_capture=capture)
+
+    resolved_paths = tuple(
+        _resolve_data_path(
+            source,
+            download_dir=download_dir,
+            overwrite=overwrite,
+            startup_activity_messages=startup_activity_messages,
+        )
+        for source in raw_sources
     )
-    return file_path, False, None
+    return ResolvedDataSources(paths=resolved_paths, use_stdin=False, stdin_capture=None)
+
+
+def _normalize_table_name(raw_name: str, option_name: str) -> str:
+    normalized = raw_name.replace('"', "").strip()
+    if not normalized:
+        raise typer.BadParameter(f"{option_name} cannot be empty.")
+    return normalized
+
+
+def _auto_table_name_for_path(path: Path, index: int) -> str:
+    table_name = _AUTO_TABLE_NAME_UNSAFE_CHARS_RE.sub("_", path.stem).strip("_").lower()
+    if not table_name:
+        table_name = f"data_{index}"
+    if table_name[0].isdigit():
+        table_name = f"t_{table_name}"
+    return table_name
+
+
+def _dedupe_table_names(table_names: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for base_name in table_names:
+        candidate = base_name
+        suffix = 2
+        while candidate.casefold() in seen:
+            candidate = f"{base_name}_{suffix}"
+            suffix += 1
+        deduped.append(candidate)
+        seen.add(candidate.casefold())
+    return deduped
+
+
+@dataclass(frozen=True, slots=True)
+class EngineSourceConfig:
+    data_sources: tuple[DataSourceBinding, ...]
+    table_name: str
+    active_table: str | None
+
+
+def _build_engine_source_config(
+    paths: tuple[Path, ...],
+    load_mode: DataLoadMode,
+    table_name: str,
+    table_names: list[str],
+    active_table: str | None,
+) -> EngineSourceConfig:
+    if not paths:
+        raise typer.BadParameter("At least one data source is required.")
+
+    primary_table_name = _normalize_table_name(table_name, "--table")
+    if load_mode == "union":
+        if table_names:
+            raise typer.BadParameter("--table-name can only be used with --load-mode tables.")
+        if active_table is not None:
+            raise typer.BadParameter("--active-table can only be used with --load-mode tables.")
+        return EngineSourceConfig(
+            data_sources=tuple(DataSourceBinding(path=path, table_name=primary_table_name) for path in paths),
+            table_name=primary_table_name,
+            active_table=None,
+        )
+
+    explicit_names = [_normalize_table_name(name, "--table-name") for name in table_names]
+    if explicit_names and len(explicit_names) != len(paths):
+        raise typer.BadParameter(
+            "--table-name must be provided exactly once per data source in tables mode. "
+            f"got={len(explicit_names)} expected={len(paths)}"
+        )
+    if explicit_names:
+        aliases = list(explicit_names)
+    else:
+        aliases = [primary_table_name]
+        for index, path in enumerate(paths[1:], start=2):
+            aliases.append(_auto_table_name_for_path(path, index))
+        aliases = _dedupe_table_names(aliases)
+
+    seen: set[str] = set()
+    for alias in aliases:
+        key = alias.casefold()
+        if key in seen:
+            raise typer.BadParameter(f"Duplicate table name from --table-name: {alias}")
+        seen.add(key)
+
+    if active_table is None:
+        resolved_active_table = primary_table_name if primary_table_name.casefold() in seen else aliases[0]
+    else:
+        resolved_active_table = _normalize_table_name(active_table, "--active-table")
+    if resolved_active_table.casefold() not in seen:
+        known_tables = ", ".join(aliases)
+        raise typer.BadParameter(
+            f"--active-table must match one loaded table: {resolved_active_table}. tables={known_tables}"
+        )
+
+    return EngineSourceConfig(
+        data_sources=tuple(DataSourceBinding(path=path, table_name=alias) for path, alias in zip(paths, aliases)),
+        table_name=primary_table_name,
+        active_table=resolved_active_table,
+    )
+
+
+def _load_mode_callback(value: str) -> str:
+    lowered = value.strip().lower()
+    if lowered not in {"union", "tables"}:
+        raise typer.BadParameter("--load-mode must be one of: union, tables.")
+    return lowered
 
 
 def _version_callback(version: bool) -> None:
@@ -309,11 +439,27 @@ def _version_callback(version: bool) -> None:
 
 @app.command()
 def main(
-    data: str | None = typer.Argument(
+    data: list[str] | None = typer.Argument(
         None,
-        help="CSV/TSV/TXT/Parquet local path, HTTP(S) URL, or '-' for stdin text.",
+        help="One or more CSV/TSV/TXT/Parquet local paths, HTTP(S) URLs, or '-' for stdin text.",
     ),
     table_name: str = typer.Option("data", "--table", "-t", help="Logical table/view name inside DuckDB."),
+    load_mode: str = typer.Option(
+        "union",
+        "--load-mode",
+        callback=_load_mode_callback,
+        help="Load mode for multiple files: union into one table, or load separate tables.",
+    ),
+    table_names: list[str] | None = typer.Option(
+        None,
+        "--table-name",
+        help="Tables mode only: specify table names in source order. Repeat once per source.",
+    ),
+    active_table: str | None = typer.Option(
+        None,
+        "--active-table",
+        help="Tables mode only: table used by helper commands and startup sample query.",
+    ),
     limit: int = typer.Option(100, "--limit", "-l", min=1, help="Default helper query row limit."),
     max_rows: int = typer.Option(1000, "--max-rows", min=1, help="Maximum rows displayed in the result grid."),
     max_value_chars: int = typer.Option(
@@ -364,10 +510,13 @@ def main(
     log_path = configure_file_logging()
     logger.info("startup version=%s log_path=%s", app_version(), log_path)
     logger.debug(
-        "startup args data=%s table_name=%s limit=%s max_rows=%s max_value_chars=%s database=%s no_ui=%s overwrite=%s "
-        "download_dir=%s execute_chars=%s query_file=%s",
+        "startup args data=%s table_name=%s load_mode=%s table_names=%s active_table=%s limit=%s max_rows=%s "
+        "max_value_chars=%s database=%s no_ui=%s overwrite=%s download_dir=%s execute_chars=%s query_file=%s",
         data,
         table_name,
+        load_mode,
+        table_names,
+        active_table,
         limit,
         max_rows,
         max_value_chars,
@@ -383,27 +532,51 @@ def main(
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
     startup_activity_messages: list[str] = []
-    file_path, use_stdin, stdin_capture = _resolve_main_data_source(
+    resolved_data = _resolve_data_sources(
         data,
         download_dir=download_dir,
         overwrite=overwrite,
         startup_activity_messages=startup_activity_messages,
     )
-    logger.info("data source resolved path=%s use_stdin=%s", file_path, use_stdin)
-    try:
-        logger.debug("data file metadata=%s", _file_debug_metadata(file_path))
-    except OSError:
-        logger.exception("failed to stat data file path=%s", file_path)
+    file_paths = resolved_data.paths
+    use_stdin = resolved_data.use_stdin
+    stdin_capture = resolved_data.stdin_capture
+    logger.info("data sources resolved count=%s use_stdin=%s", len(file_paths), use_stdin)
+    for file_path in file_paths:
+        try:
+            logger.debug("data file metadata=%s", _file_debug_metadata(file_path))
+        except OSError:
+            logger.exception("failed to stat data file path=%s", file_path)
 
-    engine = SqlExplorerEngine(
-        data_path=file_path,
-        table_name=table_name,
-        database=database,
-        default_limit=limit,
-        max_rows_display=max_rows,
-        max_value_chars=max_value_chars,
+    source_config = _build_engine_source_config(
+        file_paths,
+        cast(DataLoadMode, load_mode),
+        table_name,
+        list(table_names or []),
+        active_table,
     )
-    logger.info("engine initialized table=%s database=%s", table_name, database)
+    engine_kwargs: dict[str, Any] = {
+        "data_path": file_paths[0],
+        "table_name": source_config.table_name,
+        "database": database,
+        "default_limit": limit,
+        "max_rows_display": max_rows,
+        "max_value_chars": max_value_chars,
+    }
+    if len(file_paths) > 1 or load_mode == "tables":
+        engine_kwargs["data_sources"] = source_config.data_sources
+        engine_kwargs["load_mode"] = cast(DataLoadMode, load_mode)
+        if source_config.active_table is not None:
+            engine_kwargs["active_table"] = source_config.active_table
+    engine = SqlExplorerEngine(**engine_kwargs)
+    effective_table_name = source_config.active_table or source_config.table_name
+    logger.info(
+        "engine initialized table=%s database=%s load_mode=%s source_count=%s",
+        effective_table_name,
+        database,
+        load_mode,
+        len(file_paths),
+    )
 
     try:
         non_interactive_sql = execute

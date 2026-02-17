@@ -7,6 +7,7 @@ import sqlexplore.commands.llm_runner as llm_runner_module
 import sqlexplore.commands.registry as commands_module
 import sqlexplore.completion.completions as completion_module
 from sqlexplore.core.engine import (
+    DataSourceBinding,
     SqlExplorerEngine,
     flatten_struct_paths,
     is_struct_type,
@@ -30,6 +31,66 @@ def _build_engine(tmp_path: Path, csv_text: str = "col_name,x\na,1\nb,2\na,3\n")
 
 def _reset_log_state() -> None:
     reset_file_logging()
+
+
+def test_multiple_data_sources_union_mode_unions_rows(tmp_path: Path) -> None:
+    left_path = tmp_path / "left.csv"
+    right_path = tmp_path / "right.csv"
+    left_path.write_text("x\n1\n2\n", encoding="utf-8")
+    right_path.write_text("x\n3\n", encoding="utf-8")
+
+    engine = SqlExplorerEngine(
+        data_path=left_path,
+        table_name="data",
+        database=":memory:",
+        default_limit=10,
+        max_rows_display=100,
+        max_value_chars=80,
+        data_sources=(
+            DataSourceBinding(path=left_path, table_name="data"),
+            DataSourceBinding(path=right_path, table_name="data"),
+        ),
+        load_mode="union",
+    )
+    try:
+        out = engine.run_sql('SELECT COUNT(*) AS n FROM "data"')
+        assert out.status == "ok"
+        assert out.result is not None
+        assert [tuple(row) for row in out.result.rows] == [(3,)]
+    finally:
+        engine.close()
+
+
+def test_multiple_data_sources_tables_mode_loads_named_tables(tmp_path: Path) -> None:
+    users_path = tmp_path / "users.csv"
+    events_path = tmp_path / "events.csv"
+    users_path.write_text("id,name\n1,Alice\n2,Bob\n", encoding="utf-8")
+    events_path.write_text("user_id,event\n1,login\n2,logout\n", encoding="utf-8")
+
+    engine = SqlExplorerEngine(
+        data_path=users_path,
+        table_name="data",
+        database=":memory:",
+        default_limit=10,
+        max_rows_display=100,
+        max_value_chars=80,
+        data_sources=(
+            DataSourceBinding(path=users_path, table_name="users"),
+            DataSourceBinding(path=events_path, table_name="events"),
+        ),
+        load_mode="tables",
+        active_table="users",
+    )
+    try:
+        assert engine.table_name == "users"
+        out = engine.run_sql(
+            'SELECT u.name, e.event FROM "users" AS u JOIN "events" AS e ON u.id = e.user_id ORDER BY u.id'
+        )
+        assert out.status == "ok"
+        assert out.result is not None
+        assert [tuple(row) for row in out.result.rows] == [("Alice", "login"), ("Bob", "logout")]
+    finally:
+        engine.close()
 
 
 def test_txt_data_source_loads_line_metrics_columns(tmp_path: Path) -> None:

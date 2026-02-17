@@ -9,7 +9,11 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
+- Union multiple input files into a single table
+- Make default /rows up to 1,000,000
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
+- Test all startup options and CLI args
+- Update README docs
 - Migrate logging from file to sqlite database
 - Textual double click to select row? & Cmd+A to select all? (maybe not? codex://threads/019c6a4a-4e25-7842-a7db-356a983f93b7)
 - Improve persistent file log life cycle management (rotate, cleanup, use for /llm-history, etc.)
@@ -19,9 +23,9 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Distinguish /describe from /summary
 - Enable /history results to be copied to clipboard
 - Add CLI arg for default number of rows to display (i.e. limit)
-- Integrate LiteLLM
-    - /llm query "my query in natural language"
+- Integrate more LLM features:
     - /llm suggest
+    - /llm analyse
     - /llm fix
     - /llm explain
     - /llm optimize

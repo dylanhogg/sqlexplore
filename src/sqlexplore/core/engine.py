@@ -99,6 +99,15 @@ class FileReader:
     query_template: str = DEFAULT_LOAD_QUERY_TEMPLATE
 
 
+type DataLoadMode = Literal["union", "tables"]
+
+
+@dataclass(frozen=True, slots=True)
+class DataSourceBinding:
+    path: Path
+    table_name: str
+
+
 @dataclass(frozen=True, slots=True)
 class StructField:
     name: str
@@ -195,6 +204,13 @@ def sort_cell_key(value: Any) -> tuple[int, int, float | str]:
     return (0, 1, str(value).casefold())
 
 
+def _normalize_table_name(raw_name: str) -> str:
+    normalized = raw_name.replace('"', "").strip()
+    if not normalized:
+        raise typer.BadParameter("Table name cannot be empty.")
+    return normalized
+
+
 class SqlExplorerEngine:
     def __init__(
         self,
@@ -204,19 +220,33 @@ class SqlExplorerEngine:
         default_limit: int,
         max_rows_display: int,
         max_value_chars: int,
+        data_sources: tuple[DataSourceBinding, ...] | None = None,
+        load_mode: DataLoadMode = "union",
+        active_table: str | None = None,
     ) -> None:
         logger.info(
             "engine init start data_path=%s table_name=%s database=%s default_limit=%s max_rows_display=%s "
-            "max_value_chars=%s",
+            "max_value_chars=%s load_mode=%s source_count=%s active_table=%s",
             data_path,
             table_name,
             database,
             default_limit,
             max_rows_display,
             max_value_chars,
+            load_mode,
+            len(data_sources) if data_sources is not None else 1,
+            active_table,
         )
-        self.data_path = data_path
-        self.table_name = table_name.replace('"', "")
+        if load_mode not in {"union", "tables"}:
+            raise typer.BadParameter(f"Unknown load mode: {load_mode}")
+
+        self.load_mode = load_mode
+        self._primary_table_name = _normalize_table_name(table_name)
+        self.data_sources = self._resolve_data_sources(data_path, self._primary_table_name, data_sources, load_mode)
+        self.table_names = tuple(source.table_name for source in self.data_sources)
+        self.table_name = self._resolve_active_table_name(active_table)
+        self.data_path = self._active_data_path()
+
         self.database = database
         self.default_limit = max(1, default_limit)
         self.max_rows_display = max(1, max_rows_display)
@@ -228,17 +258,7 @@ class SqlExplorerEngine:
         self.last_sql = self.default_query
         self.last_result_sql: str | None = None
 
-        reader = _detect_reader(self.data_path)
-        source_sql = f"{reader.function_name}({sql_literal(str(self.data_path))}{reader.args})"
-        load_query = render_load_query(source_sql, reader.query_template)
-        logger.debug(
-            "engine data load reader=%s source_sql=%s load_query=%s",
-            reader.function_name,
-            truncate_for_log(source_sql, max_chars=MAX_SQL_LOG_CHARS),
-            truncate_for_log(load_query, max_chars=MAX_SQL_LOG_CHARS),
-        )
-        self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
-        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {load_query}')
+        self._load_data_sources()
 
         self._schema_rows: list[tuple[Any, ...]] = []
         self.columns: list[str] = []
@@ -253,6 +273,104 @@ class SqlExplorerEngine:
         self._command_lookup = index_command_specs(self._command_specs)
         self._completion_engine = CompletionEngine(self)
         logger.info("engine init complete columns=%s", len(self.columns))
+
+    @staticmethod
+    def _resolve_data_sources(
+        data_path: Path,
+        table_name: str,
+        data_sources: tuple[DataSourceBinding, ...] | None,
+        load_mode: DataLoadMode,
+    ) -> tuple[DataSourceBinding, ...]:
+        if data_sources is None:
+            return (DataSourceBinding(path=data_path, table_name=table_name),)
+        if not data_sources:
+            raise typer.BadParameter("Expected at least one data source.")
+
+        normalized_sources = tuple(
+            DataSourceBinding(
+                path=Path(source.path).expanduser().resolve(),
+                table_name=_normalize_table_name(source.table_name),
+            )
+            for source in data_sources
+        )
+        if load_mode == "tables":
+            seen: set[str] = set()
+            for source in normalized_sources:
+                key = source.table_name.casefold()
+                if key in seen:
+                    raise typer.BadParameter(f"Duplicate table name: {source.table_name}")
+                seen.add(key)
+        return normalized_sources
+
+    def _resolve_active_table_name(self, active_table: str | None) -> str:
+        if self.load_mode == "union":
+            return self._primary_table_name
+        if active_table is None:
+            primary_key = self._primary_table_name.casefold()
+            for table_name in self.table_names:
+                if table_name.casefold() == primary_key:
+                    return table_name
+            return self.table_names[0]
+        normalized_active_table = _normalize_table_name(active_table)
+        active_key = normalized_active_table.casefold()
+        for table_name in self.table_names:
+            if table_name.casefold() == active_key:
+                return table_name
+        known_tables = ", ".join(self.table_names)
+        raise typer.BadParameter(
+            f"Active table is not loaded: {normalized_active_table}. Loaded tables: {known_tables}"
+        )
+
+    def _active_data_path(self) -> Path:
+        if self.load_mode == "union":
+            return self.data_sources[0].path
+        active_key = self.table_name.casefold()
+        for source in self.data_sources:
+            if source.table_name.casefold() == active_key:
+                return source.path
+        return self.data_sources[0].path
+
+    def _load_query_for_source(self, source: DataSourceBinding) -> str:
+        reader = _detect_reader(source.path)
+        source_sql = f"{reader.function_name}({sql_literal(str(source.path))}{reader.args})"
+        load_query = render_load_query(source_sql, reader.query_template)
+        logger.debug(
+            "engine data load table=%s path=%s reader=%s source_sql=%s load_query=%s",
+            source.table_name,
+            source.path,
+            reader.function_name,
+            truncate_for_log(source_sql, max_chars=MAX_SQL_LOG_CHARS),
+            truncate_for_log(load_query, max_chars=MAX_SQL_LOG_CHARS),
+        )
+        return load_query
+
+    def _replace_view(self, table_name: str, load_query: str) -> None:
+        self.conn.execute(f'DROP VIEW IF EXISTS "{table_name}"')
+        self.conn.execute(f'CREATE VIEW "{table_name}" AS {load_query}')
+
+    def _load_union_sources(self) -> None:
+        if len(self.data_sources) == 1:
+            source_query = self._load_query_for_source(self.data_sources[0])
+            self._replace_view(self.table_name, source_query)
+            return
+
+        union_parts = [
+            f"SELECT * FROM ({self._load_query_for_source(source)}) AS src_{idx}"
+            for idx, source in enumerate(self.data_sources, start=1)
+        ]
+        union_query = " UNION ALL ".join(union_parts)
+        self._replace_view(self.table_name, union_query)
+
+    def _load_table_sources(self) -> None:
+        for source in self.data_sources:
+            source_query = self._load_query_for_source(source)
+            self._replace_view(source.table_name, source_query)
+
+    def _load_data_sources(self) -> None:
+        if self.load_mode == "union":
+            self._load_union_sources()
+            return
+        self._load_table_sources()
 
     @property
     def default_query(self) -> str:
