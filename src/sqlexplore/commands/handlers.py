@@ -13,16 +13,9 @@ from sqlexplore.completion.helpers import (
 from sqlexplore.core.engine_models import EngineResponse, ResultStatus
 from sqlexplore.core.logging_utils import get_logger, truncate_for_log
 from sqlexplore.core.result_utils import format_scalar, result_columns, sql_literal
-from sqlexplore.llm.llm_sql import (
-    build_prompt,
-    build_schema_context,
-    fetch_sample_rows,
-    generate_sql,
-    resolve_llm_model,
-    validate_generated_sql,
-    validate_llm_api_key,
-)
+from sqlexplore.llm.llm_sql import resolve_llm_model, validate_llm_api_key
 
+from .llm_runner import run_llm_query_with_retry
 from .protocols import CommandEngine
 
 USAGE_HELP = "/help"
@@ -52,6 +45,7 @@ USAGE_CLEAR = "/clear"
 USAGE_EXIT = "/exit or /quit"
 LLM_MISSING_KEY_MESSAGE = "LLM API key not found in environment."
 LLM_PROVIDER_ERROR_MESSAGE = "LLM request failed. Check API key and network, then try again."
+LLM_SQL_RETRY_INFO_MESSAGE = "Info: LLM auto-retry fixed SQL (1 retry)."
 MAX_LLM_QUERY_LOG_CHARS = 8_000
 logger = get_logger(__name__)
 
@@ -236,27 +230,24 @@ def cmd_llm(engine: CommandEngine, args: str) -> EngineResponse:
         return llm_error_response("missing_key")
 
     model = resolve_llm_model()
-    schema_context = build_schema_context(engine)
-    sample_rows = fetch_sample_rows(engine)
-    prompt = build_prompt(
-        user_query=nl_query,
-        table_name=engine.table_name,
-        schema_context=schema_context,
-        sample_rows=sample_rows,
-    )
-    try:
-        sql = generate_sql(prompt=prompt, model=model)
-    except Exception as exc:  # noqa: BLE001
-        _ = exc
-        logger.exception("llm command provider error model=%s", model)
+    run_result = run_llm_query_with_retry(engine, nl_query, model)
+    if run_result.status == "provider_error":
         return llm_error_response("provider")
+    if run_result.status == "invalid_sql":
+        return llm_error_response(
+            "invalid_sql",
+            detail=run_result.invalid_sql_detail,
+            generated_sql=run_result.generated_sql,
+        )
 
-    sql_error = validate_generated_sql(sql, engine.table_name)
-    if sql_error is not None:
-        logger.error("llm command invalid sql reason=%s", sql_error)
-        return llm_error_response("invalid_sql", detail=sql_error, generated_sql=sql)
-    logger.info("llm command generated sql chars=%s", len(sql))
-    return run_generated_sql(engine, sql, query_type="llm_generated_sql")
+    assert run_result.response is not None
+    out = run_result.response
+    if run_result.retry_count > 0 and out.status != "error":
+        if out.message:
+            out.message = f"{out.message}\n{LLM_SQL_RETRY_INFO_MESSAGE}"
+        else:
+            out.message = LLM_SQL_RETRY_INFO_MESSAGE
+    return out
 
 
 def cmd_schema(engine: CommandEngine, args: str) -> EngineResponse:

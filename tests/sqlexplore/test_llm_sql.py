@@ -10,11 +10,13 @@ from sqlexplore.llm.llm_sql import (
     SQLEXPLORE_LLM_MODEL_ENV_VAR,
     SampleRows,
     build_prompt,
+    build_repair_prompt,
     build_schema_context,
     fetch_sample_rows,
     generate_sql,
     resolve_llm_api_key_env_var,
     resolve_llm_model,
+    select_duckdb_guidance,
     validate_generated_sql,
     validate_llm_api_key,
 )
@@ -108,9 +110,46 @@ def test_build_prompt_includes_constraints_schema_and_sample_rows() -> None:
     assert "Return exactly one statement." in prompt
     assert "Statement must be SELECT or WITH ... SELECT." in prompt
     assert "User request:\ntop 2 cities by count" in prompt
+    assert "DuckDB guidance:" in prompt
     assert "Schema:\n- city: VARCHAR" in prompt
     assert "First rows:" in prompt
     assert "seattle, 10" in prompt
+
+
+def test_select_duckdb_guidance_adds_regex_json_struct_and_temporal_sections() -> None:
+    guidance = select_duckdb_guidance(
+        user_query="extract regex from json field and parse timestamp",
+        schema_context="Schema:\n- payload: JSON (nullable=YES)\n- meta: STRUCT(x VARCHAR) (nullable=YES)",
+    )
+    assert "DuckDB basics:" in guidance
+    assert "Regex:" in guidance
+    assert "JSON:" in guidance
+    assert "STRUCT:" in guidance
+    assert "Date/time:" in guidance
+
+
+def test_select_duckdb_guidance_respects_max_chars() -> None:
+    guidance = select_duckdb_guidance(
+        user_query="regex json struct time",
+        schema_context="Schema:\n- payload: JSON (nullable=YES)\n- ts: TIMESTAMP (nullable=YES)",
+        max_chars=120,
+    )
+    assert len(guidance) <= 120
+
+
+def test_build_repair_prompt_includes_previous_sql_and_error() -> None:
+    prompt = build_repair_prompt(
+        user_query="extract number from json payload",
+        previous_sql='SELECT json_extract(x, "$.n") FROM "data"',
+        error_message="Catalog Error: Scalar Function with name json_extract does not exist!",
+        table_name="data",
+        schema_context="Schema:\n- x: VARCHAR (nullable=YES)",
+        sample_rows=SampleRows(columns=("x",), rows=(('{"n": 1}',),)),
+    )
+    assert "Fix this SQL for DuckDB." in prompt
+    assert 'Previous SQL:\nSELECT json_extract(x, "$.n") FROM "data"' in prompt
+    assert "Error:\nCatalog Error: Scalar Function with name json_extract does not exist!" in prompt
+    assert "Return corrected SQL only." in prompt
 
 
 def test_generate_sql_uses_litellm_completion(monkeypatch: Any) -> None:

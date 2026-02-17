@@ -11,6 +11,13 @@ from sqlglot.errors import ParseError
 
 from sqlexplore.completion.helpers import quote_ident
 from sqlexplore.core.logging_utils import get_logger, to_json_for_log, truncate_for_log
+from sqlexplore.llm.duckdb_guidance import (
+    BASE_DUCKDB_GUIDANCE,
+    JSON_DUCKDB_GUIDANCE,
+    REGEX_DUCKDB_GUIDANCE,
+    STRUCT_DUCKDB_GUIDANCE,
+    TEMPORAL_DUCKDB_GUIDANCE,
+)
 
 # drop_params handles dropping non applicable params (e.g. temperature parameter for GPT-5 models)
 litellm.drop_params = True
@@ -33,6 +40,7 @@ COMMON_PROVIDER_API_KEY_ENV_VARS = (
 )
 LLM_API_KEY_ENV_VARS = (LITELLM_API_KEY_ENV_VAR, *COMMON_PROVIDER_API_KEY_ENV_VARS)
 DEFAULT_SAMPLE_ROWS = 3
+DEFAULT_DUCKDB_GUIDANCE_MAX_CHARS = 1_600
 MAX_PROMPT_LOG_CHARS = 64_000
 MAX_RESPONSE_LOG_CHARS = 256_000
 logger = get_logger(__name__)
@@ -53,6 +61,38 @@ class SampleRows:
 
 
 CompletionFn = Callable[..., Any]
+REGEX_KEYWORDS = (
+    "regex",
+    "regexp",
+    "pattern",
+    "match",
+    "extract",
+    "replace",
+    "similar to",
+    "rlike",
+)
+JSON_KEYWORDS = (
+    "json",
+    "json_extract",
+    "json path",
+    "jsonpath",
+    "$.",
+)
+STRUCT_KEYWORDS = ("struct", "nested", "field", "map", "list")
+TEMPORAL_KEYWORDS = (
+    "date",
+    "time",
+    "timestamp",
+    "timestamptz",
+    "strftime",
+    "strptime",
+    "day",
+    "week",
+    "month",
+    "year",
+)
+STRUCT_SCHEMA_HINTS = ("struct", "map", "list")
+TEMPORAL_SCHEMA_HINTS = ("date", "time", "timestamp")
 
 
 def _env_values(env: Mapping[str, str] | None = None) -> Mapping[str, str]:
@@ -115,6 +155,48 @@ def _format_sample_rows(sample_rows: SampleRows) -> str:
     return "\n".join(lines)
 
 
+def _contains_any(text: str, terms: Sequence[str]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _trim_for_prompt(payload: str, max_chars: int) -> str:
+    assert max_chars > 3
+    if len(payload) <= max_chars:
+        return payload
+    return f"{payload[: max_chars - 3].rstrip()}..."
+
+
+def select_duckdb_guidance(
+    user_query: str,
+    schema_context: str,
+    max_chars: int = DEFAULT_DUCKDB_GUIDANCE_MAX_CHARS,
+) -> str:
+    payload = f"{user_query}\n{schema_context}".casefold()
+    schema_text = schema_context.casefold()
+    sections = [BASE_DUCKDB_GUIDANCE]
+    if _contains_any(payload, REGEX_KEYWORDS):
+        sections.append(REGEX_DUCKDB_GUIDANCE)
+    if _contains_any(payload, JSON_KEYWORDS) or "json" in schema_text:
+        sections.append(JSON_DUCKDB_GUIDANCE)
+    if _contains_any(payload, STRUCT_KEYWORDS) or _contains_any(schema_text, STRUCT_SCHEMA_HINTS):
+        sections.append(STRUCT_DUCKDB_GUIDANCE)
+    if _contains_any(payload, TEMPORAL_KEYWORDS) or _contains_any(schema_text, TEMPORAL_SCHEMA_HINTS):
+        sections.append(TEMPORAL_DUCKDB_GUIDANCE)
+    return _trim_for_prompt("\n\n".join(sections), max_chars=max_chars)
+
+
+def _prompt_constraints(table_name: str, columns: str) -> str:
+    return (
+        "Constraints:\n"
+        "- Use DuckDB dialect.\n"
+        f'- Use only table "{table_name}".\n'
+        f"- Use only known columns: {columns}.\n"
+        "- Return SQL only.\n"
+        "- Return exactly one statement.\n"
+        "- Statement must be SELECT or WITH ... SELECT."
+    )
+
+
 def build_prompt(
     user_query: str,
     table_name: str,
@@ -125,16 +207,45 @@ def build_prompt(
     assert payload
     columns = ", ".join(sample_rows.columns) if sample_rows.columns else "(none)"
     formatted_sample_rows = _format_sample_rows(sample_rows)
+    constraints = _prompt_constraints(table_name, columns)
+    duckdb_guidance = select_duckdb_guidance(payload, schema_context)
     return (
         "Generate SQL for DuckDB.\n"
-        "Constraints:\n"
-        "- Use DuckDB dialect.\n"
-        f'- Use only table "{table_name}".\n'
-        f"- Use only known columns: {columns}.\n"
-        "- Return SQL only.\n"
-        "- Return exactly one statement.\n"
-        "- Statement must be SELECT or WITH ... SELECT.\n\n"
+        f"{constraints}\n\n"
         f"User request:\n{payload}\n\n"
+        f"DuckDB guidance:\n{duckdb_guidance}\n\n"
+        f"{schema_context}\n\n"
+        "First rows:\n"
+        f"{formatted_sample_rows}"
+    )
+
+
+def build_repair_prompt(
+    user_query: str,
+    previous_sql: str,
+    error_message: str,
+    table_name: str,
+    schema_context: str,
+    sample_rows: SampleRows,
+) -> str:
+    payload = user_query.strip()
+    old_sql = previous_sql.strip()
+    failure = error_message.strip()
+    assert payload
+    assert old_sql
+    assert failure
+    columns = ", ".join(sample_rows.columns) if sample_rows.columns else "(none)"
+    constraints = _prompt_constraints(table_name, columns)
+    duckdb_guidance = select_duckdb_guidance(payload, schema_context)
+    formatted_sample_rows = _format_sample_rows(sample_rows)
+    return (
+        "Fix this SQL for DuckDB.\n"
+        f"{constraints}\n"
+        "- Return corrected SQL only.\n\n"
+        f"Original user request:\n{payload}\n\n"
+        f"Previous SQL:\n{old_sql}\n\n"
+        f"Error:\n{failure}\n\n"
+        f"DuckDB guidance:\n{duckdb_guidance}\n\n"
         f"{schema_context}\n\n"
         "First rows:\n"
         f"{formatted_sample_rows}"
