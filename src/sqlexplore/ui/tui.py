@@ -1098,6 +1098,8 @@ class SqlExplorerTui(App[None]):
 
         if response.result is not None:
             self._render_table(response.result)
+        else:
+            self._redraw_results_table()
 
         if response.message:
             self._log(response.message, response.status)
@@ -1195,7 +1197,9 @@ class SqlExplorerTui(App[None]):
         table = self._results_table()
         table.clear(columns=True)
         if result is None or not result.columns:
-            self.query_one("#results_header", Static).update(f"Results{self._json_rendering_status_suffix()}")
+            header = f"Results [table:{self.engine.table_name}]"
+            header += self._json_rendering_status_suffix()
+            self.query_one("#results_header", Static).update(header)
             self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
             return
 
@@ -1217,6 +1221,7 @@ class SqlExplorerTui(App[None]):
         if self._sort_column_index is not None and self._sort_column_index < len(result.columns):
             direction = "desc" if self._sort_reverse else "asc"
             header += f" [sorted: {result.columns[self._sort_column_index]} {direction}]"
+        header += f" [table:{self.engine.table_name}]"
         header += self._json_rendering_status_suffix()
         self.query_one("#results_header", Static).update(header)
         self._refresh_results_preview_from_cursor()

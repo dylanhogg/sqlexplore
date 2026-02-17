@@ -243,7 +243,16 @@ class SqlExplorerEngine:
         self.load_mode = load_mode
         self._primary_table_name = _normalize_table_name(table_name)
         self.data_sources = self._resolve_data_sources(data_path, self._primary_table_name, data_sources, load_mode)
-        self.table_names = tuple(source.table_name for source in self.data_sources)
+        ordered_unique_table_names: list[str] = []
+        seen_table_names: set[str] = set()
+        for source in self.data_sources:
+            key = source.table_name.casefold()
+            if key in seen_table_names:
+                continue
+            seen_table_names.add(key)
+            ordered_unique_table_names.append(source.table_name)
+        self.table_names = tuple(ordered_unique_table_names)
+        self._table_lookup = {name.casefold(): name for name in self.table_names}
         self.table_name = self._resolve_active_table_name(active_table)
         self.data_path = self._active_data_path()
 
@@ -380,7 +389,14 @@ class SqlExplorerEngine:
         logger.info("engine close database=%s", self.database)
         self.conn.close()
 
-    def refresh_schema(self) -> None:
+    def refresh_schema(self, table_name: str | None = None) -> None:
+        if table_name is not None:
+            resolved_table_name = self.resolve_table_name(table_name)
+            if resolved_table_name is None:
+                raise typer.BadParameter(f"Unknown table: {table_name}")
+            self.table_name = resolved_table_name
+            self.data_path = self._active_data_path()
+
         schema_rows = self.conn.execute(f'DESCRIBE "{self.table_name}"').fetchall()
         self._schema_rows = [tuple(row) for row in schema_rows]
         self.columns = [str(row[0]) for row in self._schema_rows]
@@ -447,13 +463,20 @@ class SqlExplorerEngine:
 
     def schema_preview(self, max_columns: int = 24) -> str:
         rows = self.row_count()
+        table_lines = ["Tables"]
+        for name in self.table_names:
+            marker = "*" if name.casefold() == self.table_name.casefold() else "-"
+            table_lines.append(f"{marker} {name}")
         head = [
             "Data Explorer",
             "",
-            f"{self.data_path}",
-            f"table: {self.table_name}",
+            f"mode: {self.load_mode}",
+            f"active table: {self.table_name}",
+            f"active source: {self.data_path}",
             f"rows: {rows:,}",
             f"columns: {len(self.columns)}",
+            "",
+            *table_lines,
             "",
             "Schema",
         ]
@@ -489,6 +512,9 @@ class SqlExplorerEngine:
         lines.extend(
             [
                 "",
+                f"Active table: {self.table_name}",
+                f"Loaded tables: {', '.join(self.table_names)}",
+                "",
                 (
                     "Editor: completions appear while typing; Ctrl+Space opens completion mode; "
                     "Tab accepts completion; Esc closes completion menu; Up/Down navigates completion menu "
@@ -514,6 +540,20 @@ class SqlExplorerEngine:
 
     def resolve_column(self, raw_column: str) -> str | None:
         return self._resolve_column(raw_column)
+
+    def resolve_table_name(self, raw_table_name: str) -> str | None:
+        candidate = raw_table_name.strip()
+        if candidate.startswith('"') and candidate.endswith('"') and len(candidate) > 1:
+            candidate = candidate[1:-1].replace('""', '"')
+        return self._table_lookup.get(candidate.casefold())
+
+    def switch_table(self, raw_table_name: str) -> str | None:
+        resolved_table_name = self.resolve_table_name(raw_table_name)
+        if resolved_table_name is None:
+            return None
+        self.refresh_schema(resolved_table_name)
+        self.last_sql = self.default_query
+        return resolved_table_name
 
     @property
     def schema_rows(self) -> list[tuple[Any, ...]]:

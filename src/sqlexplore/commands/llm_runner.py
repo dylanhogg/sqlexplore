@@ -148,14 +148,44 @@ def _log_sql_execution_event(
     )
 
 
-def _default_runner_deps() -> LlmRunnerDeps:
+def _default_runner_deps(allowed_table_names: tuple[str, ...] | None) -> LlmRunnerDeps:
+    def build_prompt_with_tables(user_query: str, table_name: str, schema_context: str, sample_rows: SampleRows) -> str:
+        return build_prompt(
+            user_query,
+            table_name,
+            schema_context,
+            sample_rows,
+            allowed_table_names=allowed_table_names,
+        )
+
+    def build_repair_prompt_with_tables(
+        user_query: str,
+        previous_sql: str,
+        error_message: str,
+        table_name: str,
+        schema_context: str,
+        sample_rows: SampleRows,
+    ) -> str:
+        return build_repair_prompt(
+            user_query,
+            previous_sql,
+            error_message,
+            table_name,
+            schema_context,
+            sample_rows,
+            allowed_table_names=allowed_table_names,
+        )
+
+    def validate_generated_sql_with_tables(sql: str, table_name: str) -> str | None:
+        return validate_generated_sql(sql, table_name, allowed_table_names=allowed_table_names)
+
     return LlmRunnerDeps(
         build_schema_context=build_schema_context,
         fetch_sample_rows=fetch_sample_rows,
-        build_prompt=build_prompt,
-        build_repair_prompt=build_repair_prompt,
+        build_prompt=build_prompt_with_tables,
+        build_repair_prompt=build_repair_prompt_with_tables,
         generate_sql=generate_sql,
-        validate_generated_sql=validate_generated_sql,
+        validate_generated_sql=validate_generated_sql_with_tables,
     )
 
 
@@ -167,10 +197,12 @@ def run_llm_query_with_retry(
     deps: LlmRunnerDeps | None = None,
     trace_id: str | None = None,
 ) -> LlmRunResult:
+    engine_table_names = getattr(engine, "table_names", ())
+    allowed_table_names = tuple(engine_table_names) or (engine.table_name,)
     active_config = config or LlmRunnerConfig()
     if active_config.max_retries < 0:
         raise ValueError(f"Expected non-negative retries, got {active_config.max_retries=}")
-    active_deps = deps or _default_runner_deps()
+    active_deps = deps or _default_runner_deps(allowed_table_names)
 
     schema_context = active_deps.build_schema_context(engine)
     sample_rows = active_deps.fetch_sample_rows(engine)

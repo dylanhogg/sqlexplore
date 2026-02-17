@@ -197,12 +197,48 @@ def select_duckdb_guidance(
     return _trim_for_prompt("\n\n".join(sections), max_chars=max_chars)
 
 
-def _prompt_constraints(table_name: str, columns: str) -> str:
+def _resolve_allowed_table_names(
+    table_name: str,
+    allowed_table_names: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    primary = table_name.strip()
+    assert primary
+    ordered = [primary]
+    seen = {primary.casefold()}
+    for raw_name in allowed_table_names or ():
+        candidate = raw_name.strip()
+        if not candidate:
+            continue
+        key = candidate.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(candidate)
+    return tuple(ordered)
+
+
+def _format_allowed_tables(allowed_table_names: tuple[str, ...]) -> str:
+    return ", ".join(f'"{table_name}"' for table_name in allowed_table_names)
+
+
+def _prompt_constraints(
+    table_name: str,
+    columns: str,
+    allowed_table_names: Sequence[str] | None = None,
+) -> str:
+    resolved_allowed_table_names = _resolve_allowed_table_names(table_name, allowed_table_names)
+    if len(resolved_allowed_table_names) == 1:
+        table_constraints = f'- Use only table "{resolved_allowed_table_names[0]}".'
+    else:
+        table_constraints = (
+            f"- Use only loaded tables: {_format_allowed_tables(resolved_allowed_table_names)}.\n"
+            f'- Use "{table_name}" when one table is sufficient.'
+        )
     return (
         "Constraints:\n"
         "- Use DuckDB dialect.\n"
-        f'- Use only table "{table_name}".\n'
-        f"- Use only known columns: {columns}.\n"
+        f"{table_constraints}\n"
+        f'- Known columns for active table "{table_name}": {columns}.\n'
         "- Return SQL only.\n"
         "- Return exactly one statement.\n"
         "- Statement must be SELECT or WITH ... SELECT."
@@ -214,12 +250,13 @@ def build_prompt(
     table_name: str,
     schema_context: str,
     sample_rows: SampleRows,
+    allowed_table_names: Sequence[str] | None = None,
 ) -> str:
     payload = user_query.strip()
     assert payload
     columns = ", ".join(sample_rows.columns) if sample_rows.columns else "(none)"
     formatted_sample_rows = _format_sample_rows(sample_rows)
-    constraints = _prompt_constraints(table_name, columns)
+    constraints = _prompt_constraints(table_name, columns, allowed_table_names)
     duckdb_guidance = select_duckdb_guidance(payload, schema_context)
     return (
         "Generate SQL for DuckDB.\n"
@@ -239,6 +276,7 @@ def build_repair_prompt(
     table_name: str,
     schema_context: str,
     sample_rows: SampleRows,
+    allowed_table_names: Sequence[str] | None = None,
 ) -> str:
     payload = user_query.strip()
     old_sql = previous_sql.strip()
@@ -247,7 +285,7 @@ def build_repair_prompt(
     assert old_sql
     assert failure
     columns = ", ".join(sample_rows.columns) if sample_rows.columns else "(none)"
-    constraints = _prompt_constraints(table_name, columns)
+    constraints = _prompt_constraints(table_name, columns, allowed_table_names)
     duckdb_guidance = select_duckdb_guidance(payload, schema_context)
     formatted_sample_rows = _format_sample_rows(sample_rows)
     return (
@@ -431,26 +469,32 @@ def _validate_statement_shape(statement: exp.Expression) -> str | None:
     return "Generated SQL must be SELECT or WITH ... SELECT."
 
 
-def _unknown_table_refs(statement: exp.Expression, table_name: str) -> list[str]:
+def _unknown_table_refs(statement: exp.Expression, allowed_table_names: tuple[str, ...]) -> list[str]:
     cte_names = {
         cte.alias_or_name.casefold()
         for cte in statement.find_all(exp.CTE)
         if cte.alias_or_name and cte.alias_or_name.strip()
     }
-    allowed_table_names = {table_name.casefold(), *cte_names}
+    allowed_table_name_keys = {name.casefold() for name in allowed_table_names}
+    allowed_table_name_keys.update(cte_names)
     unknown: set[str] = set()
     for table in statement.find_all(exp.Table):
         if table.args.get("db") is not None or table.args.get("catalog") is not None:
             unknown.add(str(table))
             continue
         name = table.name.strip()
-        if name.casefold() in allowed_table_names:
+        if name.casefold() in allowed_table_name_keys:
             continue
         unknown.add(str(table))
     return sorted(unknown)
 
 
-def validate_generated_sql(sql: str, table_name: str) -> str | None:
+def validate_generated_sql(
+    sql: str,
+    table_name: str,
+    allowed_table_names: Sequence[str] | None = None,
+) -> str | None:
+    resolved_allowed_table_names = _resolve_allowed_table_names(table_name, allowed_table_names)
     payload = sql.strip()
     if not payload:
         return "Generated SQL is empty."
@@ -467,8 +511,16 @@ def validate_generated_sql(sql: str, table_name: str) -> str | None:
     shape_error = _validate_statement_shape(statement)
     if shape_error is not None:
         return shape_error
-    unknown_tables = _unknown_table_refs(statement, table_name)
+    unknown_tables = _unknown_table_refs(statement, resolved_allowed_table_names)
     if not unknown_tables:
         return None
     tables_csv = ", ".join(unknown_tables)
-    return f'Generated SQL references unknown table(s): {tables_csv}. Allowed table: "{table_name}".'
+    if len(resolved_allowed_table_names) == 1:
+        return (
+            f"Generated SQL references unknown table(s): {tables_csv}. "
+            f'Allowed table: "{resolved_allowed_table_names[0]}".'
+        )
+    return (
+        f"Generated SQL references unknown table(s): {tables_csv}. "
+        f"Allowed tables: {_format_allowed_tables(resolved_allowed_table_names)}."
+    )

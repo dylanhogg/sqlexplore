@@ -29,8 +29,43 @@ def _build_engine(tmp_path: Path, csv_text: str = "col_name,x\na,1\nb,2\na,3\n")
     )
 
 
+def _build_tables_engine(tmp_path: Path) -> SqlExplorerEngine:
+    users_path = tmp_path / "users.csv"
+    events_path = tmp_path / "events.csv"
+    users_path.write_text("id,name\n1,Alice\n2,Bob\n", encoding="utf-8")
+    events_path.write_text("user_id,event\n1,login\n2,logout\n", encoding="utf-8")
+    return SqlExplorerEngine(
+        data_path=users_path,
+        table_name="data",
+        database=":memory:",
+        default_limit=10,
+        max_rows_display=100,
+        max_value_chars=80,
+        data_sources=(
+            DataSourceBinding(path=users_path, table_name="users"),
+            DataSourceBinding(path=events_path, table_name="events"),
+        ),
+        load_mode="tables",
+        active_table="users",
+    )
+
+
 def _reset_log_state() -> None:
     reset_file_logging()
+
+
+def test_single_file_constructor_path_remains_union_with_primary_table(tmp_path: Path) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        assert engine.load_mode == "union"
+        assert engine.table_name == "data"
+        assert engine.table_names == ("data",)
+        out = engine.run_sql('SELECT COUNT(*) AS n FROM "data"')
+        assert out.status == "ok"
+        assert out.result is not None
+        assert [tuple(row) for row in out.result.rows] == [(3,)]
+    finally:
+        engine.close()
 
 
 def test_multiple_data_sources_union_mode_unions_rows(tmp_path: Path) -> None:
@@ -291,6 +326,8 @@ def test_help_text_is_generated_from_command_registry(tmp_path: Path) -> None:
         assert "/group <group cols> | <aggregates> [| having]" in help_text
         assert "/summary [n_cols] [| where]" in help_text
         assert "/save <path.csv|path.parquet|path.pq|path.json>" in help_text
+        assert "/tables" in help_text
+        assert "/use <table>" in help_text
         assert "/exit or /quit" in help_text
     finally:
         engine.close()
@@ -317,6 +354,42 @@ def test_help_and_schema_commands_validate_args_and_return_tables(tmp_path: Path
         schema_rows = {tuple(row) for row in schema_out.result.rows}
         assert ("col_name", "VARCHAR", "YES") in schema_rows
         assert ("x", "BIGINT", "YES") in schema_rows
+    finally:
+        engine.close()
+
+
+def test_tables_and_use_commands_switch_active_table(tmp_path: Path) -> None:
+    engine = _build_tables_engine(tmp_path)
+    try:
+        preview_text = engine.schema_preview()
+        assert "mode: tables" in preview_text
+        assert "active table: users" in preview_text
+        assert "* users" in preview_text
+        assert "- events" in preview_text
+
+        tables_out = engine.run_input("/tables")
+        assert tables_out.status == "ok"
+        assert tables_out.result is not None
+        assert tables_out.result.columns == ["table", "active"]
+        assert ("users", "yes") in {tuple(row) for row in tables_out.result.rows}
+        assert ("events", "") in {tuple(row) for row in tables_out.result.rows}
+
+        use_out = engine.run_input("/use events")
+        assert use_out.status == "ok"
+        assert use_out.load_query == 'SELECT * FROM "events" LIMIT 10'
+        assert engine.table_name == "events"
+        assert set(engine.columns) == {"user_id", "event"}
+
+        schema_out = engine.run_input("/schema")
+        assert schema_out.status == "ok"
+        assert schema_out.result is not None
+        schema_rows = {tuple(row) for row in schema_out.result.rows}
+        assert ("event", "VARCHAR", "YES") in schema_rows
+        assert ("user_id", "BIGINT", "YES") in schema_rows
+
+        bad_use_out = engine.run_input("/use missing_table")
+        assert bad_use_out.status == "error"
+        assert bad_use_out.message == "Unknown table: missing_table"
     finally:
         engine.close()
 
@@ -1438,6 +1511,27 @@ def test_sql_from_context_suggests_active_table(tmp_path: Path) -> None:
         completions = _completion_values(engine, "SELECT col_name FROM ")
         assert "data" in completions
         assert "JOIN" in completions
+    finally:
+        engine.close()
+
+
+def test_sql_from_context_suggests_all_loaded_tables_in_tables_mode(tmp_path: Path) -> None:
+    engine = _build_tables_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "SELECT * FROM ")
+        assert "users" in completions
+        assert "events" in completions
+        assert completions.index("users") < completions.index("events")
+    finally:
+        engine.close()
+
+
+def test_use_command_completion_suggests_loaded_tables(tmp_path: Path) -> None:
+    engine = _build_tables_engine(tmp_path)
+    try:
+        completions = _completion_values(engine, "/use ")
+        assert "users" in completions
+        assert "events" in completions
     finally:
         engine.close()
 

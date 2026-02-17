@@ -116,6 +116,21 @@ def test_build_prompt_includes_constraints_schema_and_sample_rows() -> None:
     assert "seattle, 10" in prompt
 
 
+def test_build_prompt_allows_multiple_loaded_tables() -> None:
+    prompt = build_prompt(
+        user_query="join users to events and count events per user",
+        table_name="users",
+        schema_context="Schema:\n- id: BIGINT (nullable=YES)\n- name: VARCHAR (nullable=YES)",
+        sample_rows=SampleRows(
+            columns=("id", "name"),
+            rows=((1, "Alice"), (2, "Bob")),
+        ),
+        allowed_table_names=("users", "events"),
+    )
+    assert 'Use only loaded tables: "users", "events".' in prompt
+    assert 'Use "users" when one table is sufficient.' in prompt
+
+
 def test_select_duckdb_guidance_adds_regex_json_struct_and_temporal_sections() -> None:
     guidance = select_duckdb_guidance(
         user_query="extract regex from json field and parse timestamp",
@@ -193,3 +208,22 @@ def test_validate_generated_sql_rejects_unknown_table_and_accepts_known_refs() -
 
     assert validate_generated_sql('SELECT * FROM "data" LIMIT 5', "data") is None
     assert validate_generated_sql('WITH x AS (SELECT * FROM "data") SELECT * FROM x WHERE count > 5', "data") is None
+
+
+def test_validate_generated_sql_allows_loaded_tables_set_in_tables_mode() -> None:
+    assert (
+        validate_generated_sql(
+            'SELECT u.id, e.event FROM "users" u JOIN "events" e ON u.id = e.user_id',
+            "users",
+            allowed_table_names=("users", "events"),
+        )
+        is None
+    )
+    err = validate_generated_sql(
+        'SELECT * FROM "payments"',
+        "users",
+        allowed_table_names=("users", "events"),
+    )
+    assert err is not None
+    assert "payments" in err
+    assert 'Allowed tables: "users", "events".' in err

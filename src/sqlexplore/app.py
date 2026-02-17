@@ -555,8 +555,18 @@ def main(
         list(table_names or []),
         active_table,
     )
+    if len(file_paths) > 1 or load_mode == "tables":
+        startup_activity_messages.append(
+            f"[load] mode={load_mode} tables={', '.join(source.table_name for source in source_config.data_sources)}"
+        )
+        for source in source_config.data_sources:
+            startup_activity_messages.append(f"[load] table={source.table_name} source={source.path}")
+        if source_config.active_table is not None:
+            startup_activity_messages.append(f"[load] active-table={source_config.active_table}")
+
+    assert source_config.data_sources, "engine requires at least one data source"
     engine_kwargs: dict[str, Any] = {
-        "data_path": file_paths[0],
+        "data_path": source_config.data_sources[0].path,
         "table_name": source_config.table_name,
         "database": database,
         "default_limit": limit,

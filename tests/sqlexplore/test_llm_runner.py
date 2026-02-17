@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import pytest
 
+import sqlexplore.commands.llm_runner as llm_runner_module
 from sqlexplore.commands.llm_runner import (
     GenerateSqlFn,
     LlmRunnerConfig,
@@ -15,9 +16,82 @@ from sqlexplore.core.engine_models import EngineResponse, HistoryQueryType, Quer
 from sqlexplore.llm.llm_sql import SampleRows
 
 
+def test_run_llm_query_with_retry_default_deps_pass_allowed_tables(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, tuple[str, ...] | None] = {}
+
+    def fake_build_prompt(
+        user_query: str,
+        table_name: str,
+        schema_context: str,
+        sample_rows: SampleRows,
+        allowed_table_names: tuple[str, ...] | None = None,
+    ) -> str:
+        _ = user_query
+        _ = table_name
+        _ = schema_context
+        _ = sample_rows
+        captured["prompt"] = allowed_table_names
+        return "prompt"
+
+    def fake_build_repair_prompt(
+        user_query: str,
+        previous_sql: str,
+        error_message: str,
+        table_name: str,
+        schema_context: str,
+        sample_rows: SampleRows,
+        allowed_table_names: tuple[str, ...] | None = None,
+    ) -> str:
+        _ = user_query
+        _ = previous_sql
+        _ = error_message
+        _ = table_name
+        _ = schema_context
+        _ = sample_rows
+        captured["repair"] = allowed_table_names
+        return "repair"
+
+    def fake_validate(sql: str, table_name: str, allowed_table_names: tuple[str, ...] | None = None) -> str | None:
+        _ = sql
+        _ = table_name
+        captured["validate"] = allowed_table_names
+        return None
+
+    def fake_build_schema_context(engine: CommandEngine) -> str:
+        _ = engine
+        return "Schema:\n- x: VARCHAR"
+
+    def fake_fetch_sample_rows(engine: CommandEngine) -> SampleRows:
+        _ = engine
+        return SampleRows(columns=("x",), rows=(("a",),))
+
+    def fake_generate_sql(prompt: str, model: str) -> str:
+        _ = prompt
+        _ = model
+        return 'SELECT * FROM "users"'
+
+    monkeypatch.setattr(llm_runner_module, "build_schema_context", fake_build_schema_context)
+    monkeypatch.setattr(llm_runner_module, "fetch_sample_rows", fake_fetch_sample_rows)
+    monkeypatch.setattr(llm_runner_module, "build_prompt", fake_build_prompt)
+    monkeypatch.setattr(llm_runner_module, "build_repair_prompt", fake_build_repair_prompt)
+    monkeypatch.setattr(llm_runner_module, "validate_generated_sql", fake_validate)
+    monkeypatch.setattr(llm_runner_module, "generate_sql", fake_generate_sql)
+
+    engine = _FakeEngine(responses=[EngineResponse(status="ok", message="done")])
+    engine.table_name = "users"
+    engine.table_names = ("users", "events")
+    out = run_llm_query_with_retry(engine, "q", "m")
+    assert out.status == "response"
+    assert captured == {
+        "prompt": ("users", "events"),
+        "validate": ("users", "events"),
+    }
+
+
 class _FakeEngine:
     conn = None
     table_name = "data"
+    table_names: tuple[str, ...] = ("data",)
     default_limit = 10
     max_rows_display = 50
     max_value_chars = 80
@@ -50,6 +124,20 @@ class _FakeEngine:
 
     def resolve_column(self, raw_column: str) -> str | None:
         return raw_column if raw_column in self.columns else None
+
+    def resolve_table_name(self, raw_table_name: str) -> str | None:
+        normalized = raw_table_name.strip().casefold()
+        for table_name in self.table_names:
+            if table_name.casefold() == normalized:
+                return table_name
+        return None
+
+    def switch_table(self, raw_table_name: str) -> str | None:
+        resolved = self.resolve_table_name(raw_table_name)
+        if resolved is None:
+            return None
+        self.table_name = resolved
+        return resolved
 
     def run_sql(
         self,

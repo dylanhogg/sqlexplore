@@ -7,6 +7,7 @@ from sqlexplore.core.engine_models import EngineResponse, HistoryQueryType, Quer
 class CommandEngine(Protocol):
     conn: Any
     table_name: str
+    table_names: tuple[str, ...]
     default_limit: int
     max_rows_display: int
     max_value_chars: int
@@ -27,6 +28,8 @@ class CommandEngine(Protocol):
     def lookup_command(self, raw_name: str) -> Any: ...
 
     def resolve_column(self, raw_column: str) -> str | None: ...
+    def resolve_table_name(self, raw_table_name: str) -> str | None: ...
+    def switch_table(self, raw_table_name: str) -> str | None: ...
 
     def run_sql(
         self,
@@ -44,6 +47,8 @@ class CommandEngine(Protocol):
 
 
 class CommandCompletionCatalog(Protocol):
+    def complete_use(self, args: str, trailing_space: bool) -> list[CompletionItem]: ...
+
     def complete_sample(self, args: str, trailing_space: bool) -> list[CompletionItem]: ...
 
     def complete_filter(self, args: str, trailing_space: bool) -> list[CompletionItem]: ...
