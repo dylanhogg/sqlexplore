@@ -5,20 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sqlexplore"
 version = "0.6.0"
-description = "SQL exploration over data files with your CLI"
+description = "SQL exploration over data files with your CLI and LLM"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Dylan Hogg" }]
 keywords = ["sql", "duckdb", "cli", "tui", "csv", "parquet"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Environment :: Console",
     "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Programming Language :: SQL",
 ]
 requires-python = ">=3.13"
 dependencies = [

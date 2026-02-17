@@ -9,9 +9,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- WIP: Enable persistent file log in appropriate user writable location according to operating system (include all activity logging, and include debugging info, esp with LLM calls (full request/response, etc.))
-    - Make more friendly logs?
-- /llm query to include docs data? https://duckdb.org/docs/stable/data/json/json_functions etc
+- Improve persistent file log to be more user friendly
+- Review duckdb_guidance.py for /llm query
 - Perf review copy TSV from uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
 - Key binding: Write marimo notebook and uvx open it
 - Distinguish /describe from /summary
