@@ -10,7 +10,7 @@ from rich.text import Text
 from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.completion.models import CompletionItem
-from sqlexplore.core.engine import EngineResponse, SqlExplorerEngine, app_version
+from sqlexplore.core.engine import DataSourceBinding, EngineResponse, SqlExplorerEngine, app_version
 from sqlexplore.ui.tui import NULL_VALUE_COLOR, URL_COLOR, ResultsPreview, SqlExplorerTui, SqlQueryEditor
 
 
@@ -43,6 +43,28 @@ def _build_txt_app(tmp_path: Path, txt_text: str) -> tuple[SqlExplorerTui, SqlEx
         default_limit=10,
         max_rows_display=100,
         max_value_chars=80,
+    )
+    return SqlExplorerTui(engine), engine
+
+
+def _build_tables_app(tmp_path: Path) -> tuple[SqlExplorerTui, SqlExplorerEngine]:
+    users_path = tmp_path / "users.csv"
+    events_path = tmp_path / "events.csv"
+    users_path.write_text("id,name\n1,Alice\n2,Bob\n", encoding="utf-8")
+    events_path.write_text("user_id,event\n1,login\n2,logout\n", encoding="utf-8")
+    engine = SqlExplorerEngine(
+        data_path=users_path,
+        table_name="data",
+        database=":memory:",
+        default_limit=10,
+        max_rows_display=100,
+        max_value_chars=80,
+        data_sources=(
+            DataSourceBinding(path=users_path, table_name="users"),
+            DataSourceBinding(path=events_path, table_name="events"),
+        ),
+        load_mode="tables",
+        active_table="users",
     )
     return SqlExplorerTui(engine), engine
 
@@ -526,6 +548,30 @@ def test_results_header_out_of_uses_full_data_length_when_rows_limit_is_set(tmp_
                 header = app.query_one("#results_header", Static)
                 assert "Results (1/5 rows," in str(header.render())
                 assert "1/5 rows shown" in _log_text(app)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_header_table_label_updates_after_use_command(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_tables_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                header = app.query_one("#results_header", Static)
+                assert "[table:users]" in str(header.render())
+
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                editor.text = "/use events"
+                await pilot.press("ctrl+enter")
+                await pilot.pause()
+
+                assert engine.table_name == "events"
+                assert "[table:events]" in str(header.render())
+                sidebar = app.query_one("#sidebar_text", Static)
+                assert "active table: events" in str(sidebar.render())
         finally:
             engine.close()
 

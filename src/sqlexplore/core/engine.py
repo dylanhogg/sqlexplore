@@ -21,6 +21,7 @@ from sqlexplore.commands.registry import (
 )
 from sqlexplore.completion.completions import CompletionEngine, EngineCompletionCatalog
 from sqlexplore.completion.models import CompletionItem, CompletionResult, SqlClause
+from sqlexplore.core.data_source_plan import DataLoadMode, DataSourceBinding, plan_engine_data_sources
 from sqlexplore.core.engine_models import (
     EngineResponse,
     HistoryQueryType,
@@ -204,19 +205,38 @@ class SqlExplorerEngine:
         default_limit: int,
         max_rows_display: int,
         max_value_chars: int,
+        data_sources: tuple[DataSourceBinding, ...] | None = None,
+        load_mode: DataLoadMode = "union",
+        active_table: str | None = None,
     ) -> None:
         logger.info(
             "engine init start data_path=%s table_name=%s database=%s default_limit=%s max_rows_display=%s "
-            "max_value_chars=%s",
+            "max_value_chars=%s load_mode=%s source_count=%s active_table=%s",
             data_path,
             table_name,
             database,
             default_limit,
             max_rows_display,
             max_value_chars,
+            load_mode,
+            len(data_sources) if data_sources is not None else 1,
+            active_table,
         )
-        self.data_path = data_path
-        self.table_name = table_name.replace('"', "")
+        plan = plan_engine_data_sources(
+            data_path=data_path,
+            table_name=table_name,
+            data_sources=data_sources,
+            load_mode=load_mode,
+            active_table=active_table,
+        )
+        self.load_mode = load_mode
+        self._primary_table_name = plan.primary_table_name
+        self.data_sources = plan.data_sources
+        self.table_names = plan.table_names
+        self._table_lookup = {name.casefold(): name for name in self.table_names}
+        self.table_name = plan.active_table_name
+        self.data_path = self._active_data_path()
+
         self.database = database
         self.default_limit = max(1, default_limit)
         self.max_rows_display = max(1, max_rows_display)
@@ -228,17 +248,7 @@ class SqlExplorerEngine:
         self.last_sql = self.default_query
         self.last_result_sql: str | None = None
 
-        reader = _detect_reader(self.data_path)
-        source_sql = f"{reader.function_name}({sql_literal(str(self.data_path))}{reader.args})"
-        load_query = render_load_query(source_sql, reader.query_template)
-        logger.debug(
-            "engine data load reader=%s source_sql=%s load_query=%s",
-            reader.function_name,
-            truncate_for_log(source_sql, max_chars=MAX_SQL_LOG_CHARS),
-            truncate_for_log(load_query, max_chars=MAX_SQL_LOG_CHARS),
-        )
-        self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
-        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {load_query}')
+        self._load_data_sources()
 
         self._schema_rows: list[tuple[Any, ...]] = []
         self.columns: list[str] = []
@@ -254,6 +264,57 @@ class SqlExplorerEngine:
         self._completion_engine = CompletionEngine(self)
         logger.info("engine init complete columns=%s", len(self.columns))
 
+    def _active_data_path(self) -> Path:
+        if self.load_mode == "union":
+            return self.data_sources[0].path
+        active_key = self.table_name.casefold()
+        for source in self.data_sources:
+            if source.table_name.casefold() == active_key:
+                return source.path
+        return self.data_sources[0].path
+
+    def _load_query_for_source(self, source: DataSourceBinding) -> str:
+        reader = _detect_reader(source.path)
+        source_sql = f"{reader.function_name}({sql_literal(str(source.path))}{reader.args})"
+        load_query = render_load_query(source_sql, reader.query_template)
+        logger.debug(
+            "engine data load table=%s path=%s reader=%s source_sql=%s load_query=%s",
+            source.table_name,
+            source.path,
+            reader.function_name,
+            truncate_for_log(source_sql, max_chars=MAX_SQL_LOG_CHARS),
+            truncate_for_log(load_query, max_chars=MAX_SQL_LOG_CHARS),
+        )
+        return load_query
+
+    def _replace_view(self, table_name: str, load_query: str) -> None:
+        self.conn.execute(f'DROP VIEW IF EXISTS "{table_name}"')
+        self.conn.execute(f'CREATE VIEW "{table_name}" AS {load_query}')
+
+    def _load_union_sources(self) -> None:
+        if len(self.data_sources) == 1:
+            source_query = self._load_query_for_source(self.data_sources[0])
+            self._replace_view(self.table_name, source_query)
+            return
+
+        union_parts = [
+            f"SELECT * FROM ({self._load_query_for_source(source)}) AS src_{idx}"
+            for idx, source in enumerate(self.data_sources, start=1)
+        ]
+        union_query = " UNION ALL ".join(union_parts)
+        self._replace_view(self.table_name, union_query)
+
+    def _load_table_sources(self) -> None:
+        for source in self.data_sources:
+            source_query = self._load_query_for_source(source)
+            self._replace_view(source.table_name, source_query)
+
+    def _load_data_sources(self) -> None:
+        if self.load_mode == "union":
+            self._load_union_sources()
+            return
+        self._load_table_sources()
+
     @property
     def default_query(self) -> str:
         return f'SELECT * FROM "{self.table_name}" LIMIT {self.default_limit}'
@@ -262,7 +323,14 @@ class SqlExplorerEngine:
         logger.info("engine close database=%s", self.database)
         self.conn.close()
 
-    def refresh_schema(self) -> None:
+    def refresh_schema(self, table_name: str | None = None) -> None:
+        if table_name is not None:
+            resolved_table_name = self.resolve_table_name(table_name)
+            if resolved_table_name is None:
+                raise typer.BadParameter(f"Unknown table: {table_name}")
+            self.table_name = resolved_table_name
+            self.data_path = self._active_data_path()
+
         schema_rows = self.conn.execute(f'DESCRIBE "{self.table_name}"').fetchall()
         self._schema_rows = [tuple(row) for row in schema_rows]
         self.columns = [str(row[0]) for row in self._schema_rows]
@@ -329,13 +397,20 @@ class SqlExplorerEngine:
 
     def schema_preview(self, max_columns: int = 24) -> str:
         rows = self.row_count()
+        table_lines = ["Tables"]
+        for name in self.table_names:
+            marker = "*" if name.casefold() == self.table_name.casefold() else "-"
+            table_lines.append(f"{marker} {name}")
         head = [
             "Data Explorer",
             "",
-            f"{self.data_path}",
-            f"table: {self.table_name}",
+            f"mode: {self.load_mode}",
+            f"active table: {self.table_name}",
+            f"active source: {self.data_path}",
             f"rows: {rows:,}",
             f"columns: {len(self.columns)}",
+            "",
+            *table_lines,
             "",
             "Schema",
         ]
@@ -371,6 +446,9 @@ class SqlExplorerEngine:
         lines.extend(
             [
                 "",
+                f"Active table: {self.table_name}",
+                f"Loaded tables: {', '.join(self.table_names)}",
+                "",
                 (
                     "Editor: completions appear while typing; Ctrl+Space opens completion mode; "
                     "Tab accepts completion; Esc closes completion menu; Up/Down navigates completion menu "
@@ -396,6 +474,20 @@ class SqlExplorerEngine:
 
     def resolve_column(self, raw_column: str) -> str | None:
         return self._resolve_column(raw_column)
+
+    def resolve_table_name(self, raw_table_name: str) -> str | None:
+        candidate = raw_table_name.strip()
+        if candidate.startswith('"') and candidate.endswith('"') and len(candidate) > 1:
+            candidate = candidate[1:-1].replace('""', '"')
+        return self._table_lookup.get(candidate.casefold())
+
+    def switch_table(self, raw_table_name: str) -> str | None:
+        resolved_table_name = self.resolve_table_name(raw_table_name)
+        if resolved_table_name is None:
+            return None
+        self.refresh_schema(resolved_table_name)
+        self.last_sql = self.default_query
+        return resolved_table_name
 
     @property
     def schema_rows(self) -> list[tuple[Any, ...]]:

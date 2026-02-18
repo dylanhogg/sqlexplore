@@ -53,6 +53,10 @@ class EngineCompletionCatalog:
         return self._engine.table_name
 
     @property
+    def table_names(self) -> tuple[str, ...]:
+        return self._engine.table_names
+
+    @property
     def default_limit(self) -> int:
         return self._engine.default_limit
 
@@ -73,6 +77,7 @@ class EngineCompletionCatalog:
 
     def clear_cache(self) -> None:
         self._column_completion_cache: list[CompletionItem] | None = None
+        self._table_completion_cache: dict[tuple[int, int], list[CompletionItem]] = {}
         self._aggregate_completion_cache: list[CompletionItem] | None = None
         self._aggregate_arg_completion_cache: dict[str, list[CompletionItem]] = {}
         self._predicate_completion_cache: list[CompletionItem] | None = None
@@ -504,8 +509,15 @@ class EngineCompletionCatalog:
             self._base_completion_item("results.json", "value", "export JSON", score=95),
         ]
 
+    def _complete_use(self, args: str, trailing_space: bool) -> list[CompletionItem]:
+        del args, trailing_space
+        return self._table_completion_items(active_score=140, table_score=130)
+
     def complete_sample(self, args: str, trailing_space: bool) -> list[CompletionItem]:
         return self._complete_sample(args, trailing_space)
+
+    def complete_use(self, args: str, trailing_space: bool) -> list[CompletionItem]:
+        return self._complete_use(args, trailing_space)
 
     def complete_filter(self, args: str, trailing_space: bool) -> list[CompletionItem]:
         return self._complete_filter(args, trailing_space)
@@ -616,10 +628,31 @@ class EngineCompletionCatalog:
                 merged.append(item)
         return merged
 
+    def _table_completion_items(self, active_score: int = 150, table_score: int = 132) -> list[CompletionItem]:
+        cache_key = (active_score, table_score)
+        cached = self._table_completion_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        items: list[CompletionItem] = []
+        seen: set[str] = set()
+        for table_name in self.table_names:
+            key = table_name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            is_active = key == self.table_name.casefold()
+            detail = "active table/view" if is_active else "loaded table/view"
+            score = active_score if is_active else table_score
+            items.append(self._base_completion_item(table_name, "table", detail, score=score))
+        if not items:
+            items.append(self._base_completion_item(self.table_name, "table", "active table/view", score=active_score))
+        self._table_completion_cache[cache_key] = items
+        return items
+
     def _default_sql_completion_items(self) -> list[CompletionItem]:
         return self._merge_completion_items(
             self._sql_keyword_items(SQL_KEYWORDS, score=90),
-            [self._base_completion_item(self.table_name, "table", "active table/view", score=95)],
+            self._table_completion_items(active_score=95, table_score=90),
             self._column_completion_items(),
             self._aggregate_completion_items(),
         )
@@ -633,7 +666,7 @@ class EngineCompletionCatalog:
         cached = self._sql_clause_completion_cache.get(clause_key)
         if cached is not None:
             return cached
-        table_items = [self._base_completion_item(self.table_name, "table", "active table/view", score=150)]
+        table_items = self._table_completion_items()
         columns = self._column_completion_items()
         predicates = self._predicate_completion_items()
         aggregate_items = self._aggregate_completion_items()

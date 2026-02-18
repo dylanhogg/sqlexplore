@@ -17,6 +17,7 @@ class CompletionCatalogSource(Protocol):
     columns: list[str]
     column_types: dict[str, str]
     table_name: str
+    table_names: tuple[str, ...]
     default_limit: int
     executed_sql: list[str]
     query_history: list[QueryHistoryEntry]

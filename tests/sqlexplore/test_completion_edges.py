@@ -127,6 +127,7 @@ class _FakeCatalogSource:
         self.columns = ["city", "City", "x"]
         self.column_types = {"city": "VARCHAR", "City": "VARCHAR", "x": "INTEGER"}
         self.table_name = "data"
+        self.table_names: tuple[str, ...] = ("data",)
         self.default_limit = 10
         self.executed_sql: list[str] = []
         self.query_history: list[QueryHistoryEntry] = []

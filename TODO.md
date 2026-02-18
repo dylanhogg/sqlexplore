@@ -9,7 +9,20 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
+- Union multiple input files into a single table
+    - Show row counts with /tables command
+    - Show union/non-union mode with /tables command (in column?)
+    - Review tables names when multiple: remove default "data" and auto-generate all names?
+    - Rename /use <table> to /use-table <table>
+    - Rename /tables to /list-tables
+    - Default tables load type from union to tables
+    - Fix bad union `Binder Error: Set operations can only apply to expressions with the same number of result columns`: uv run python -m sqlexplore.app data/example.parquet https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
+    - 
+- Make default /rows up to 1,000,000
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
+- Test all startup options and CLI args
+- Enable resize columns in results pane
+- Update README docs
 - Migrate logging from file to sqlite database
 - Textual double click to select row? & Cmd+A to select all? (maybe not? codex://threads/019c6a4a-4e25-7842-a7db-356a983f93b7)
 - Improve persistent file log life cycle management (rotate, cleanup, use for /llm-history, etc.)
@@ -19,9 +32,10 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Distinguish /describe from /summary
 - Enable /history results to be copied to clipboard
 - Add CLI arg for default number of rows to display (i.e. limit)
-- Integrate LiteLLM
-    - /llm query "my query in natural language"
+- LiteLLM, return error messages, e.g. litellm.exceptions.ContextWindowExceededError: litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - Input tokens exceed the configured limit of 272000 tokens. Your messages resulted in 2211484 tokens. Please reduce the length of the messages.
+- Integrate more LLM features:
     - /llm suggest
+    - /llm analyse
     - /llm fix
     - /llm explain
     - /llm optimize

@@ -31,6 +31,8 @@ USAGE_LLM = "/llm-query <natural language query>"
 USAGE_LLM_HISTORY = "/llm-history [n]"
 USAGE_LLM_SHOW = "/llm-show <trace_id>"
 USAGE_SCHEMA = "/schema"
+USAGE_TABLES = "/tables"
+USAGE_USE = "/use <table>"
 USAGE_SAMPLE = "/sample [n]"
 USAGE_FILTER = "/filter <where condition>"
 USAGE_SORT = "/sort <order expressions>"
@@ -335,7 +337,29 @@ def cmd_schema(engine: CommandEngine, args: str) -> EngineResponse:
     if err is not None:
         return err
     rows = [(str(r[0]), str(r[1]), str(r[2])) for r in engine.schema_rows]
-    return engine.table_response(["column", "type", "nullable"], rows, "Schema")
+    return engine.table_response(["column", "type", "nullable"], rows, f"Schema ({engine.table_name})")
+
+
+def cmd_tables(engine: CommandEngine, args: str) -> EngineResponse:
+    err = require_no_args(args, USAGE_TABLES)
+    if err is not None:
+        return err
+    rows = [(name, "yes" if name.casefold() == engine.table_name.casefold() else "") for name in engine.table_names]
+    return engine.table_response(["table", "active"], rows, f"Loaded tables ({len(rows)})")
+
+
+def cmd_use(engine: CommandEngine, args: str) -> EngineResponse:
+    target = args.strip()
+    if not target:
+        return usage_error(USAGE_USE)
+    resolved_table_name = engine.switch_table(target)
+    if resolved_table_name is None:
+        return response(status="error", message=f"Unknown table: {target}")
+    return response(
+        status="ok",
+        message=f"Active table set to {resolved_table_name}",
+        load_query=f'SELECT * FROM "{resolved_table_name}" LIMIT {engine.default_limit}',
+    )
 
 
 def cmd_profile(engine: CommandEngine, args: str) -> EngineResponse:

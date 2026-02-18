@@ -1,8 +1,9 @@
 import re
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -14,6 +15,7 @@ from rich.table import Table
 from tqdm import tqdm
 
 from sqlexplore.cli import stdin_io
+from sqlexplore.core.data_source_plan import DataLoadMode, DataSourcePlan, plan_cli_data_sources
 from sqlexplore.core.engine import (
     STATUS_STYLE_BY_RESULT,
     EngineResponse,
@@ -277,27 +279,72 @@ def _run_console_query_and_exit(engine: SqlExplorerEngine, query: str | None) ->
     raise typer.Exit(code=exit_code)
 
 
-def _resolve_main_data_source(
-    data: str | None,
+@dataclass(frozen=True, slots=True)
+class ResolvedDataSources:
+    paths: tuple[Path, ...]
+    use_stdin: bool
+    stdin_capture: stdin_io.StdinCapture | None
+
+
+def _resolve_data_sources(
+    data: list[str] | None,
     download_dir: Path,
     overwrite: bool,
     startup_activity_messages: list[str],
-) -> tuple[Path, bool, stdin_io.StdinCapture | None]:
-    use_stdin = stdin_io.should_use_stdin(data)
-    if data is None and not use_stdin:
-        raise typer.BadParameter(stdin_io.STDIN_MISSING_SOURCE_ERROR)
-    if use_stdin:
+) -> ResolvedDataSources:
+    raw_sources = list(data or [])
+    if not raw_sources:
+        use_stdin = stdin_io.should_use_stdin(None)
+        if not use_stdin:
+            raise typer.BadParameter(stdin_io.STDIN_MISSING_SOURCE_ERROR)
         capture = stdin_io.read_stdin_to_temp_file()
         startup_activity_messages.append(capture.startup_message)
-        return capture.path, True, capture
-    assert data is not None
-    file_path = _resolve_data_path(
-        data,
-        download_dir=download_dir,
-        overwrite=overwrite,
-        startup_activity_messages=startup_activity_messages,
+        return ResolvedDataSources(paths=(capture.path,), use_stdin=True, stdin_capture=capture)
+
+    stripped_sources = [source.strip() for source in raw_sources]
+    if any(not source for source in stripped_sources):
+        raise typer.BadParameter("Data path cannot be empty.")
+
+    if "-" in stripped_sources:
+        if len(stripped_sources) != 1:
+            raise typer.BadParameter("Cannot combine '-' stdin source with other data files.")
+        capture = stdin_io.read_stdin_to_temp_file()
+        startup_activity_messages.append(capture.startup_message)
+        return ResolvedDataSources(paths=(capture.path,), use_stdin=True, stdin_capture=capture)
+
+    resolved_paths = tuple(
+        _resolve_data_path(
+            source,
+            download_dir=download_dir,
+            overwrite=overwrite,
+            startup_activity_messages=startup_activity_messages,
+        )
+        for source in stripped_sources
     )
-    return file_path, False, None
+    return ResolvedDataSources(paths=resolved_paths, use_stdin=False, stdin_capture=None)
+
+
+def _build_source_plan(
+    paths: tuple[Path, ...],
+    load_mode: DataLoadMode,
+    table_name: str,
+    table_names: list[str],
+    active_table: str | None,
+) -> DataSourcePlan:
+    return plan_cli_data_sources(
+        paths=paths,
+        load_mode=load_mode,
+        table_name=table_name,
+        table_names=table_names,
+        active_table=active_table,
+    )
+
+
+def _load_mode_callback(value: str) -> str:
+    lowered = value.strip().lower()
+    if lowered not in {"union", "tables"}:
+        raise typer.BadParameter("--load-mode must be one of: union, tables.")
+    return lowered
 
 
 def _version_callback(version: bool) -> None:
@@ -307,13 +354,157 @@ def _version_callback(version: bool) -> None:
     raise typer.Exit()
 
 
+def _resolve_session_sources(
+    data: list[str] | None,
+    download_dir: Path,
+    overwrite: bool,
+    load_mode: DataLoadMode,
+    table_name: str,
+    table_names: list[str],
+    active_table: str | None,
+    startup_activity_messages: list[str],
+) -> tuple[ResolvedDataSources, DataSourcePlan]:
+    resolved_data = _resolve_data_sources(
+        data,
+        download_dir=download_dir,
+        overwrite=overwrite,
+        startup_activity_messages=startup_activity_messages,
+    )
+    source_plan = _build_source_plan(
+        resolved_data.paths,
+        load_mode,
+        table_name,
+        table_names,
+        active_table,
+    )
+    return resolved_data, source_plan
+
+
+def _log_data_source_metadata(file_paths: tuple[Path, ...], use_stdin: bool) -> None:
+    logger.info("data sources resolved count=%s use_stdin=%s", len(file_paths), use_stdin)
+    for file_path in file_paths:
+        try:
+            logger.debug("data file metadata=%s", _file_debug_metadata(file_path))
+        except OSError:
+            logger.exception("failed to stat data file path=%s", file_path)
+
+
+def _append_load_activity_messages(
+    startup_activity_messages: list[str],
+    load_mode: DataLoadMode,
+    source_plan: DataSourcePlan,
+) -> None:
+    if len(source_plan.data_sources) <= 1 and load_mode != "tables":
+        return
+    startup_activity_messages.append(
+        f"[load] mode={load_mode} tables={', '.join(source.table_name for source in source_plan.data_sources)}"
+    )
+    for source in source_plan.data_sources:
+        startup_activity_messages.append(f"[load] table={source.table_name} source={source.path}")
+    if load_mode == "tables":
+        startup_activity_messages.append(f"[load] active-table={source_plan.active_table_name}")
+
+
+def _build_engine_kwargs(
+    source_plan: DataSourcePlan,
+    load_mode: DataLoadMode,
+    database: str,
+    limit: int,
+    max_rows: int,
+    max_value_chars: int,
+) -> dict[str, Any]:
+    assert source_plan.data_sources, "engine requires at least one data source"
+    engine_kwargs: dict[str, Any] = {
+        "data_path": source_plan.data_sources[0].path,
+        "table_name": source_plan.primary_table_name,
+        "database": database,
+        "default_limit": limit,
+        "max_rows_display": max_rows,
+        "max_value_chars": max_value_chars,
+    }
+    if len(source_plan.data_sources) > 1 or load_mode == "tables":
+        engine_kwargs["data_sources"] = source_plan.data_sources
+        engine_kwargs["load_mode"] = load_mode
+        if load_mode == "tables":
+            engine_kwargs["active_table"] = source_plan.active_table_name
+    return engine_kwargs
+
+
+def _resolve_startup_query(execute: str | None, query_file: Path | None) -> str | None:
+    non_interactive_sql = execute
+    if query_file is not None:
+        non_interactive_sql = query_file.read_text(encoding="utf-8").strip()
+        logger.info(
+            "loaded startup query file=%s chars=%s query=%s",
+            query_file,
+            len(non_interactive_sql),
+            truncate_for_log(non_interactive_sql, max_chars=MAX_SQL_LOG_CHARS),
+        )
+    elif non_interactive_sql is not None:
+        logger.info(
+            "startup --execute chars=%s query=%s",
+            len(non_interactive_sql),
+            truncate_for_log(non_interactive_sql, max_chars=MAX_SQL_LOG_CHARS),
+        )
+    return non_interactive_sql
+
+
+def _run_engine_session(
+    engine: SqlExplorerEngine,
+    startup_activity_messages: list[str],
+    log_path: Path | None,
+    use_stdin: bool,
+    no_ui: bool,
+    startup_sql: str | None,
+) -> None:
+    if no_ui:
+        _run_console_query_and_exit(engine, startup_sql)
+
+    with stdin_io.stdin_tty_for_tui(use_stdin) as can_run_tui:
+        if not can_run_tui:
+            typer.echo(stdin_io.STDIN_TTY_FALLBACK_MESSAGE)
+            logger.info("stdin tty unavailable, falling back to console mode")
+            _run_console_query_and_exit(engine, startup_sql)
+        if startup_sql is None:
+            logger.info("launching tui with default startup query")
+            SqlExplorerTui(
+                engine,
+                startup_activity_messages=startup_activity_messages,
+                log_file_path=str(log_path) if log_path is not None else None,
+            ).run()
+            return
+        logger.info("launching tui with startup query chars=%s", len(startup_sql))
+        SqlExplorerTui(
+            engine,
+            startup_activity_messages=startup_activity_messages,
+            startup_query=startup_sql,
+            log_file_path=str(log_path) if log_path is not None else None,
+        ).run()
+
+
 @app.command()
 def main(
-    data: str | None = typer.Argument(
+    data: list[str] | None = typer.Argument(
         None,
-        help="CSV/TSV/TXT/Parquet local path, HTTP(S) URL, or '-' for stdin text.",
+        help="One or more CSV/TSV/TXT/Parquet local paths, HTTP(S) URLs, or '-' for stdin text.",
     ),
     table_name: str = typer.Option("data", "--table", "-t", help="Logical table/view name inside DuckDB."),
+    load_mode: str = typer.Option(
+        "union",
+        "--load-mode",
+        callback=_load_mode_callback,
+        help="Load mode for multiple files: union into one table, or load separate tables.",
+    ),
+    table_names: list[str] | None = typer.Option(
+        None,
+        "--table-name",
+        help="Tables mode only: specify table names in source order. Repeat once per source.",
+    ),
+    active_table: str | None = typer.Option(
+        None,
+        "--active-table",
+        help="Tables mode only: table used by helper commands and startup sample query.",
+    ),
     limit: int = typer.Option(100, "--limit", "-l", min=1, help="Default helper query row limit."),
     max_rows: int = typer.Option(1000, "--max-rows", min=1, help="Maximum rows displayed in the result grid."),
     max_value_chars: int = typer.Option(
@@ -364,10 +555,13 @@ def main(
     log_path = configure_file_logging()
     logger.info("startup version=%s log_path=%s", app_version(), log_path)
     logger.debug(
-        "startup args data=%s table_name=%s limit=%s max_rows=%s max_value_chars=%s database=%s no_ui=%s overwrite=%s "
-        "download_dir=%s execute_chars=%s query_file=%s",
+        "startup args data=%s table_name=%s load_mode=%s table_names=%s active_table=%s limit=%s max_rows=%s "
+        "max_value_chars=%s database=%s no_ui=%s overwrite=%s download_dir=%s execute_chars=%s query_file=%s",
         data,
         table_name,
+        load_mode,
+        table_names,
+        active_table,
         limit,
         max_rows,
         max_value_chars,
@@ -382,69 +576,64 @@ def main(
     if execute and query_file:
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
+    load_mode_raw = cast(Any, load_mode)
+    table_names_raw = cast(Any, table_names)
+    active_table_raw = cast(Any, active_table)
+    if isinstance(load_mode_raw, str):
+        load_mode_value: DataLoadMode = cast(DataLoadMode, _load_mode_callback(load_mode_raw))
+    else:
+        load_mode_value = "union"
+    if isinstance(table_names_raw, list):
+        table_name_values = [str(name) for name in cast(list[Any], table_names_raw)]
+    else:
+        table_name_values = []
+    active_table_value = active_table_raw if isinstance(active_table_raw, str) else None
+
     startup_activity_messages: list[str] = []
-    file_path, use_stdin, stdin_capture = _resolve_main_data_source(
-        data,
+    resolved_data, source_plan = _resolve_session_sources(
+        data=data,
         download_dir=download_dir,
         overwrite=overwrite,
+        load_mode=load_mode_value,
+        table_name=table_name,
+        table_names=table_name_values,
+        active_table=active_table_value,
         startup_activity_messages=startup_activity_messages,
     )
-    logger.info("data source resolved path=%s use_stdin=%s", file_path, use_stdin)
-    try:
-        logger.debug("data file metadata=%s", _file_debug_metadata(file_path))
-    except OSError:
-        logger.exception("failed to stat data file path=%s", file_path)
+    file_paths = resolved_data.paths
+    use_stdin = resolved_data.use_stdin
+    stdin_capture = resolved_data.stdin_capture
+    _log_data_source_metadata(file_paths, use_stdin)
+    _append_load_activity_messages(startup_activity_messages, load_mode_value, source_plan)
 
-    engine = SqlExplorerEngine(
-        data_path=file_path,
-        table_name=table_name,
+    engine_kwargs = _build_engine_kwargs(
+        source_plan=source_plan,
+        load_mode=load_mode_value,
         database=database,
-        default_limit=limit,
-        max_rows_display=max_rows,
+        limit=limit,
+        max_rows=max_rows,
         max_value_chars=max_value_chars,
     )
-    logger.info("engine initialized table=%s database=%s", table_name, database)
+    engine = SqlExplorerEngine(**engine_kwargs)
+    effective_table_name = source_plan.active_table_name
+    logger.info(
+        "engine initialized table=%s database=%s load_mode=%s source_count=%s",
+        effective_table_name,
+        database,
+        load_mode,
+        len(file_paths),
+    )
 
     try:
-        non_interactive_sql = execute
-        if query_file is not None:
-            non_interactive_sql = query_file.read_text(encoding="utf-8").strip()
-            logger.info(
-                "loaded startup query file=%s chars=%s query=%s",
-                query_file,
-                len(non_interactive_sql),
-                truncate_for_log(non_interactive_sql, max_chars=MAX_SQL_LOG_CHARS),
-            )
-        elif non_interactive_sql is not None:
-            logger.info(
-                "startup --execute chars=%s query=%s",
-                len(non_interactive_sql),
-                truncate_for_log(non_interactive_sql, max_chars=MAX_SQL_LOG_CHARS),
-            )
-
-        if no_ui:
-            _run_console_query_and_exit(engine, non_interactive_sql)
-
-        with stdin_io.stdin_tty_for_tui(use_stdin) as can_run_tui:
-            if not can_run_tui:
-                typer.echo(stdin_io.STDIN_TTY_FALLBACK_MESSAGE)
-                logger.info("stdin tty unavailable, falling back to console mode")
-                _run_console_query_and_exit(engine, non_interactive_sql)
-            if non_interactive_sql is None:
-                logger.info("launching tui with default startup query")
-                SqlExplorerTui(
-                    engine,
-                    startup_activity_messages=startup_activity_messages,
-                    log_file_path=str(log_path) if log_path is not None else None,
-                ).run()
-            else:
-                logger.info("launching tui with startup query chars=%s", len(non_interactive_sql))
-                SqlExplorerTui(
-                    engine,
-                    startup_activity_messages=startup_activity_messages,
-                    startup_query=non_interactive_sql,
-                    log_file_path=str(log_path) if log_path is not None else None,
-                ).run()
+        startup_sql = _resolve_startup_query(execute, query_file)
+        _run_engine_session(
+            engine=engine,
+            startup_activity_messages=startup_activity_messages,
+            log_path=log_path,
+            use_stdin=use_stdin,
+            no_ui=no_ui,
+            startup_sql=startup_sql,
+        )
     finally:
         logger.info("shutdown begin")
         engine.close()

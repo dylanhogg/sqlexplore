@@ -16,6 +16,15 @@ which-python:
 clean:
 	rm -rf .venv
 
+run-example-multiple-tables:
+	uv run python -m sqlexplore.app --load-mode tables data/example.parquet https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
+	
+run-example-multiple-union:
+	uv run sqlexplore --load-mode union \
+		https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet \
+		https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00001-of-00017.parquet \
+		https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00002-of-00017.parquet
+
 run-example-local:
 	uv run python -m sqlexplore.app data/example.parquet
 

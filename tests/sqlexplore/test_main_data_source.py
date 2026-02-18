@@ -911,6 +911,131 @@ def test_main_reads_query_file_for_no_ui_execution(monkeypatch: pytest.MonkeyPat
     assert captured["closed"] is True
 
 
+def test_resolve_data_sources_rejects_stdin_mixed_with_files(tmp_path: Path) -> None:
+    local_file = tmp_path / "data.csv"
+    local_file.write_text("x\n1\n", encoding="utf-8")
+    resolve_data_sources = getattr(app_module, "_resolve_data_sources")
+    with pytest.raises(typer.BadParameter, match="Cannot combine '-' stdin source with other data files"):
+        resolve_data_sources(
+            ["-", str(local_file)],
+            download_dir=tmp_path,
+            overwrite=False,
+            startup_activity_messages=[],
+        )
+
+
+def test_resolve_data_sources_strips_local_file_paths(tmp_path: Path) -> None:
+    local_file = tmp_path / "data.csv"
+    local_file.write_text("x\n1\n", encoding="utf-8")
+    resolve_data_sources = getattr(app_module, "_resolve_data_sources")
+    out = resolve_data_sources(
+        [f"   {local_file}   "],
+        download_dir=tmp_path,
+        overwrite=False,
+        startup_activity_messages=[],
+    )
+    assert out.paths == (local_file.resolve(),)
+    assert out.use_stdin is False
+    assert out.stdin_capture is None
+
+
+def test_main_passes_multiple_data_sources_to_engine_in_union_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    left = tmp_path / "left.csv"
+    right = tmp_path / "right.csv"
+    left.write_text("x\n1\n", encoding="utf-8")
+    right.write_text("x\n2\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    class FakeEngine:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["kwargs"] = kwargs
+            self.table_name = kwargs["table_name"]
+            self.default_query = f'SELECT * FROM "{self.table_name}" LIMIT 100'
+            self.max_value_chars = int(kwargs["max_value_chars"])
+
+        def run_sql(self, sql_text: str, remember: bool = True) -> app_module.EngineResponse:
+            captured["run_sql"] = (sql_text, remember)
+            return app_module.EngineResponse(status="ok", message="ok")
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
+
+    result = runner.invoke(app_module.app, [str(left), str(right), "--no-ui"])
+
+    assert result.exit_code == 0
+    kwargs = cast(dict[str, Any], captured["kwargs"])
+    assert kwargs["data_path"] == left.resolve()
+    assert kwargs["load_mode"] == "union"
+    sources = cast(tuple[Any, ...], kwargs["data_sources"])
+    assert len(sources) == 2
+    assert [source.path for source in sources] == [left.resolve(), right.resolve()]
+    assert [source.table_name for source in sources] == ["data", "data"]
+    assert kwargs.get("active_table") is None
+    assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
+    assert captured["closed"] is True
+
+
+def test_main_passes_table_mode_source_names_and_active_table(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    left = tmp_path / "left.csv"
+    right = tmp_path / "right.csv"
+    left.write_text("x\n1\n", encoding="utf-8")
+    right.write_text("x\n2\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    class FakeEngine:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["kwargs"] = kwargs
+            self.table_name = cast(str, kwargs.get("active_table") or kwargs["table_name"])
+            self.default_query = f'SELECT * FROM "{self.table_name}" LIMIT 100'
+            self.max_value_chars = int(kwargs["max_value_chars"])
+
+        def run_sql(self, sql_text: str, remember: bool = True) -> app_module.EngineResponse:
+            captured["run_sql"] = (sql_text, remember)
+            return app_module.EngineResponse(status="ok", message="ok")
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
+
+    result = runner.invoke(
+        app_module.app,
+        [
+            str(left),
+            str(right),
+            "--load-mode",
+            "tables",
+            "--table-name",
+            "left_table",
+            "--table-name",
+            "right_table",
+            "--active-table",
+            "right_table",
+            "--no-ui",
+        ],
+    )
+
+    assert result.exit_code == 0
+    kwargs = cast(dict[str, Any], captured["kwargs"])
+    assert kwargs["data_path"] == left.resolve()
+    assert kwargs["load_mode"] == "tables"
+    assert kwargs["active_table"] == "right_table"
+    sources = cast(tuple[Any, ...], kwargs["data_sources"])
+    assert [source.table_name for source in sources] == ["left_table", "right_table"]
+    assert captured["run_sql"] == ('SELECT * FROM "right_table" LIMIT 100', False)
+    assert captured["closed"] is True
+
+
 def test_render_console_response_renders_generated_sql_and_table_and_error_status() -> None:
     render_console_response = getattr(app_module, "_render_console_response")
     output = StringIO()
