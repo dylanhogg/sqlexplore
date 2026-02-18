@@ -9,6 +9,7 @@ import typer
 from typer.testing import CliRunner
 
 import sqlexplore.app as app_module
+import sqlexplore.cli.data_paths as data_paths_module
 import sqlexplore.core.engine as engine_module
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -69,46 +70,40 @@ class _ExplodingHttpResponse:
 
 
 def test_format_byte_count_scales_kb_mb_and_gb() -> None:
-    format_byte_count = getattr(app_module, "_format_byte_count")
-    assert format_byte_count(1024) == "1.0 KB"
-    assert format_byte_count(1024 * 1024) == "1.0 MB"
-    assert format_byte_count(1024 * 1024 * 1024) == "1.0 GB"
+    assert data_paths_module.format_byte_count(1024) == "1.0 KB"
+    assert data_paths_module.format_byte_count(1024 * 1024) == "1.0 MB"
+    assert data_paths_module.format_byte_count(1024 * 1024 * 1024) == "1.0 GB"
 
 
 def test_remote_filename_defaults_to_sanitized_host_when_path_is_empty() -> None:
-    remote_filename = getattr(app_module, "_remote_filename")
-    assert remote_filename("https://example.com:8443") == "example.com-8443.parquet"
+    assert data_paths_module.remote_filename("https://example.com:8443") == "example.com-8443.parquet"
 
 
 def test_emit_download_log_can_skip_activity_collection(monkeypatch: pytest.MonkeyPatch) -> None:
-    emit_download_log = getattr(app_module, "_emit_download_log")
     calls: list[tuple[str, bool]] = []
 
     def fake_echo(message: str, err: bool = False) -> None:
         calls.append((message, err))
 
-    monkeypatch.setattr(app_module.typer, "echo", fake_echo)
+    monkeypatch.setattr(data_paths_module.typer, "echo", fake_echo)
     messages: list[str] = []
-    emit_download_log("hello", messages, echo=True, include_activity=False)
+    data_paths_module.emit_download_log("hello", messages, echo=True, include_activity=False)
 
     assert calls == [("hello", False)]
     assert messages == []
 
 
 def test_remote_content_length_handles_missing_and_invalid_headers() -> None:
-    remote_content_length = getattr(app_module, "_remote_content_length")
-
     class _NoHeaders:
         headers: Any = None
 
-    assert remote_content_length(_NoHeaders()) is None
-    assert remote_content_length(type("R", (), {"headers": {"Content-Length": "bad"}})()) is None
-    assert remote_content_length(type("R", (), {"headers": {"Content-Length": "0"}})()) is None
-    assert remote_content_length(type("R", (), {"headers": {"Content-Length": "7"}})()) == 7
+    assert data_paths_module.remote_content_length(_NoHeaders()) is None
+    assert data_paths_module.remote_content_length(type("R", (), {"headers": {"Content-Length": "bad"}})()) is None
+    assert data_paths_module.remote_content_length(type("R", (), {"headers": {"Content-Length": "0"}})()) is None
+    assert data_paths_module.remote_content_length(type("R", (), {"headers": {"Content-Length": "7"}})()) == 7
 
 
 def test_ensure_download_dir_wraps_mkdir_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    ensure_download_dir = getattr(app_module, "_ensure_download_dir")
     target = tmp_path / "downloads"
     real_mkdir = Path.mkdir
 
@@ -119,7 +114,7 @@ def test_ensure_download_dir_wraps_mkdir_oserror(tmp_path: Path, monkeypatch: py
 
     monkeypatch.setattr(Path, "mkdir", failing_mkdir)
     with pytest.raises(typer.BadParameter, match=r"Download directory is not writable"):
-        ensure_download_dir(target)
+        data_paths_module.ensure_download_dir(target)
 
 
 def test_download_remote_data_file_writes_file_and_logs(
@@ -133,10 +128,8 @@ def test_download_remote_data_file_writes_file_and_logs(
         assert request.full_url == url
         return _FakeHttpResponse(payload)
 
-    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
-
-    download_remote = getattr(app_module, "_download_remote_data_file")
-    out_path = download_remote(url, tmp_path, activity_messages=startup_activity_messages)
+    monkeypatch.setattr(data_paths_module, "urlopen", fake_urlopen)
+    out_path = data_paths_module.download_remote_data_file(url, tmp_path, activity_messages=startup_activity_messages)
 
     assert out_path.read_bytes() == payload
     out = capsys.readouterr().out
@@ -157,10 +150,8 @@ def test_download_remote_data_file_does_not_log_progress_lines(
         assert request.full_url == url
         return _FakeHttpResponse(payload, read_chunk_size=5, content_length=len(payload))
 
-    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
-
-    download_remote = getattr(app_module, "_download_remote_data_file")
-    out_path = download_remote(url, tmp_path, activity_messages=startup_activity_messages)
+    monkeypatch.setattr(data_paths_module, "urlopen", fake_urlopen)
+    out_path = data_paths_module.download_remote_data_file(url, tmp_path, activity_messages=startup_activity_messages)
 
     assert out_path.read_bytes() == payload
     out = capsys.readouterr().out
@@ -178,10 +169,8 @@ def test_download_remote_data_file_uses_cached_file_when_overwrite_disabled(
     def fail_urlopen(_: Any) -> _FakeHttpResponse:
         raise AssertionError("urlopen should not be called when a cached file exists and overwrite is disabled")
 
-    monkeypatch.setattr(app_module, "urlopen", fail_urlopen)
-
-    download_remote = getattr(app_module, "_download_remote_data_file")
-    out_path = download_remote("https://example.com/data.parquet", tmp_path)
+    monkeypatch.setattr(data_paths_module, "urlopen", fail_urlopen)
+    out_path = data_paths_module.download_remote_data_file("https://example.com/data.parquet", tmp_path)
 
     assert out_path == existing.resolve()
     assert existing.read_bytes() == existing_contents
@@ -203,9 +192,8 @@ def test_download_remote_data_file_overwrites_when_enabled(
         assert request.full_url == url
         return _FakeHttpResponse(payload)
 
-    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
-    download_remote = getattr(app_module, "_download_remote_data_file")
-    out_path = download_remote(url, tmp_path, overwrite=True)
+    monkeypatch.setattr(data_paths_module, "urlopen", fake_urlopen)
+    out_path = data_paths_module.download_remote_data_file(url, tmp_path, overwrite=True)
 
     assert out_path == existing.resolve()
     assert existing.read_bytes() == payload
@@ -216,9 +204,8 @@ def test_download_remote_data_file_overwrites_when_enabled(
 def test_download_remote_data_file_rejects_file_path_as_download_dir(tmp_path: Path) -> None:
     occupied_path = tmp_path / "occupied"
     occupied_path.write_text("not-a-directory", encoding="utf-8")
-    download_remote = getattr(app_module, "_download_remote_data_file")
     with pytest.raises(typer.BadParameter, match=r"Download path is not a directory"):
-        download_remote("https://example.com/data.parquet", occupied_path)
+        data_paths_module.download_remote_data_file("https://example.com/data.parquet", occupied_path)
 
 
 def test_download_remote_data_file_cleans_up_partial_file_when_stream_fails(
@@ -231,11 +218,10 @@ def test_download_remote_data_file_cleans_up_partial_file_when_stream_fails(
         assert request.full_url == url
         return _ExplodingHttpResponse([b"PAR1", b"ABCD"])
 
-    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
-    download_remote = getattr(app_module, "_download_remote_data_file")
+    monkeypatch.setattr(data_paths_module, "urlopen", fake_urlopen)
 
     with pytest.raises(typer.BadParameter, match=r"Failed to download data file"):
-        download_remote(url, tmp_path)
+        data_paths_module.download_remote_data_file(url, tmp_path)
     assert expected.exists() is False
 
 
@@ -249,11 +235,10 @@ def test_download_remote_data_file_wraps_error_before_progress_bar_exists(
         assert request.full_url == url
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(app_module, "urlopen", fail_urlopen)
-    download_remote = getattr(app_module, "_download_remote_data_file")
+    monkeypatch.setattr(data_paths_module, "urlopen", fail_urlopen)
 
     with pytest.raises(typer.BadParameter, match=r"Failed to download data file"):
-        download_remote(url, tmp_path)
+        data_paths_module.download_remote_data_file(url, tmp_path)
     assert expected.exists() is False
 
 
@@ -266,44 +251,38 @@ def test_download_remote_data_file_wraps_error_before_progress_bar_exists(
     ],
 )
 def test_remote_filename_accepts_csv_tsv_and_txt(url: str, expected: str) -> None:
-    remote_filename = getattr(app_module, "_remote_filename")
-    assert remote_filename(url) == expected
+    assert data_paths_module.remote_filename(url) == expected
 
 
 def test_resolve_data_path_rejects_remote_unsupported_extension() -> None:
-    resolve_data_path = getattr(app_module, "_resolve_data_path")
     with pytest.raises(typer.BadParameter, match=r"Remote URL must end with \.csv, \.tsv, \.txt, \.parquet, or \.pq\."):
-        resolve_data_path("https://example.com/data.json", download_dir=Path("/tmp"))
+        data_paths_module.resolve_data_path("https://example.com/data.json", download_dir=Path("/tmp"))
 
 
 def test_resolve_data_path_rejects_empty_value(tmp_path: Path) -> None:
-    resolve_data_path = getattr(app_module, "_resolve_data_path")
     with pytest.raises(typer.BadParameter, match=r"Data path cannot be empty"):
-        resolve_data_path("   ", download_dir=tmp_path)
+        data_paths_module.resolve_data_path("   ", download_dir=tmp_path)
 
 
 def test_resolve_data_path_rejects_missing_local_file(tmp_path: Path) -> None:
-    resolve_data_path = getattr(app_module, "_resolve_data_path")
     with pytest.raises(typer.BadParameter, match=r"Data file not found"):
-        resolve_data_path(str(tmp_path / "missing.csv"), download_dir=tmp_path)
+        data_paths_module.resolve_data_path(str(tmp_path / "missing.csv"), download_dir=tmp_path)
 
 
 def test_resolve_data_path_rejects_directory_path(tmp_path: Path) -> None:
-    resolve_data_path = getattr(app_module, "_resolve_data_path")
     folder = tmp_path / "folder"
     folder.mkdir()
     with pytest.raises(typer.BadParameter, match=r"Data path is not a file"):
-        resolve_data_path(str(folder), download_dir=tmp_path)
+        data_paths_module.resolve_data_path(str(folder), download_dir=tmp_path)
 
 
 def test_resolve_data_path_rejects_unreadable_local_file(tmp_path: Path) -> None:
-    resolve_data_path = getattr(app_module, "_resolve_data_path")
     data_path = (tmp_path / "data.csv").resolve()
     data_path.write_text("x\n1\n", encoding="utf-8")
     data_path.chmod(0o000)
     try:
         with pytest.raises(typer.BadParameter, match=r"Data file is not readable"):
-            resolve_data_path(str(data_path), download_dir=tmp_path)
+            data_paths_module.resolve_data_path(str(data_path), download_dir=tmp_path)
     finally:
         data_path.chmod(0o600)
 
@@ -357,10 +336,10 @@ def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkey
         def close(self) -> None:
             captured["closed"] = True
 
-    monkeypatch.setattr(app_module, "_download_remote_data_file", fake_download)
+    monkeypatch.setattr(app_module.data_paths, "download_remote_data_file", fake_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
-    result = runner.invoke(app_module.app, [remote_url, "--no-ui"])
+    result = runner.invoke(app_module.app, ["--data", remote_url, "--no-ui"])
 
     assert result.exit_code == 0
     assert captured["download_url"] == remote_url
@@ -411,10 +390,10 @@ def test_main_passes_overwrite_flag_for_remote_url(tmp_path: Path, monkeypatch: 
         def close(self) -> None:
             captured["closed"] = True
 
-    monkeypatch.setattr(app_module, "_download_remote_data_file", fake_download)
+    monkeypatch.setattr(app_module.data_paths, "download_remote_data_file", fake_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
-    result = runner.invoke(app_module.app, [remote_url, "--overwrite", "--no-ui"])
+    result = runner.invoke(app_module.app, ["--data", remote_url, "--overwrite", "--no-ui"])
 
     assert result.exit_code == 0
     assert captured["download_url"] == remote_url
@@ -465,12 +444,12 @@ def test_main_passes_custom_download_dir_for_remote_url(tmp_path: Path, monkeypa
         def close(self) -> None:
             captured["closed"] = True
 
-    monkeypatch.setattr(app_module, "_download_remote_data_file", fake_download)
+    monkeypatch.setattr(app_module.data_paths, "download_remote_data_file", fake_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
     result = runner.invoke(
         app_module.app,
-        [remote_url, "--download-dir", str(custom_download_dir), "--no-ui"],
+        ["--data", remote_url, "--download-dir", str(custom_download_dir), "--no-ui"],
     )
 
     assert result.exit_code == 0
@@ -534,11 +513,11 @@ def test_main_passes_download_logs_to_tui_on_start(tmp_path: Path, monkeypatch: 
         def run(self) -> None:
             captured["run"] = True
 
-    monkeypatch.setattr(app_module, "_download_remote_data_file", fake_download)
+    monkeypatch.setattr(app_module.data_paths, "download_remote_data_file", fake_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
 
-    result = runner.invoke(app_module.app, [remote_url])
+    result = runner.invoke(app_module.app, ["--data", remote_url])
 
     assert result.exit_code == 0
     assert captured["data_path"] == downloaded
@@ -585,14 +564,86 @@ def test_main_keeps_local_path_behavior(tmp_path: Path, monkeypatch: pytest.Monk
         def close(self) -> None:
             captured["closed"] = True
 
-    monkeypatch.setattr(app_module, "_download_remote_data_file", fail_download)
+    monkeypatch.setattr(app_module.data_paths, "download_remote_data_file", fail_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
-    result = runner.invoke(app_module.app, [str(local_path), "--no-ui"])
+    result = runner.invoke(app_module.app, ["--data", str(local_path), "--no-ui"])
 
     assert result.exit_code == 0
     assert captured["data_path"] == local_path.resolve()
     assert captured["closed"] is True
+
+
+def test_main_passes_multiple_data_paths_to_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    first = tmp_path / "a.csv"
+    second = tmp_path / "b.csv"
+    first.write_text("x\n1\n", encoding="utf-8")
+    second.write_text("x\n2\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    class FakeEngine:
+        def __init__(
+            self,
+            data_path: Path,
+            table_name: str,
+            database: str,
+            default_limit: int,
+            max_rows_display: int,
+            max_value_chars: int,
+            data_paths: tuple[Path, ...] | None = None,
+        ) -> None:
+            _ = table_name
+            _ = database
+            _ = default_limit
+            _ = max_rows_display
+            captured["data_path"] = data_path
+            captured["data_paths"] = data_paths
+            self.default_query = 'SELECT * FROM "data" LIMIT 100'
+            self.max_value_chars = max_value_chars
+
+        def run_sql(self, sql_text: str, remember: bool = True) -> app_module.EngineResponse:
+            captured["run_sql"] = (sql_text, remember)
+            return app_module.EngineResponse(status="ok", message="ok")
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
+    result = runner.invoke(
+        app_module.app,
+        ["--data", str(first), "--data", str(second), "--no-ui"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["data_path"] == first.resolve()
+    assert captured["data_paths"] == (first.resolve(), second.resolve())
+    assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
+    assert captured["closed"] is True
+
+
+def test_main_rejects_stdin_marker_mixed_with_other_data_values(tmp_path: Path) -> None:
+    runner = CliRunner()
+    data_path = tmp_path / "a.csv"
+    data_path.write_text("x\n1\n", encoding="utf-8")
+
+    result = runner.invoke(app_module.app, ["--data", "-", "--data", str(data_path)], input="alpha\n")
+    assert result.exit_code == 2
+    assert "When using stdin, provide only --data -." in _strip_ansi(result.output)
+
+
+def test_main_exits_on_schema_mismatch_for_multiple_data_sources(tmp_path: Path) -> None:
+    runner = CliRunner()
+    first = tmp_path / "a.csv"
+    second = tmp_path / "b.csv"
+    first.write_text("city,x\na,1\n", encoding="utf-8")
+    second.write_text("city,x\nb,nope\n", encoding="utf-8")
+
+    result = runner.invoke(app_module.app, ["--data", str(first), "--data", str(second), "--no-ui"])
+    assert result.exit_code == 2
+    output = _strip_ansi(result.output)
+    assert "Schema mismatch in source 2" in output
+    assert second.name in output
 
 
 def _patch_stdin_fake_engine(
@@ -661,7 +712,7 @@ def test_main_reads_stdin_when_data_arg_is_dash(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
     _patch_stdin_tty(monkeypatch, can_run_tui=True)
 
-    result = runner.invoke(app_module.app, ["-"], input="alpha\nbeta\n")
+    result = runner.invoke(app_module.app, ["--data", "-"], input="alpha\nbeta\n")
 
     assert result.exit_code == 0
     data_path = cast(Path, captured["data_path"])
@@ -725,7 +776,7 @@ def test_main_runs_no_ui_for_stdin_when_requested(monkeypatch: pytest.MonkeyPatc
     _patch_stdin_fake_engine(monkeypatch, captured)
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
 
-    result = runner.invoke(app_module.app, ["-", "--no-ui"], input="a\nb\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--no-ui"], input="a\nb\n")
 
     assert result.exit_code == 0
     assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
@@ -756,7 +807,7 @@ def test_main_uses_execute_as_startup_query_in_tui(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
     _patch_stdin_tty(monkeypatch, can_run_tui=True)
 
-    result = runner.invoke(app_module.app, ["-", "--execute", sql], input="alpha\npython\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--execute", sql], input="alpha\npython\n")
 
     assert result.exit_code == 0
     assert captured["tui_run"] is True
@@ -784,7 +835,7 @@ def test_main_runs_execute_in_no_ui_mode(monkeypatch: pytest.MonkeyPatch) -> Non
     _patch_stdin_fake_engine(monkeypatch, captured)
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
 
-    result = runner.invoke(app_module.app, ["-", "--execute", sql, "--no-ui"], input="alpha\npython\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--execute", sql, "--no-ui"], input="alpha\npython\n")
 
     assert result.exit_code == 0
     assert captured["run_input"] == sql
@@ -811,7 +862,7 @@ def test_main_runs_execute_when_tty_is_unavailable(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
     _patch_stdin_tty(monkeypatch, can_run_tui=False)
 
-    result = runner.invoke(app_module.app, ["-", "--execute", sql], input="alpha\npython\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--execute", sql], input="alpha\npython\n")
 
     assert result.exit_code == 0
     assert captured["run_input"] == sql
@@ -824,7 +875,7 @@ def test_main_strips_ansi_escape_sequences_from_stdin(monkeypatch: pytest.Monkey
     captured: dict[str, Any] = {}
 
     _patch_stdin_fake_engine(monkeypatch, captured, capture_text=True)
-    result = runner.invoke(app_module.app, ["-", "--no-ui"], input="\x1b[31malpha\x1b[0m\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--no-ui"], input="\x1b[31malpha\x1b[0m\n")
 
     assert result.exit_code == 0
     assert captured["data_text"] == "alpha\n"
@@ -849,7 +900,7 @@ def test_main_falls_back_to_no_ui_when_tty_is_unavailable(monkeypatch: pytest.Mo
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
     _patch_stdin_tty(monkeypatch, can_run_tui=False)
 
-    result = runner.invoke(app_module.app, ["-"], input="alpha\n")
+    result = runner.invoke(app_module.app, ["--data", "-"], input="alpha\n")
 
     assert result.exit_code == 0
     assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
@@ -862,7 +913,7 @@ def test_main_rejects_missing_data_when_stdin_is_tty(monkeypatch: pytest.MonkeyP
         def isatty(self) -> bool:
             return True
 
-    monkeypatch.setattr(app_module.sys, "stdin", cast(Any, _TtyStdin()))
+    monkeypatch.setattr(app_module.stdin_io.sys, "stdin", cast(Any, _TtyStdin()))
     with pytest.raises(typer.BadParameter, match=app_module.stdin_io.STDIN_MISSING_SOURCE_ERROR):
         app_module.main(
             data=None,
@@ -882,7 +933,7 @@ def test_main_rejects_missing_data_when_stdin_is_tty(monkeypatch: pytest.MonkeyP
 
 def test_main_rejects_empty_stdin_input() -> None:
     runner = CliRunner()
-    result = runner.invoke(app_module.app, ["-"], input="")
+    result = runner.invoke(app_module.app, ["--data", "-"], input="")
     assert result.exit_code == 2
     assert app_module.stdin_io.STDIN_EMPTY_ERROR in result.output
 
@@ -904,7 +955,7 @@ def test_main_reads_query_file_for_no_ui_execution(monkeypatch: pytest.MonkeyPat
     query_file.write_text("  SELECT line FROM data  \n", encoding="utf-8")
 
     _patch_stdin_fake_engine(monkeypatch, captured)
-    result = runner.invoke(app_module.app, ["-", "--file", str(query_file), "--no-ui"], input="alpha\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--file", str(query_file), "--no-ui"], input="alpha\n")
 
     assert result.exit_code == 0
     assert captured["run_input"] == "SELECT line FROM data"
@@ -912,7 +963,6 @@ def test_main_reads_query_file_for_no_ui_execution(monkeypatch: pytest.MonkeyPat
 
 
 def test_render_console_response_renders_generated_sql_and_table_and_error_status() -> None:
-    render_console_response = getattr(app_module, "_render_console_response")
     output = StringIO()
     console = app_module.Console(file=output, width=120, color_system=None, force_terminal=False)
 
@@ -930,7 +980,7 @@ def test_render_console_response_renders_generated_sql_and_table_and_error_statu
             truncated=True,
         ),
     )
-    exit_code = render_console_response(console, response, max_value_chars=5)
+    exit_code = getattr(app_module, "_render_console_response")(console, response, max_value_chars=5)
 
     assert exit_code == 1
     text = output.getvalue()
@@ -942,12 +992,11 @@ def test_render_console_response_renders_generated_sql_and_table_and_error_statu
 
 
 def test_render_console_response_returns_zero_without_message_panel() -> None:
-    render_console_response = getattr(app_module, "_render_console_response")
     output = StringIO()
     console = app_module.Console(file=output, width=100, color_system=None, force_terminal=False)
 
     response = app_module.EngineResponse(status="ok", message="")
-    assert render_console_response(console, response, max_value_chars=10) == 0
+    assert getattr(app_module, "_render_console_response")(console, response, max_value_chars=10) == 0
     assert output.getvalue() == ""
 
 

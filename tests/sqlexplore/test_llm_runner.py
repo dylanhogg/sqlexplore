@@ -73,6 +73,9 @@ class _FakeEngine:
     def row_count(self) -> int:
         return 0
 
+    def startup_tables(self) -> list[tuple[str, str, str, int]]:
+        return []
+
     def table_response(self, columns: list[str], rows: list[tuple[object, ...]], message: str) -> EngineResponse:
         _ = columns
         _ = rows

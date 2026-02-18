@@ -31,6 +31,7 @@ USAGE_LLM = "/llm-query <natural language query>"
 USAGE_LLM_HISTORY = "/llm-history [n]"
 USAGE_LLM_SHOW = "/llm-show <trace_id>"
 USAGE_SCHEMA = "/schema"
+USAGE_TABLES = "/tables"
 USAGE_SAMPLE = "/sample [n]"
 USAGE_FILTER = "/filter <where condition>"
 USAGE_SORT = "/sort <order expressions>"
@@ -336,6 +337,14 @@ def cmd_schema(engine: CommandEngine, args: str) -> EngineResponse:
         return err
     rows = [(str(r[0]), str(r[1]), str(r[2])) for r in engine.schema_rows]
     return engine.table_response(["column", "type", "nullable"], rows, "Schema")
+
+
+def cmd_tables(engine: CommandEngine, args: str) -> EngineResponse:
+    err = require_no_args(args, USAGE_TABLES)
+    if err is not None:
+        return err
+    rows = [(role, table_name, source, row_count) for role, table_name, source, row_count in engine.startup_tables()]
+    return engine.table_response(["role", "table", "source", "rows"], rows, "Loaded tables")
 
 
 def cmd_profile(engine: CommandEngine, args: str) -> EngineResponse:

@@ -107,25 +107,20 @@ def llm_trace_context(trace_id: str | None) -> Iterator[None]:
         _llm_trace_id_var.reset(token)
 
 
-def _env_values(env: Mapping[str, str] | None = None) -> Mapping[str, str]:
-    return os.environ if env is None else env
-
-
-def resolve_llm_model(env: Mapping[str, str] | None = None) -> str:
-    model = _env_values(env).get(SQLEXPLORE_LLM_MODEL_ENV_VAR, "").strip()
+def resolve_llm_model() -> str:
+    model = os.environ.get(SQLEXPLORE_LLM_MODEL_ENV_VAR, "").strip()
     return model or DEFAULT_LLM_MODEL
 
 
-def resolve_llm_api_key_env_var(env: Mapping[str, str] | None = None) -> str | None:
-    values = _env_values(env)
+def resolve_llm_api_key_env_var() -> str | None:
     for env_var in LLM_API_KEY_ENV_VARS:
-        if values.get(env_var, "").strip():
+        if os.environ.get(env_var, "").strip():
             return env_var
     return None
 
 
-def validate_llm_api_key(env: Mapping[str, str] | None = None) -> str | None:
-    if resolve_llm_api_key_env_var(env) is not None:
+def validate_llm_api_key() -> str | None:
+    if resolve_llm_api_key_env_var() is not None:
         return None
     env_vars = ", ".join(LLM_API_KEY_ENV_VARS)
     return f"LLM API key not found in environment. Set one of: {env_vars}."

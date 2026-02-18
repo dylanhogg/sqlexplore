@@ -30,6 +30,16 @@ from sqlexplore.core.engine_models import (
 )
 from sqlexplore.core.logging_utils import get_logger, log_event, new_trace_id, truncate_for_log
 from sqlexplore.core.result_utils import format_scalar, result_column_types, result_columns, sql_literal
+from sqlexplore.core.source_union import (
+    SchemaSignature,
+    StartupTableInfo,
+    count_table_rows,
+    format_schema_mismatch,
+    normalize_data_paths,
+    schema_signature_from_rows,
+    source_view_name,
+    union_sql,
+)
 from sqlexplore.core.sql_templates import (
     DEFAULT_LOAD_QUERY_TEMPLATE,
     TXT_LOAD_QUERY_TEMPLATE,
@@ -50,15 +60,18 @@ __all__ = [
     "QueryResult",
     "ResultStatus",
     "STATUS_STYLE_BY_RESULT",
+    "StartupTableInfo",
     "SqlExplorerEngine",
     "app_version",
     "flatten_struct_paths",
     "format_scalar",
+    "format_schema_mismatch",
     "is_struct_type",
     "is_struct_type_name",
     "is_varchar_type",
     "parse_struct_fields",
     "result_columns",
+    "schema_signature_from_rows",
     "sort_cell_key",
 ]
 
@@ -204,55 +217,124 @@ class SqlExplorerEngine:
         default_limit: int,
         max_rows_display: int,
         max_value_chars: int,
+        data_paths: tuple[Path, ...] | None = None,
     ) -> None:
+        normalized_paths = normalize_data_paths(data_path, data_paths)
         logger.info(
-            "engine init start data_path=%s table_name=%s database=%s default_limit=%s max_rows_display=%s "
+            "engine init start data_paths=%s table_name=%s database=%s default_limit=%s max_rows_display=%s "
             "max_value_chars=%s",
-            data_path,
+            normalized_paths,
             table_name,
             database,
             default_limit,
             max_rows_display,
             max_value_chars,
         )
-        self.data_path = data_path
+        self.data_paths = normalized_paths
+        self.data_path = self.data_paths[0]
         self.table_name = table_name.replace('"', "")
         self.database = database
         self.default_limit = max(1, default_limit)
         self.max_rows_display = max(1, max_rows_display)
         self.max_value_chars = max(8, max_value_chars)
+        self.source_view_names: tuple[str, ...] = ()
+        self._union_source_sql = ""
+        self._startup_tables: tuple[StartupTableInfo, ...] = ()
 
         self.conn = duckdb.connect(database=database)
-        self.executed_sql: list[str] = []
-        self.query_history: list[QueryHistoryEntry] = []
-        self.last_sql = self.default_query
-        self.last_result_sql: str | None = None
+        try:
+            self.executed_sql: list[str] = []
+            self.query_history: list[QueryHistoryEntry] = []
+            self.last_sql = self.default_query
+            self.last_result_sql: str | None = None
 
-        reader = _detect_reader(self.data_path)
-        source_sql = f"{reader.function_name}({sql_literal(str(self.data_path))}{reader.args})"
+            self._load_data_views()
+
+            self._schema_rows: list[tuple[Any, ...]] = []
+            self.columns: list[str] = []
+            self.column_types: dict[str, str] = {}
+            self.struct_fields_by_column: dict[str, tuple[StructField, ...]] = {}
+            self.struct_paths_by_column: dict[str, tuple[StructPath, ...]] = {}
+            self.column_lookup: dict[str, str] = {}
+            self.refresh_schema()
+
+            self._completion_catalog = EngineCompletionCatalog(self)
+            self._command_specs = build_command_specs(self, self._completion_catalog)
+            self._command_lookup = index_command_specs(self._command_specs)
+            self._completion_engine = CompletionEngine(self)
+        except Exception:
+            self.conn.close()
+            raise
+        logger.info("engine init complete columns=%s", len(self.columns))
+
+    def _load_source_view(self, source_index: int, data_path: Path) -> str:
+        view_name = source_view_name(self.table_name, source_index)
+        reader = _detect_reader(data_path)
+        source_sql = f"{reader.function_name}({sql_literal(str(data_path))}{reader.args})"
         load_query = render_load_query(source_sql, reader.query_template)
         logger.debug(
-            "engine data load reader=%s source_sql=%s load_query=%s",
+            "engine source load source_index=%s source_view=%s reader=%s source_sql=%s load_query=%s",
+            source_index + 1,
+            view_name,
             reader.function_name,
             truncate_for_log(source_sql, max_chars=MAX_SQL_LOG_CHARS),
             truncate_for_log(load_query, max_chars=MAX_SQL_LOG_CHARS),
         )
+        self.conn.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+        self.conn.execute(f'CREATE VIEW "{view_name}" AS {load_query}')
+        return view_name
+
+    def _schema_signature_for_table(self, table_name: str) -> SchemaSignature:
+        schema_rows = self.conn.execute(f'DESCRIBE "{table_name}"').fetchall()
+        normalized_rows = [tuple(row) for row in schema_rows]
+        return schema_signature_from_rows(normalized_rows)
+
+    def _validate_source_schemas(self, source_views: tuple[str, ...]) -> None:
+        expected_schema = self._schema_signature_for_table(source_views[0])
+        for source_index, source_view in enumerate(source_views[1:], start=2):
+            actual_schema = self._schema_signature_for_table(source_view)
+            if actual_schema == expected_schema:
+                continue
+            source_label = str(self.data_paths[source_index - 1])
+            raise typer.BadParameter(
+                format_schema_mismatch(
+                    expected_schema,
+                    actual_schema,
+                    source_index=source_index,
+                    source_label=source_label,
+                )
+            )
+
+    def _refresh_startup_tables(self) -> None:
+        source_rows = tuple(
+            StartupTableInfo(
+                role="source",
+                table_name=source_view,
+                source=str(source_path),
+                row_count=count_table_rows(self.conn, source_view),
+            )
+            for source_view, source_path in zip(self.source_view_names, self.data_paths, strict=False)
+        )
+        union_source = self._union_source_sql or ", ".join(self.source_view_names)
+        union_row = StartupTableInfo(
+            role="union",
+            table_name=self.table_name,
+            source=union_source,
+            row_count=count_table_rows(self.conn, self.table_name),
+        )
+        self._startup_tables = (*source_rows, union_row)
+
+    def _load_data_views(self) -> None:
         self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
-        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {load_query}')
-
-        self._schema_rows: list[tuple[Any, ...]] = []
-        self.columns: list[str] = []
-        self.column_types: dict[str, str] = {}
-        self.struct_fields_by_column: dict[str, tuple[StructField, ...]] = {}
-        self.struct_paths_by_column: dict[str, tuple[StructPath, ...]] = {}
-        self.column_lookup: dict[str, str] = {}
-        self.refresh_schema()
-
-        self._completion_catalog = EngineCompletionCatalog(self)
-        self._command_specs = build_command_specs(self, self._completion_catalog)
-        self._command_lookup = index_command_specs(self._command_specs)
-        self._completion_engine = CompletionEngine(self)
-        logger.info("engine init complete columns=%s", len(self.columns))
+        source_views = tuple(
+            self._load_source_view(source_index, source_path)
+            for source_index, source_path in enumerate(self.data_paths)
+        )
+        self._validate_source_schemas(source_views)
+        self.source_view_names = source_views
+        self._union_source_sql = union_sql(source_views)
+        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {self._union_source_sql}')
+        self._refresh_startup_tables()
 
     @property
     def default_query(self) -> str:
@@ -284,24 +366,19 @@ class SqlExplorerEngine:
             return {}
         return {str(item[0]): item[1] for item in description if len(item) >= 2}
 
-    @classmethod
+    @staticmethod
     def _build_struct_metadata(
-        cls,
         column_type_objects: dict[str, Any],
     ) -> tuple[dict[str, tuple[StructField, ...]], dict[str, tuple[StructPath, ...]]]:
         struct_fields_by_column: dict[str, tuple[StructField, ...]] = {}
         struct_paths_by_column: dict[str, tuple[StructPath, ...]] = {}
         for column_name, dtype in column_type_objects.items():
-            fields = cls._struct_fields_for_type(dtype)
+            fields = parse_struct_fields(dtype)
             if not fields:
                 continue
             struct_fields_by_column[column_name] = fields
             struct_paths_by_column[column_name] = flatten_struct_paths(fields)
         return struct_fields_by_column, struct_paths_by_column
-
-    @staticmethod
-    def _struct_fields_for_type(dtype: Any) -> tuple[StructField, ...]:
-        return parse_struct_fields(dtype)
 
     def _invalidate_completion_caches(self) -> None:
         if hasattr(self, "_completion_catalog"):
@@ -318,14 +395,14 @@ class SqlExplorerEngine:
     def has_helper_command(self, raw_name: str) -> bool:
         return self.lookup_command(raw_name) is not None
 
-    def _command_usage_lines(self) -> list[str]:
-        return command_usage_lines(self._command_specs)
-
     def row_count(self) -> int:
-        out = self.conn.execute(f'SELECT COUNT(*) FROM "{self.table_name}"').fetchone()
-        if out is None:
-            return 0
-        return int(out[0])
+        return count_table_rows(self.conn, self.table_name)
+
+    def startup_tables(self) -> list[tuple[str, str, str, int]]:
+        return [
+            (table_info.role, table_info.table_name, table_info.source, table_info.row_count)
+            for table_info in self._startup_tables
+        ]
 
     def schema_preview(self, max_columns: int = 24) -> str:
         rows = self.row_count()
@@ -362,12 +439,12 @@ class SqlExplorerEngine:
                 "Helper Commands",
             ]
         )
-        head.extend(self._command_usage_lines())
+        head.extend(command_usage_lines(self._command_specs))
         return "\n".join(head)
 
     def help_text(self) -> str:
         lines = ["Run standard SQL directly. Helper commands:"]
-        lines.extend(self._command_usage_lines())
+        lines.extend(command_usage_lines(self._command_specs))
         lines.extend(
             [
                 "",
@@ -388,14 +465,11 @@ class SqlExplorerEngine:
         )
         return "\n".join(lines)
 
-    def _resolve_column(self, raw_column: str) -> str | None:
+    def resolve_column(self, raw_column: str) -> str | None:
         candidate = raw_column.strip()
         if candidate.startswith('"') and candidate.endswith('"') and len(candidate) > 1:
             candidate = candidate[1:-1].replace('""', '"')
         return self.column_lookup.get(candidate.lower())
-
-    def resolve_column(self, raw_column: str) -> str | None:
-        return self._resolve_column(raw_column)
 
     @property
     def schema_rows(self) -> list[tuple[Any, ...]]:
@@ -406,7 +480,7 @@ class SqlExplorerEngine:
             return rows, False
         return rows[: self.max_rows_display], True
 
-    def _table_response(self, columns: list[str], rows: list[tuple[Any, ...]], message: str) -> EngineResponse:
+    def table_response(self, columns: list[str], rows: list[tuple[Any, ...]], message: str) -> EngineResponse:
         shown, truncated = self._display_rows(rows)
         result = QueryResult(
             sql="",
@@ -418,9 +492,6 @@ class SqlExplorerEngine:
             truncated=truncated,
         )
         return EngineResponse(status="ok", message=message, result=result)
-
-    def table_response(self, columns: list[str], rows: list[tuple[Any, ...]], message: str) -> EngineResponse:
-        return self._table_response(columns, rows, message)
 
     def _append_history(
         self,
@@ -520,8 +591,7 @@ class SqlExplorerEngine:
             total_rows=len(rows),
             truncated=truncated,
         )
-        out_of_rows = len(rows)
-        out_of_rows = max(out_of_rows, self.row_count())
+        out_of_rows = max(len(rows), self.row_count())
         message = f"{len(shown):,}/{out_of_rows:,} rows shown in {elapsed_ms:.1f} ms"
         if truncated:
             message += f" (row display limit={self.max_rows_display})"

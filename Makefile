@@ -17,19 +17,25 @@ clean:
 	rm -rf .venv
 
 run-example-local:
-	uv run python -m sqlexplore.app data/example.parquet
+	uv run python -m sqlexplore.app --data data/example.parquet
 
 run-example-http:
-	uv run python -m sqlexplore.app https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
+	uv run python -m sqlexplore.app --data https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
+
+run-example-multiple-union:
+	uv run sqlexplore \
+		--data https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet \
+		--data https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00001-of-00017.parquet \
+		--data https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00002-of-00017.parquet
 
 run-example-images-1:
-	uv run sqlexplore https://huggingface.co/datasets/mteb/tiny-imagenet/resolve/main/data/valid-00000-of-00001-70d52db3c749a935.parquet
+	uv run sqlexplore --data https://huggingface.co/datasets/mteb/tiny-imagenet/resolve/main/data/valid-00000-of-00001-70d52db3c749a935.parquet
 
 run-example-images-2:
-	uv run sqlexplore https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
+	uv run sqlexplore --data https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet
 
 run-example-mteb-1:
-	uv run sqlexplore https://huggingface.co/datasets/mteb/tweet_sentiment_extraction/resolve/main/data/train-00000-of-00001.parquet
+	uv run sqlexplore --data https://huggingface.co/datasets/mteb/tweet_sentiment_extraction/resolve/main/data/train-00000-of-00001.parquet
 
 run-example-pipe-1:
 	ps aux | uv run sqlexplore
@@ -38,10 +44,10 @@ run-example-pipe-2:
 	ps aux | uv run sqlexplore --execute "SELECT * FROM data WHERE line ILIKE '%python%' LIMIT 100"
 
 run-as-tool:
-	uv run sqlexplore data/example.parquet
+	uv run sqlexplore --data data/example.parquet
 
 run-as-docker:
-	docker compose run --rm app gnaf.parquet
+	docker compose run --rm app --data gnaf.parquet
 
 docker-build:
 	docker compose build --no-cache

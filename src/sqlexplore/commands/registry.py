@@ -34,6 +34,7 @@ from .handlers import (
     USAGE_SCHEMA,
     USAGE_SORT,
     USAGE_SUMMARY,
+    USAGE_TABLES,
     USAGE_TOP,
     USAGE_VALUES,
     build_sql_helper_handler,
@@ -59,6 +60,7 @@ from .handlers import (
     cmd_save,
     cmd_schema,
     cmd_summary,
+    cmd_tables,
     cmd_top,
     cmd_values,
     response,
@@ -178,6 +180,7 @@ def build_command_specs(engine: CommandEngine, completion: CommandCompletionCata
             _bind(engine, cmd_llm_show),
         ),
         CommandSpec("/schema", USAGE_SCHEMA, "Show dataset schema.", _bind(engine, cmd_schema)),
+        CommandSpec("/tables", USAGE_TABLES, "Show loaded source and union tables.", _bind(engine, cmd_tables)),
         *[
             CommandSpec(
                 item.name,

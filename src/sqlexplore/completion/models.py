@@ -55,6 +55,7 @@ SQL_KEYWORDS = [
 DEFAULT_HELPER_COMMANDS = (
     "/help",
     "/schema",
+    "/tables",
     "/sample",
     "/filter",
     "/sort",

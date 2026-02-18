@@ -9,7 +9,18 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
+- Union multiple input files into a single table
+    - Fix total row count on `SELECT * FROM "data_src_3" LIMIT 10`
+    - If only 1 data source, don't have a union table, just use the single source table
+    - Show loaded file(s) and row counts via /list-tables command
+    - Review tables names when multiple: remove default "data" and auto-generate all names?
+    - Fix bad union `Binder Error: Set operations can only apply to expressions with the same number of result columns`: uv run python -m sqlexplore.app data/example.parquet https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
+- ! Enable reproduce this results in a bash file that installs `uv` and runs `sqlexplore` with the same data files and SQL query
+- Make default /rows up to 1,000,000 (?)
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
+- Test all startup options and CLI args
+- Enable resize columns in results pane
+- Update README docs
 - Migrate logging from file to sqlite database
 - Textual double click to select row? & Cmd+A to select all? (maybe not? codex://threads/019c6a4a-4e25-7842-a7db-356a983f93b7)
 - Improve persistent file log life cycle management (rotate, cleanup, use for /llm-history, etc.)
@@ -19,15 +30,16 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Distinguish /describe from /summary
 - Enable /history results to be copied to clipboard
 - Add CLI arg for default number of rows to display (i.e. limit)
-- Integrate LiteLLM
-    - /llm query "my query in natural language"
-    - /llm suggest
-    - /llm fix
-    - /llm explain
-    - /llm optimize
-    - /llm summarize
-    - /llm chat
-    - /llm categoise col
+- LiteLLM, return error messages, e.g. litellm.exceptions.ContextWindowExceededError: litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - Input tokens exceed the configured limit of 272000 tokens. Your messages resulted in 2211484 tokens. Please reduce the length of the messages.
+- Integrate more LLM features:
+    - /llm-describe-data
+    - /llm-suggest-sql
+    - /llm-analyse-data
+    - /llm-fix-sql
+    - /llm-explain-sql
+    - /llm-summarize-data
+    - /llm-chat-data
+    - /llm-categoise-data col
 
 ## App code quality
 
@@ -117,6 +129,3 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Support SQLite
 - Support Excel
 - Ensure multipart parquet files are supported
-
-
-

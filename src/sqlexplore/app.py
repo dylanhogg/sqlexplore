@@ -1,19 +1,12 @@
-import re
-import sys
-import time
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 import typer
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from tqdm import tqdm
 
-from sqlexplore.cli import stdin_io
+from sqlexplore.cli import data_args, data_paths, stdin_io
 from sqlexplore.core.engine import (
     STATUS_STYLE_BY_RESULT,
     EngineResponse,
@@ -31,8 +24,6 @@ app = typer.Typer(
     pretty_exceptions_show_locals=True,
 )
 
-_REMOTE_FILENAME_SAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
-_REMOTE_DOWNLOAD_CHUNK_SIZE = 5 * 1024 * 1024
 MAX_SQL_LOG_CHARS = 8_000
 logger = get_logger(__name__)
 
@@ -47,195 +38,6 @@ __all__ = [
     "app_version",
     "main",
 ]
-
-
-def _is_http_url(value: str) -> bool:
-    parsed = urlparse(value.strip())
-    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
-
-
-def _default_download_dir() -> Path:
-    return Path(typer.get_app_dir("sqlexplore")) / "downloads"
-
-
-def _format_byte_count(size_bytes: int) -> str:
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    if size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    if size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
-
-
-def _remote_filename(url: str) -> str:
-    parsed = urlparse(url)
-    file_name = Path(parsed.path).name
-    if not file_name:
-        host_name = _REMOTE_FILENAME_SAFE_CHARS_RE.sub("-", parsed.netloc).strip("-")
-        file_name = f"{host_name or 'download'}.parquet"
-    if Path(file_name).suffix.lower() not in {".csv", ".tsv", ".txt", ".parquet", ".pq"}:
-        raise typer.BadParameter("Remote URL must end with .csv, .tsv, .txt, .parquet, or .pq.")
-    return file_name
-
-
-def _emit_download_log(
-    message: str,
-    activity_messages: list[str] | None = None,
-    *,
-    err: bool = False,
-    echo: bool = True,
-    include_activity: bool = True,
-) -> None:
-    if echo:
-        typer.echo(message, err=err)
-    if include_activity and activity_messages is not None:
-        activity_messages.append(message)
-    if err:
-        logger.error(message)
-    else:
-        logger.info(message)
-
-
-def _remote_content_length(response: Any) -> int | None:
-    headers = getattr(response, "headers", None)
-    if headers is None:
-        return None
-    raw_value = headers.get("Content-Length")
-    if raw_value is None:
-        return None
-    try:
-        content_length = int(raw_value)
-    except (TypeError, ValueError):
-        return None
-    return content_length if content_length > 0 else None
-
-
-def _ensure_download_dir(download_dir: Path) -> Path:
-    expanded = download_dir.expanduser()
-    if expanded.exists() and not expanded.is_dir():
-        raise typer.BadParameter(f"Download path is not a directory: {expanded}")
-    try:
-        expanded.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise typer.BadParameter(f"Download directory is not writable: {expanded}: {exc}") from exc
-    return expanded.resolve()
-
-
-def _download_remote_data_file(
-    url: str,
-    download_dir: Path,
-    overwrite: bool = False,
-    activity_messages: list[str] | None = None,
-) -> Path:
-    destination_dir = _ensure_download_dir(download_dir)
-    file_name = _remote_filename(url)
-    destination = (destination_dir / file_name).resolve()
-
-    _emit_download_log(f"[download] remote={url}", activity_messages)
-    _emit_download_log(f"[download] local={destination}", activity_messages)
-
-    if destination.exists() and not overwrite:
-        _emit_download_log(
-            (
-                f"[download] Cached local download file {destination.name} already exists, skipping download. "
-                "Use --overwrite to replace it."
-            ),
-            activity_messages,
-        )
-        return destination
-    elif destination.exists() and overwrite:
-        _emit_download_log(f"[download] Overwriting local download file {destination.name}", activity_messages)
-
-    start = time.perf_counter()
-    progress_bar: Any | None = None
-    try:
-        request = Request(url, headers={"User-Agent": "sqlexplore"})
-        with urlopen(request) as response, destination.open("wb") as file_handle:
-            total_bytes = _remote_content_length(response)
-            progress_bar = tqdm(
-                total=total_bytes,
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
-                desc="download",
-                leave=False,
-                disable=not sys.stderr.isatty(),
-            )
-            while True:
-                chunk = response.read(_REMOTE_DOWNLOAD_CHUNK_SIZE)
-                if not chunk:
-                    break
-                file_handle.write(chunk)
-                progress_bar.update(len(chunk))
-    except Exception as exc:
-        destination.unlink(missing_ok=True)
-        logger.exception(
-            "download failed url=%s destination=%s overwrite=%s",
-            url,
-            destination,
-            overwrite,
-        )
-        raise typer.BadParameter(f"Failed to download data file from {url} to {destination}: {exc}") from exc
-    finally:
-        if progress_bar is not None:
-            progress_bar.close()
-
-    elapsed_seconds = time.perf_counter() - start
-    file_size_bytes = destination.stat().st_size
-    _emit_download_log(
-        (
-            "[download] Complete "
-            f"elapsed={elapsed_seconds:.3f}s "
-            f"size={_format_byte_count(file_size_bytes)} ({file_size_bytes:,} bytes) "
-        ),
-        activity_messages,
-    )
-    return destination
-
-
-def _resolve_data_path(
-    data: str,
-    download_dir: Path,
-    overwrite: bool = False,
-    startup_activity_messages: list[str] | None = None,
-) -> Path:
-    value = data.strip()
-    if not value:
-        raise typer.BadParameter("Data path cannot be empty.")
-    if _is_http_url(value):
-        resolved_download_dir = download_dir.expanduser().resolve()
-        logger.info("resolving remote data source url=%s download_dir=%s", value, resolved_download_dir)
-        return _download_remote_data_file(
-            value,
-            resolved_download_dir,
-            overwrite=overwrite,
-            activity_messages=startup_activity_messages,
-        )
-
-    file_path = Path(value).expanduser().resolve()
-    logger.info("resolving local data source path=%s", file_path)
-    if not file_path.exists():
-        raise typer.BadParameter(f"Data file not found: {file_path}")
-    if not file_path.is_file():
-        raise typer.BadParameter(f"Data path is not a file: {file_path}")
-    try:
-        with file_path.open("rb"):
-            pass
-    except OSError as exc:
-        raise typer.BadParameter(f"Data file is not readable: {file_path}: {exc}") from exc
-    return file_path
-
-
-def _file_debug_metadata(file_path: Path) -> dict[str, Any]:
-    stat = file_path.stat()
-    return {
-        "path": str(file_path),
-        "suffix": file_path.suffix.lower(),
-        "size_bytes": stat.st_size,
-        "mtime_epoch": stat.st_mtime,
-        "is_symlink": file_path.is_symlink(),
-    }
 
 
 def _render_console_response(console: Console, response: EngineResponse, max_value_chars: int) -> int:
@@ -277,29 +79,6 @@ def _run_console_query_and_exit(engine: SqlExplorerEngine, query: str | None) ->
     raise typer.Exit(code=exit_code)
 
 
-def _resolve_main_data_source(
-    data: str | None,
-    download_dir: Path,
-    overwrite: bool,
-    startup_activity_messages: list[str],
-) -> tuple[Path, bool, stdin_io.StdinCapture | None]:
-    use_stdin = stdin_io.should_use_stdin(data)
-    if data is None and not use_stdin:
-        raise typer.BadParameter(stdin_io.STDIN_MISSING_SOURCE_ERROR)
-    if use_stdin:
-        capture = stdin_io.read_stdin_to_temp_file()
-        startup_activity_messages.append(capture.startup_message)
-        return capture.path, True, capture
-    assert data is not None
-    file_path = _resolve_data_path(
-        data,
-        download_dir=download_dir,
-        overwrite=overwrite,
-        startup_activity_messages=startup_activity_messages,
-    )
-    return file_path, False, None
-
-
 def _version_callback(version: bool) -> None:
     if not version:
         return
@@ -309,9 +88,10 @@ def _version_callback(version: bool) -> None:
 
 @app.command()
 def main(
-    data: str | None = typer.Argument(
+    data: list[str] | None = typer.Option(
         None,
-        help="CSV/TSV/TXT/Parquet local path, HTTP(S) URL, or '-' for stdin text.",
+        "--data",
+        help="Data source path/URL. Repeat --data to load multiple sources. Use --data - for stdin text.",
     ),
     table_name: str = typer.Option("data", "--table", "-t", help="Logical table/view name inside DuckDB."),
     limit: int = typer.Option(100, "--limit", "-l", min=1, help="Default helper query row limit."),
@@ -346,12 +126,12 @@ def main(
     overwrite: bool = typer.Option(
         False,
         "--overwrite",
-        help="When data is an HTTP(S) URL, overwrite existing local download if present.",
+        help="When any --data value is an HTTP(S) URL, overwrite existing local download if present.",
     ),
     download_dir: Path = typer.Option(
-        _default_download_dir(),
+        data_paths.default_download_dir(),
         "--download-dir",
-        help="When data is an HTTP(S) URL, directory used for downloaded files.",
+        help="When any --data value is an HTTP(S) URL, directory used for downloaded files.",
     ),
     version: bool = typer.Option(
         False,
@@ -364,8 +144,9 @@ def main(
     log_path = configure_file_logging()
     logger.info("startup version=%s log_path=%s", app_version(), log_path)
     logger.debug(
-        "startup args data=%s table_name=%s limit=%s max_rows=%s max_value_chars=%s database=%s no_ui=%s overwrite=%s "
-        "download_dir=%s execute_chars=%s query_file=%s",
+        "startup args data_count=%s data=%s table_name=%s limit=%s max_rows=%s max_value_chars=%s database=%s "
+        "no_ui=%s overwrite=%s download_dir=%s execute_chars=%s query_file=%s",
+        len(data) if data is not None else 0,
         data,
         table_name,
         limit,
@@ -383,26 +164,42 @@ def main(
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
     startup_activity_messages: list[str] = []
-    file_path, use_stdin, stdin_capture = _resolve_main_data_source(
+    resolved_data_sources = data_args.resolve_main_data_sources(
         data,
         download_dir=download_dir,
         overwrite=overwrite,
         startup_activity_messages=startup_activity_messages,
     )
-    logger.info("data source resolved path=%s use_stdin=%s", file_path, use_stdin)
-    try:
-        logger.debug("data file metadata=%s", _file_debug_metadata(file_path))
-    except OSError:
-        logger.exception("failed to stat data file path=%s", file_path)
+    resolved_paths = resolved_data_sources.paths
+    use_stdin = resolved_data_sources.use_stdin
+    stdin_capture = resolved_data_sources.stdin_capture
+    first_data_path = resolved_paths[0]
+    logger.info("data sources resolved count=%s use_stdin=%s paths=%s", len(resolved_paths), use_stdin, resolved_paths)
+    for file_path in resolved_paths:
+        try:
+            logger.debug("data file metadata=%s", data_paths.file_debug_metadata(file_path))
+        except OSError:
+            logger.exception("failed to stat data file path=%s", file_path)
 
-    engine = SqlExplorerEngine(
-        data_path=file_path,
-        table_name=table_name,
-        database=database,
-        default_limit=limit,
-        max_rows_display=max_rows,
-        max_value_chars=max_value_chars,
-    )
+    if len(resolved_paths) == 1:
+        engine = SqlExplorerEngine(
+            data_path=first_data_path,
+            table_name=table_name,
+            database=database,
+            default_limit=limit,
+            max_rows_display=max_rows,
+            max_value_chars=max_value_chars,
+        )
+    else:
+        engine = SqlExplorerEngine(
+            data_path=first_data_path,
+            data_paths=resolved_paths,
+            table_name=table_name,
+            database=database,
+            default_limit=limit,
+            max_rows_display=max_rows,
+            max_value_chars=max_value_chars,
+        )
     logger.info("engine initialized table=%s database=%s", table_name, database)
 
     try:
