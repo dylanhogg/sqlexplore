@@ -13,7 +13,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
     - Fix total row count on `SELECT * FROM "data_src_3" LIMIT 10`
     - If only 1 data source, don't have a union table, just use the single source table
 - ! Enable reproduce this results in a bash file that installs `uv` and runs `sqlexplore` with the same data files and SQL query
-- Make default /rows up to 1,000,000 (?)
+- Make default /rows 1,000,000  (?)
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
 - Test all startup options and CLI args
 - Enable resize columns in results pane

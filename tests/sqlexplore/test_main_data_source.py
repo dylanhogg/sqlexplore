@@ -657,6 +657,21 @@ def test_main_exits_on_schema_mismatch_for_multiple_data_sources(tmp_path: Path)
     assert second.name in output
 
 
+def test_main_exits_cleanly_for_corrupt_or_misnamed_parquet_file(tmp_path: Path) -> None:
+    runner = CliRunner()
+    bad_parquet = tmp_path / "broken.parquet"
+    bad_parquet.write_text("hello", encoding="utf-8")
+
+    result = runner.invoke(app_module.app, ["--data", str(bad_parquet), "--no-ui"])
+
+    assert result.exit_code == 2
+    output = _strip_ansi(result.output)
+    assert "Failed to load source 1" in output
+    assert bad_parquet.name in output
+    assert "Hint: file extension says Parquet" in output
+    assert "Traceback" not in output
+
+
 def _patch_stdin_fake_engine(
     monkeypatch: pytest.MonkeyPatch,
     captured: dict[str, Any],
