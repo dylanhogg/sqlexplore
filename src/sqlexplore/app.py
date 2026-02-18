@@ -277,19 +277,19 @@ def _run_console_query_and_exit(engine: SqlExplorerEngine, query: str | None) ->
     raise typer.Exit(code=exit_code)
 
 
-def _resolve_main_data_source(
+def _resolve_main_data_sources(
     data: str | None,
     download_dir: Path,
     overwrite: bool,
     startup_activity_messages: list[str],
-) -> tuple[Path, bool, stdin_io.StdinCapture | None]:
+) -> tuple[tuple[Path, ...], bool, stdin_io.StdinCapture | None]:
     use_stdin = stdin_io.should_use_stdin(data)
     if data is None and not use_stdin:
         raise typer.BadParameter(stdin_io.STDIN_MISSING_SOURCE_ERROR)
     if use_stdin:
         capture = stdin_io.read_stdin_to_temp_file()
         startup_activity_messages.append(capture.startup_message)
-        return capture.path, True, capture
+        return (capture.path,), True, capture
     assert data is not None
     file_path = _resolve_data_path(
         data,
@@ -297,7 +297,23 @@ def _resolve_main_data_source(
         overwrite=overwrite,
         startup_activity_messages=startup_activity_messages,
     )
-    return file_path, False, None
+    return (file_path,), False, None
+
+
+def _resolve_main_data_source(
+    data: str | None,
+    download_dir: Path,
+    overwrite: bool,
+    startup_activity_messages: list[str],
+) -> tuple[Path, bool, stdin_io.StdinCapture | None]:
+    data_paths, use_stdin, stdin_capture = _resolve_main_data_sources(
+        data,
+        download_dir=download_dir,
+        overwrite=overwrite,
+        startup_activity_messages=startup_activity_messages,
+    )
+    assert data_paths
+    return data_paths[0], use_stdin, stdin_capture
 
 
 def _version_callback(version: bool) -> None:

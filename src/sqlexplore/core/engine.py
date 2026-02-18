@@ -50,15 +50,18 @@ __all__ = [
     "QueryResult",
     "ResultStatus",
     "STATUS_STYLE_BY_RESULT",
+    "StartupTableInfo",
     "SqlExplorerEngine",
     "app_version",
     "flatten_struct_paths",
     "format_scalar",
+    "format_schema_mismatch",
     "is_struct_type",
     "is_struct_type_name",
     "is_varchar_type",
     "parse_struct_fields",
     "result_columns",
+    "schema_signature_from_rows",
     "sort_cell_key",
 ]
 
@@ -107,6 +110,42 @@ class StructField:
 
 
 StructPath = tuple[str, str]
+SchemaSignature = tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StartupTableInfo:
+    role: Literal["source", "union"]
+    table_name: str
+    source: str
+    row_count: int
+
+
+def schema_signature_from_rows(rows: list[tuple[Any, ...]]) -> SchemaSignature:
+    return tuple((str(row[0]), str(row[1])) for row in rows)
+
+
+def format_schema_mismatch(
+    expected: SchemaSignature,
+    actual: SchemaSignature,
+    *,
+    source_index: int,
+    source_label: str,
+) -> str:
+    prefix = f"Schema mismatch in source {source_index}: {source_label}"
+    if len(expected) != len(actual):
+        return f"{prefix}. Expected {len(expected)} columns, got {len(actual)}."
+    for column_index, (expected_col, actual_col) in enumerate(zip(expected, actual), start=1):
+        expected_name, expected_type = expected_col
+        actual_name, actual_type = actual_col
+        if expected_name != actual_name:
+            return f"{prefix}. Column {column_index} name mismatch: expected {expected_name}, got {actual_name}."
+        if expected_type != actual_type:
+            return (
+                f"{prefix}. Column {column_index} type mismatch for {expected_name}: "
+                f"expected {expected_type}, got {actual_type}."
+            )
+    return f"{prefix}. Source schema does not match expected schema."
 
 
 def _detect_reader(file_path: Path) -> FileReader:
@@ -204,23 +243,29 @@ class SqlExplorerEngine:
         default_limit: int,
         max_rows_display: int,
         max_value_chars: int,
+        data_paths: tuple[Path, ...] | None = None,
     ) -> None:
+        normalized_paths = self._normalize_data_paths(data_path, data_paths)
         logger.info(
-            "engine init start data_path=%s table_name=%s database=%s default_limit=%s max_rows_display=%s "
+            "engine init start data_paths=%s table_name=%s database=%s default_limit=%s max_rows_display=%s "
             "max_value_chars=%s",
-            data_path,
+            normalized_paths,
             table_name,
             database,
             default_limit,
             max_rows_display,
             max_value_chars,
         )
-        self.data_path = data_path
+        self.data_paths = normalized_paths
+        self.data_path = self.data_paths[0]
         self.table_name = table_name.replace('"', "")
         self.database = database
         self.default_limit = max(1, default_limit)
         self.max_rows_display = max(1, max_rows_display)
         self.max_value_chars = max(8, max_value_chars)
+        self.source_view_names: tuple[str, ...] = ()
+        self._union_source_sql = ""
+        self._startup_tables: tuple[StartupTableInfo, ...] = ()
 
         self.conn = duckdb.connect(database=database)
         self.executed_sql: list[str] = []
@@ -228,17 +273,7 @@ class SqlExplorerEngine:
         self.last_sql = self.default_query
         self.last_result_sql: str | None = None
 
-        reader = _detect_reader(self.data_path)
-        source_sql = f"{reader.function_name}({sql_literal(str(self.data_path))}{reader.args})"
-        load_query = render_load_query(source_sql, reader.query_template)
-        logger.debug(
-            "engine data load reader=%s source_sql=%s load_query=%s",
-            reader.function_name,
-            truncate_for_log(source_sql, max_chars=MAX_SQL_LOG_CHARS),
-            truncate_for_log(load_query, max_chars=MAX_SQL_LOG_CHARS),
-        )
-        self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
-        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {load_query}')
+        self._load_data_views()
 
         self._schema_rows: list[tuple[Any, ...]] = []
         self.columns: list[str] = []
@@ -253,6 +288,100 @@ class SqlExplorerEngine:
         self._command_lookup = index_command_specs(self._command_specs)
         self._completion_engine = CompletionEngine(self)
         logger.info("engine init complete columns=%s", len(self.columns))
+
+    @staticmethod
+    def _normalize_data_paths(data_path: Path, data_paths: tuple[Path, ...] | None) -> tuple[Path, ...]:
+        if data_paths is None:
+            return (data_path.expanduser().resolve(),)
+        normalized = tuple(path.expanduser().resolve() for path in data_paths)
+        if not normalized:
+            raise typer.BadParameter("At least one data file is required.")
+        return normalized
+
+    def _source_view_name(self, source_index: int) -> str:
+        return f"{self.table_name}_src_{source_index + 1}"
+
+    def _load_source_view(self, source_index: int, data_path: Path) -> str:
+        view_name = self._source_view_name(source_index)
+        reader = _detect_reader(data_path)
+        source_sql = f"{reader.function_name}({sql_literal(str(data_path))}{reader.args})"
+        load_query = render_load_query(source_sql, reader.query_template)
+        logger.debug(
+            "engine source load source_index=%s source_view=%s reader=%s source_sql=%s load_query=%s",
+            source_index + 1,
+            view_name,
+            reader.function_name,
+            truncate_for_log(source_sql, max_chars=MAX_SQL_LOG_CHARS),
+            truncate_for_log(load_query, max_chars=MAX_SQL_LOG_CHARS),
+        )
+        self.conn.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+        self.conn.execute(f'CREATE VIEW "{view_name}" AS {load_query}')
+        return view_name
+
+    def _schema_signature_for_table(self, table_name: str) -> SchemaSignature:
+        schema_rows = self.conn.execute(f'DESCRIBE "{table_name}"').fetchall()
+        normalized_rows = [tuple(row) for row in schema_rows]
+        return schema_signature_from_rows(normalized_rows)
+
+    def _validate_source_schemas(self, source_views: tuple[str, ...]) -> None:
+        if not source_views:
+            raise typer.BadParameter("At least one data file is required.")
+        expected_schema = self._schema_signature_for_table(source_views[0])
+        for source_index, source_view in enumerate(source_views[1:], start=2):
+            actual_schema = self._schema_signature_for_table(source_view)
+            if actual_schema == expected_schema:
+                continue
+            source_label = str(self.data_paths[source_index - 1])
+            raise typer.BadParameter(
+                format_schema_mismatch(
+                    expected_schema,
+                    actual_schema,
+                    source_index=source_index,
+                    source_label=source_label,
+                )
+            )
+
+    @staticmethod
+    def _union_sql(source_views: tuple[str, ...]) -> str:
+        selects = [f'SELECT * FROM "{source_view}"' for source_view in source_views]
+        return " UNION ALL ".join(selects)
+
+    def _count_table_rows(self, table_name: str) -> int:
+        out = self.conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()
+        if out is None:
+            return 0
+        return int(out[0])
+
+    def _refresh_startup_tables(self) -> None:
+        source_rows = tuple(
+            StartupTableInfo(
+                role="source",
+                table_name=source_view,
+                source=str(source_path),
+                row_count=self._count_table_rows(source_view),
+            )
+            for source_view, source_path in zip(self.source_view_names, self.data_paths, strict=False)
+        )
+        union_source = self._union_source_sql or ", ".join(self.source_view_names)
+        union_row = StartupTableInfo(
+            role="union",
+            table_name=self.table_name,
+            source=union_source,
+            row_count=self._count_table_rows(self.table_name),
+        )
+        self._startup_tables = (*source_rows, union_row)
+
+    def _load_data_views(self) -> None:
+        self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
+        source_views = tuple(
+            self._load_source_view(source_index, source_path)
+            for source_index, source_path in enumerate(self.data_paths)
+        )
+        self._validate_source_schemas(source_views)
+        self.source_view_names = source_views
+        self._union_source_sql = self._union_sql(source_views)
+        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {self._union_source_sql}')
+        self._refresh_startup_tables()
 
     @property
     def default_query(self) -> str:
@@ -322,10 +451,13 @@ class SqlExplorerEngine:
         return command_usage_lines(self._command_specs)
 
     def row_count(self) -> int:
-        out = self.conn.execute(f'SELECT COUNT(*) FROM "{self.table_name}"').fetchone()
-        if out is None:
-            return 0
-        return int(out[0])
+        return self._count_table_rows(self.table_name)
+
+    def startup_tables(self) -> list[tuple[str, str, str, int]]:
+        return [
+            (table_info.role, table_info.table_name, table_info.source, table_info.row_count)
+            for table_info in self._startup_tables
+        ]
 
     def schema_preview(self, max_columns: int = 24) -> str:
         rows = self.row_count()

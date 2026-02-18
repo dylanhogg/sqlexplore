@@ -221,6 +221,7 @@ def test_help_text_is_generated_from_command_registry(tmp_path: Path) -> None:
         assert engine.lookup_command("/llm-query") is not None
         help_text = engine.help_text()
         assert "/llm-query <natural language query>" in help_text
+        assert "/tables" in help_text
         assert "/sample [n]" in help_text
         assert "/top <column> <n>" in help_text
         assert "/dupes <key_cols_csv> [n] [| where]" in help_text
@@ -256,6 +257,23 @@ def test_help_and_schema_commands_validate_args_and_return_tables(tmp_path: Path
         schema_rows = {tuple(row) for row in schema_out.result.rows}
         assert ("col_name", "VARCHAR", "YES") in schema_rows
         assert ("x", "BIGINT", "YES") in schema_rows
+
+        tables_out = engine.run_input("/tables")
+        assert tables_out.status == "ok"
+        assert tables_out.result is not None
+        assert tables_out.result.columns == ["role", "table", "source", "rows"]
+        table_rows = {tuple(row) for row in tables_out.result.rows}
+        assert ("source", "data_src_1", str(engine.data_path), 3) in table_rows
+        assert (
+            "union",
+            "data",
+            'SELECT * FROM "data_src_1"',
+            3,
+        ) in table_rows
+
+        tables_usage = engine.run_input("/tables extra")
+        assert tables_usage.status == "error"
+        assert tables_usage.message == "Usage: /tables"
     finally:
         engine.close()
 
