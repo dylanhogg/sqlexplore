@@ -139,6 +139,51 @@ def _detect_reader(file_path: Path) -> FileReader:
     raise typer.BadParameter("Only .csv, .tsv, .txt, and .parquet/.pq files are supported.")
 
 
+def _parquet_content_error(error_message: str) -> bool:
+    normalized = error_message.casefold()
+    return any(
+        fragment in normalized
+        for fragment in (
+            "no magic bytes found",
+            "magic bytes",
+            "not a parquet file",
+            "too small to be a parquet file",
+        )
+    )
+
+
+def _load_failure_hint(file_path: Path, error_message: str) -> str:
+    suffix = file_path.suffix.casefold()
+    if suffix in {".parquet", ".pq"} and _parquet_content_error(error_message):
+        return (
+            "Hint: file extension says Parquet, but contents are not valid Parquet "
+            "(corrupt, partial download, or wrong extension)."
+        )
+    return "Hint: verify file format and extension match (.csv, .tsv, .txt, .parquet, .pq)."
+
+
+def _source_load_bad_parameter(
+    *,
+    source_index: int | None,
+    data_path: Path,
+    exc: Exception,
+) -> typer.BadParameter:
+    error_message = " ".join(str(exc).split())
+    source_label = f"source {source_index + 1}" if source_index is not None else "source"
+    hint = _load_failure_hint(data_path, error_message)
+    return typer.BadParameter(f"Failed to load {source_label}: {data_path}\nDuckDB: {error_message}\n{hint}")
+
+
+def _multi_source_load_bad_parameter(data_paths: tuple[Path, ...], exc: Exception) -> typer.BadParameter:
+    error_message = " ".join(str(exc).split())
+    joined_paths = ", ".join(str(path) for path in data_paths)
+    return typer.BadParameter(
+        f"Failed to load data sources: {joined_paths}\n"
+        f"DuckDB: {error_message}\n"
+        "Hint: verify file format and extension match (.csv, .tsv, .txt, .parquet, .pq)."
+    )
+
+
 def is_varchar_type(type_name: str) -> bool:
     upper = type_name.upper()
     return any(marker in upper for marker in ("CHAR", "TEXT", "STRING", "VARCHAR"))
@@ -280,8 +325,17 @@ class SqlExplorerEngine:
             truncate_for_log(source_sql, max_chars=MAX_SQL_LOG_CHARS),
             truncate_for_log(load_query, max_chars=MAX_SQL_LOG_CHARS),
         )
-        self.conn.execute(f'DROP VIEW IF EXISTS "{view_name}"')
-        self.conn.execute(f'CREATE VIEW "{view_name}" AS {load_query}')
+        try:
+            self.conn.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+            self.conn.execute(f'CREATE VIEW "{view_name}" AS {load_query}')
+        except duckdb.Error as exc:
+            logger.exception(
+                "engine source load failed source_index=%s source_path=%s source_view=%s",
+                source_index + 1,
+                data_path,
+                view_name,
+            )
+            raise _source_load_bad_parameter(source_index=source_index, data_path=data_path, exc=exc) from exc
         return view_name
 
     def _schema_signature_for_table(self, table_name: str) -> SchemaSignature:
@@ -290,9 +344,16 @@ class SqlExplorerEngine:
         return schema_signature_from_rows(normalized_rows)
 
     def _validate_source_schemas(self, source_views: tuple[str, ...]) -> None:
-        expected_schema = self._schema_signature_for_table(source_views[0])
+        try:
+            expected_schema = self._schema_signature_for_table(source_views[0])
+        except duckdb.Error as exc:
+            raise _source_load_bad_parameter(source_index=0, data_path=self.data_paths[0], exc=exc) from exc
         for source_index, source_view in enumerate(source_views[1:], start=2):
-            actual_schema = self._schema_signature_for_table(source_view)
+            try:
+                actual_schema = self._schema_signature_for_table(source_view)
+            except duckdb.Error as exc:
+                data_path = self.data_paths[source_index - 1]
+                raise _source_load_bad_parameter(source_index=source_index - 1, data_path=data_path, exc=exc) from exc
             if actual_schema == expected_schema:
                 continue
             source_label = str(self.data_paths[source_index - 1])
@@ -325,16 +386,22 @@ class SqlExplorerEngine:
         self._startup_tables = (*source_rows, union_row)
 
     def _load_data_views(self) -> None:
-        self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
-        source_views = tuple(
-            self._load_source_view(source_index, source_path)
-            for source_index, source_path in enumerate(self.data_paths)
-        )
-        self._validate_source_schemas(source_views)
-        self.source_view_names = source_views
-        self._union_source_sql = union_sql(source_views)
-        self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {self._union_source_sql}')
-        self._refresh_startup_tables()
+        try:
+            self.conn.execute(f'DROP VIEW IF EXISTS "{self.table_name}"')
+            source_views = tuple(
+                self._load_source_view(source_index, source_path)
+                for source_index, source_path in enumerate(self.data_paths)
+            )
+            self._validate_source_schemas(source_views)
+            self.source_view_names = source_views
+            self._union_source_sql = union_sql(source_views)
+            self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {self._union_source_sql}')
+            self._refresh_startup_tables()
+        except duckdb.Error as exc:
+            logger.exception("engine load views failed table=%s sources=%s", self.table_name, self.data_paths)
+            if len(self.data_paths) == 1:
+                raise _source_load_bad_parameter(source_index=None, data_path=self.data_paths[0], exc=exc) from exc
+            raise _multi_source_load_bad_parameter(self.data_paths, exc) from exc
 
     @property
     def default_query(self) -> str:

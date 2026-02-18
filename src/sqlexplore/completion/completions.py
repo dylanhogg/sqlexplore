@@ -486,7 +486,7 @@ class EngineCompletionCatalog:
 
     def _complete_rows(self, args: str, trailing_space: bool) -> list[CompletionItem]:
         del args, trailing_space
-        return self._numeric_completion_items([100, 200, 400, 1000], detail="row display limit")
+        return self._numeric_completion_items([100, 200, 400, 1000, 10000, 100000], detail="row display limit")
 
     def _complete_values(self, args: str, trailing_space: bool) -> list[CompletionItem]:
         del args, trailing_space

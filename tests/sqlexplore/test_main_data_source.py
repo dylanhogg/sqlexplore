@@ -76,7 +76,16 @@ def test_format_byte_count_scales_kb_mb_and_gb() -> None:
 
 
 def test_remote_filename_defaults_to_sanitized_host_when_path_is_empty() -> None:
-    assert data_paths_module.remote_filename("https://example.com:8443") == "example.com-8443.parquet"
+    filename = data_paths_module.remote_filename("https://example.com:8443")
+    assert re.fullmatch(r"example\.com-8443-[0-9a-f]{12}\.parquet", filename)
+
+
+def test_remote_filename_distinguishes_same_basename_from_different_urls() -> None:
+    first = data_paths_module.remote_filename("https://example.com/a/test-00000-of-00001.parquet")
+    second = data_paths_module.remote_filename("https://another.example/b/test-00000-of-00001.parquet")
+    assert first != second
+    assert first.endswith(".parquet")
+    assert second.endswith(".parquet")
 
 
 def test_emit_download_log_can_skip_activity_collection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,7 +171,8 @@ def test_download_remote_data_file_does_not_log_progress_lines(
 def test_download_remote_data_file_uses_cached_file_when_overwrite_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
-    existing = tmp_path / "data.parquet"
+    url = "https://example.com/data.parquet"
+    existing = tmp_path / data_paths_module.remote_filename(url)
     existing_contents = b"PAR1"
     existing.write_bytes(existing_contents)
 
@@ -170,7 +180,7 @@ def test_download_remote_data_file_uses_cached_file_when_overwrite_disabled(
         raise AssertionError("urlopen should not be called when a cached file exists and overwrite is disabled")
 
     monkeypatch.setattr(data_paths_module, "urlopen", fail_urlopen)
-    out_path = data_paths_module.download_remote_data_file("https://example.com/data.parquet", tmp_path)
+    out_path = data_paths_module.download_remote_data_file(url, tmp_path)
 
     assert out_path == existing.resolve()
     assert existing.read_bytes() == existing_contents
@@ -183,10 +193,10 @@ def test_download_remote_data_file_uses_cached_file_when_overwrite_disabled(
 def test_download_remote_data_file_overwrites_when_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
-    existing = tmp_path / "data.parquet"
+    url = "https://example.com/data.parquet"
+    existing = tmp_path / data_paths_module.remote_filename(url)
     existing.write_bytes(b"old")
     payload = b"new-data"
-    url = "https://example.com/data.parquet"
 
     def fake_urlopen(request: Any) -> _FakeHttpResponse:
         assert request.full_url == url
@@ -212,7 +222,7 @@ def test_download_remote_data_file_cleans_up_partial_file_when_stream_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     url = "https://example.com/data.parquet"
-    expected = (tmp_path / "data.parquet").resolve()
+    expected = (tmp_path / data_paths_module.remote_filename(url)).resolve()
 
     def fake_urlopen(request: Any) -> _ExplodingHttpResponse:
         assert request.full_url == url
@@ -229,7 +239,7 @@ def test_download_remote_data_file_wraps_error_before_progress_bar_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     url = "https://example.com/data.parquet"
-    expected = (tmp_path / "data.parquet").resolve()
+    expected = (tmp_path / data_paths_module.remote_filename(url)).resolve()
 
     def fail_urlopen(request: Any) -> _FakeHttpResponse:
         assert request.full_url == url
@@ -243,15 +253,16 @@ def test_download_remote_data_file_wraps_error_before_progress_bar_exists(
 
 
 @pytest.mark.parametrize(
-    "url,expected",
+    "url,expected_suffix",
     [
-        ("https://example.com/data.csv", "data.csv"),
-        ("https://example.com/data.tsv", "data.tsv"),
-        ("https://example.com/data.txt", "data.txt"),
+        ("https://example.com/data.csv", ".csv"),
+        ("https://example.com/data.tsv", ".tsv"),
+        ("https://example.com/data.txt", ".txt"),
     ],
 )
-def test_remote_filename_accepts_csv_tsv_and_txt(url: str, expected: str) -> None:
-    assert data_paths_module.remote_filename(url) == expected
+def test_remote_filename_accepts_csv_tsv_and_txt(url: str, expected_suffix: str) -> None:
+    filename = data_paths_module.remote_filename(url)
+    assert re.fullmatch(rf"data-[0-9a-f]{{12}}{re.escape(expected_suffix)}", filename)
 
 
 def test_resolve_data_path_rejects_remote_unsupported_extension() -> None:
@@ -646,6 +657,21 @@ def test_main_exits_on_schema_mismatch_for_multiple_data_sources(tmp_path: Path)
     assert second.name in output
 
 
+def test_main_exits_cleanly_for_corrupt_or_misnamed_parquet_file(tmp_path: Path) -> None:
+    runner = CliRunner()
+    bad_parquet = tmp_path / "broken.parquet"
+    bad_parquet.write_text("hello", encoding="utf-8")
+
+    result = runner.invoke(app_module.app, ["--data", str(bad_parquet), "--no-ui"])
+
+    assert result.exit_code == 2
+    output = _strip_ansi(result.output)
+    assert "Failed to load source 1" in output
+    assert bad_parquet.name in output
+    assert "Hint: file extension says Parquet" in output
+    assert "Traceback" not in output
+
+
 def _patch_stdin_fake_engine(
     monkeypatch: pytest.MonkeyPatch,
     captured: dict[str, Any],
@@ -919,7 +945,7 @@ def test_main_rejects_missing_data_when_stdin_is_tty(monkeypatch: pytest.MonkeyP
             data=None,
             table_name="data",
             limit=100,
-            max_rows=1000,
+            max_rows=10000,
             max_value_chars=160,
             database=":memory:",
             execute=None,

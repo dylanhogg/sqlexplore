@@ -155,6 +155,7 @@ def test_run_llm_query_with_retry_returns_provider_error() -> None:
     out = run_llm_query_with_retry(engine, "q", "m", deps=deps)
     assert out.status == "provider_error"
     assert out.retry_count == 0
+    assert len(out.llm_call_metrics) == 1
     assert engine.run_sql_calls == []
     assert capture.prompts == ["initial-prompt"]
 
@@ -179,6 +180,7 @@ def test_run_llm_query_with_retry_retries_validation_once_then_succeeds() -> Non
     out = run_llm_query_with_retry(engine, "q", "m", deps=deps)
     assert out.status == "response"
     assert out.retry_count == 1
+    assert len(out.llm_call_metrics) == 2
     assert out.response is not None
     assert out.response.status == "ok"
     assert out.response.generated_sql == 'SELECT * FROM "data" LIMIT 1'
@@ -206,6 +208,7 @@ def test_run_llm_query_with_retry_caps_validation_retries() -> None:
     out = run_llm_query_with_retry(engine, "q", "m", config=LlmRunnerConfig(max_retries=1), deps=deps)
     assert out.status == "invalid_sql"
     assert out.retry_count == 1
+    assert len(out.llm_call_metrics) == 2
     assert out.invalid_sql_detail == "still invalid"
     assert out.generated_sql == "bad-2"
     assert engine.run_sql_calls == []
@@ -235,6 +238,7 @@ def test_run_llm_query_with_retry_retries_runtime_duckdb_error_once() -> None:
     out = run_llm_query_with_retry(engine, "q", "m", deps=deps)
     assert out.status == "response"
     assert out.retry_count == 1
+    assert len(out.llm_call_metrics) == 2
     assert out.response is not None
     assert out.response.status == "ok"
     assert capture.prompts == ["initial-prompt", "repair-prompt::Catalog Error: no such function"]
@@ -263,6 +267,7 @@ def test_run_llm_query_with_retry_does_not_retry_non_duckdb_runtime_error() -> N
     out = run_llm_query_with_retry(engine, "q", "m", deps=deps)
     assert out.status == "response"
     assert out.retry_count == 0
+    assert len(out.llm_call_metrics) == 1
     assert out.response is not None
     assert out.response.status == "error"
     assert capture.prompts == ["initial-prompt"]

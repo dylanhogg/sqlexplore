@@ -95,7 +95,7 @@ def main(
     ),
     table_name: str = typer.Option("data", "--table", "-t", help="Logical table/view name inside DuckDB."),
     limit: int = typer.Option(100, "--limit", "-l", min=1, help="Default helper query row limit."),
-    max_rows: int = typer.Option(1000, "--max-rows", min=1, help="Maximum rows displayed in the result grid."),
+    max_rows: int = typer.Option(10000, "--max-rows", min=1, help="Maximum rows displayed in the result grid."),
     max_value_chars: int = typer.Option(
         160,
         "--max-value-chars",

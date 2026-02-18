@@ -52,3 +52,11 @@ def test_engine_raises_bad_parameter_for_schema_mismatch(tmp_path: Path) -> None
 
     with pytest.raises(typer.BadParameter, match=r"Schema mismatch in source 2"):
         _build_engine((first, second))
+
+
+def test_engine_raises_bad_parameter_for_corrupt_or_misnamed_parquet(tmp_path: Path) -> None:
+    broken = tmp_path / "broken.parquet"
+    broken.write_bytes(b"not-parquet")
+
+    with pytest.raises(typer.BadParameter, match=r"Failed to load source 1"):
+        _build_engine((broken,))
