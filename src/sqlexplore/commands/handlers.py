@@ -21,9 +21,9 @@ from sqlexplore.core.logging_utils import (
     truncate_for_log,
 )
 from sqlexplore.core.result_utils import format_scalar, result_columns, sql_literal
-from sqlexplore.llm.llm_sql import LlmCallMetrics, resolve_llm_model, validate_llm_api_key
+from sqlexplore.llm.llm_sql import resolve_llm_model, validate_llm_api_key
 
-from .llm_runner import run_llm_query_with_retry
+from .llm_runner import llm_activity_lines, run_llm_query_with_retry
 from .protocols import CommandEngine
 
 USAGE_HELP = "/help"
@@ -272,32 +272,6 @@ def _log_llm_result_event(
     log_event("llm.result", payload, logger=logger)
 
 
-def _format_llm_token_count(value: int | None) -> str:
-    return "n/a" if value is None else str(value)
-
-
-def _format_llm_float(value: float | None, precision: int) -> str:
-    return "n/a" if value is None else f"{value:.{precision}f}"
-
-
-def _llm_activity_messages(llm_call_metrics: tuple[LlmCallMetrics, ...]) -> list[tuple[ResultStatus, str]]:
-    if not llm_call_metrics:
-        return []
-    total_attempts = len(llm_call_metrics)
-    messages: list[tuple[ResultStatus, str]] = []
-    for idx, call_metrics in enumerate(llm_call_metrics, start=1):
-        line = (
-            "[llm] "
-            f"attempt={idx}/{total_attempts} "
-            f"request_tokens={_format_llm_token_count(call_metrics.request_tokens)} "
-            f"response_tokens={_format_llm_token_count(call_metrics.response_tokens)} "
-            f"elapsed_secs={_format_llm_float(call_metrics.elapsed_secs, 3)} "
-            f"total_cost_cents={_format_llm_float(call_metrics.total_cost_cents, 4)}"
-        )
-        messages.append(("info", line))
-    return messages
-
-
 def cmd_llm(engine: CommandEngine, args: str) -> EngineResponse:
     nl_query = args.strip()
     if not nl_query:
@@ -320,7 +294,9 @@ def cmd_llm(engine: CommandEngine, args: str) -> EngineResponse:
         return llm_error_response("missing_key")
 
     run_result = run_llm_query_with_retry(engine, nl_query, model, trace_id=trace_id)
-    llm_activity_messages = _llm_activity_messages(run_result.llm_call_metrics)
+    llm_activity_messages: list[tuple[ResultStatus, str]] = [
+        ("info", line) for line in llm_activity_lines(run_result.llm_call_metrics)
+    ]
     if run_result.status == "provider_error":
         _log_llm_result_event(
             trace_id=trace_id,

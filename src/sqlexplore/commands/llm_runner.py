@@ -183,13 +183,18 @@ def _default_runner_deps() -> LlmRunnerDeps:
     )
 
 
-def _fallback_llm_call_metrics() -> LlmCallMetrics:
-    return LlmCallMetrics(
-        request_tokens=None,
-        response_tokens=None,
-        elapsed_secs=None,
-        total_cost_cents=None,
-    )
+def llm_activity_lines(llm_call_metrics: tuple[LlmCallMetrics, ...]) -> list[str]:
+    if not llm_call_metrics:
+        return []
+    total_attempts = len(llm_call_metrics)
+    return [
+        call_metrics.to_activity_line(attempt=idx, total_attempts=total_attempts)
+        for idx, call_metrics in enumerate(llm_call_metrics, start=1)
+    ]
+
+
+def _append_last_call_metrics(llm_call_metrics: list[LlmCallMetrics]) -> None:
+    llm_call_metrics.append(consume_last_llm_call_metrics() or LlmCallMetrics.unknown())
 
 
 def run_llm_query_with_retry(
@@ -222,11 +227,11 @@ def run_llm_query_with_retry(
             try:
                 sql = active_deps.generate_sql(current_prompt, model)
             except Exception:  # noqa: BLE001
-                llm_call_metrics.append(consume_last_llm_call_metrics() or _fallback_llm_call_metrics())
+                _append_last_call_metrics(llm_call_metrics)
                 logger.exception("llm command provider error model=%s retry_count=%s", model, retry_count)
                 return LlmRunResult.provider_error(retry_count, tuple(llm_call_metrics))
 
-            llm_call_metrics.append(consume_last_llm_call_metrics() or _fallback_llm_call_metrics())
+            _append_last_call_metrics(llm_call_metrics)
 
             sql_error = active_deps.validate_generated_sql(sql, engine.table_name)
             if sql_error is not None:

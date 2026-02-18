@@ -71,6 +71,33 @@ class LlmCallMetrics:
     elapsed_secs: float | None
     total_cost_cents: float | None
 
+    @classmethod
+    def unknown(cls, elapsed_secs: float | None = None) -> "LlmCallMetrics":
+        return cls(
+            request_tokens=None,
+            response_tokens=None,
+            elapsed_secs=elapsed_secs,
+            total_cost_cents=None,
+        )
+
+    @staticmethod
+    def _format_optional_int(value: int | None) -> str:
+        return "n/a" if value is None else str(value)
+
+    @staticmethod
+    def _format_optional_float(value: float | None, precision: int) -> str:
+        return "n/a" if value is None else f"{value:.{precision}f}"
+
+    def to_activity_line(self, *, attempt: int, total_attempts: int) -> str:
+        return (
+            "[llm] "
+            f"attempt={attempt}/{total_attempts} "
+            f"request_tokens={self._format_optional_int(self.request_tokens)} "
+            f"response_tokens={self._format_optional_int(self.response_tokens)} "
+            f"elapsed_secs={self._format_optional_float(self.elapsed_secs, 3)} "
+            f"total_cost_cents={self._format_optional_float(self.total_cost_cents, 4)}"
+        )
+
 
 _llm_last_call_metrics_var: ContextVar[LlmCallMetrics | None] = ContextVar("llm_last_call_metrics", default=None)
 
@@ -384,14 +411,7 @@ def generate_sql(prompt: str, model: str) -> str:
         response = litellm_completion(**request_payload)
     except Exception as exc:  # noqa: BLE001
         elapsed_secs = time.perf_counter() - t0
-        _llm_last_call_metrics_var.set(
-            LlmCallMetrics(
-                request_tokens=None,
-                response_tokens=None,
-                elapsed_secs=elapsed_secs,
-                total_cost_cents=None,
-            )
-        )
+        _llm_last_call_metrics_var.set(LlmCallMetrics.unknown(elapsed_secs))
         if trace_id is not None:
             log_event(
                 "llm.response",
