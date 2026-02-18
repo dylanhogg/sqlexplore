@@ -290,8 +290,6 @@ class SqlExplorerEngine:
         return schema_signature_from_rows(normalized_rows)
 
     def _validate_source_schemas(self, source_views: tuple[str, ...]) -> None:
-        if not source_views:
-            raise typer.BadParameter("At least one data file is required.")
         expected_schema = self._schema_signature_for_table(source_views[0])
         for source_index, source_view in enumerate(source_views[1:], start=2):
             actual_schema = self._schema_signature_for_table(source_view)
@@ -397,9 +395,6 @@ class SqlExplorerEngine:
     def has_helper_command(self, raw_name: str) -> bool:
         return self.lookup_command(raw_name) is not None
 
-    def _command_usage_lines(self) -> list[str]:
-        return command_usage_lines(self._command_specs)
-
     def row_count(self) -> int:
         return count_table_rows(self.conn, self.table_name)
 
@@ -444,12 +439,12 @@ class SqlExplorerEngine:
                 "Helper Commands",
             ]
         )
-        head.extend(self._command_usage_lines())
+        head.extend(command_usage_lines(self._command_specs))
         return "\n".join(head)
 
     def help_text(self) -> str:
         lines = ["Run standard SQL directly. Helper commands:"]
-        lines.extend(self._command_usage_lines())
+        lines.extend(command_usage_lines(self._command_specs))
         lines.extend(
             [
                 "",

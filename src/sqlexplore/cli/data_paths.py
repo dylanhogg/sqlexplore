@@ -2,7 +2,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -14,9 +14,6 @@ from sqlexplore.core.logging_utils import get_logger
 REMOTE_FILENAME_SAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
 REMOTE_DOWNLOAD_CHUNK_SIZE = 5 * 1024 * 1024
 logger = get_logger(__name__)
-
-
-type DownloadRemoteFn = Callable[[str, Path, bool, list[str] | None], Path]
 
 
 def is_http_url(value: str) -> bool:
@@ -56,13 +53,9 @@ def emit_download_log(
     err: bool = False,
     echo: bool = True,
     include_activity: bool = True,
-    echo_fn: Callable[..., None] | None = None,
 ) -> None:
     if echo:
-        if echo_fn is None:
-            typer.echo(message, err=err)
-        else:
-            echo_fn(message, err=err)
+        typer.echo(message, err=err)
     if include_activity and activity_messages is not None:
         activity_messages.append(message)
     if err:
@@ -173,8 +166,6 @@ def resolve_data_path(
     download_dir: Path,
     overwrite: bool = False,
     startup_activity_messages: list[str] | None = None,
-    *,
-    download_remote: DownloadRemoteFn | None = None,
 ) -> Path:
     value = data.strip()
     if not value:
@@ -182,7 +173,7 @@ def resolve_data_path(
     if is_http_url(value):
         resolved_download_dir = download_dir.expanduser().resolve()
         logger.info("resolving remote data source url=%s download_dir=%s", value, resolved_download_dir)
-        return (download_remote or download_remote_data_file)(
+        return download_remote_data_file(
             value,
             resolved_download_dir,
             overwrite,

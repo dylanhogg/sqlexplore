@@ -62,6 +62,5 @@ def union_sql(source_views: tuple[str, ...]) -> str:
 
 def count_table_rows(conn: Any, table_name: str) -> int:
     out = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()
-    if out is None:
-        return 0
+    assert out is not None
     return int(out[0])

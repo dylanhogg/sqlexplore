@@ -174,8 +174,6 @@ def main(
     resolved_paths = resolved_data_sources.paths
     use_stdin = resolved_data_sources.use_stdin
     stdin_capture = resolved_data_sources.stdin_capture
-    if not resolved_paths:
-        raise typer.BadParameter("At least one data source is required.")
     first_data_path = resolved_paths[0]
     logger.info("data sources resolved count=%s use_stdin=%s paths=%s", len(resolved_paths), use_stdin, resolved_paths)
     for file_path in resolved_paths:
