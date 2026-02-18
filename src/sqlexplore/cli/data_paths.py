@@ -16,10 +16,6 @@ REMOTE_DOWNLOAD_CHUNK_SIZE = 5 * 1024 * 1024
 logger = get_logger(__name__)
 
 
-type EmitLogFn = Callable[..., None]
-type RequestFactoryFn = Callable[..., Request]
-type UrlOpenFn = Callable[..., Any]
-type IsattyFn = Callable[[], bool]
 type DownloadRemoteFn = Callable[[str, Path, bool, list[str] | None], Path]
 
 
@@ -105,21 +101,16 @@ def download_remote_data_file(
     download_dir: Path,
     overwrite: bool = False,
     activity_messages: list[str] | None = None,
-    *,
-    emit_log: EmitLogFn = emit_download_log,
-    request_factory: RequestFactoryFn = Request,
-    urlopen_fn: UrlOpenFn = urlopen,
-    isatty_fn: IsattyFn = lambda: sys.stderr.isatty(),
 ) -> Path:
     destination_dir = ensure_download_dir(download_dir)
     file_name = remote_filename(url)
     destination = (destination_dir / file_name).resolve()
 
-    emit_log(f"[download] remote={url}", activity_messages)
-    emit_log(f"[download] local={destination}", activity_messages)
+    emit_download_log(f"[download] remote={url}", activity_messages)
+    emit_download_log(f"[download] local={destination}", activity_messages)
 
     if destination.exists() and not overwrite:
-        emit_log(
+        emit_download_log(
             (
                 f"[download] Cached local download file {destination.name} already exists, skipping download. "
                 "Use --overwrite to replace it."
@@ -128,13 +119,13 @@ def download_remote_data_file(
         )
         return destination
     if destination.exists() and overwrite:
-        emit_log(f"[download] Overwriting local download file {destination.name}", activity_messages)
+        emit_download_log(f"[download] Overwriting local download file {destination.name}", activity_messages)
 
     start = time.perf_counter()
     progress_bar: Any | None = None
     try:
-        request = request_factory(url, headers={"User-Agent": "sqlexplore"})
-        with urlopen_fn(request) as response, destination.open("wb") as file_handle:
+        request = Request(url, headers={"User-Agent": "sqlexplore"})
+        with urlopen(request) as response, destination.open("wb") as file_handle:
             total_bytes = remote_content_length(response)
             progress_bar = tqdm(
                 total=total_bytes,
@@ -143,7 +134,7 @@ def download_remote_data_file(
                 unit_divisor=1024,
                 desc="download",
                 leave=False,
-                disable=not isatty_fn(),
+                disable=not sys.stderr.isatty(),
             )
             while True:
                 chunk = response.read(REMOTE_DOWNLOAD_CHUNK_SIZE)
@@ -166,7 +157,7 @@ def download_remote_data_file(
 
     elapsed_seconds = time.perf_counter() - start
     file_size_bytes = destination.stat().st_size
-    emit_log(
+    emit_download_log(
         (
             "[download] Complete "
             f"elapsed={elapsed_seconds:.3f}s "
@@ -183,7 +174,7 @@ def resolve_data_path(
     overwrite: bool = False,
     startup_activity_messages: list[str] | None = None,
     *,
-    download_remote: DownloadRemoteFn = download_remote_data_file,
+    download_remote: DownloadRemoteFn | None = None,
 ) -> Path:
     value = data.strip()
     if not value:
@@ -191,7 +182,7 @@ def resolve_data_path(
     if is_http_url(value):
         resolved_download_dir = download_dir.expanduser().resolve()
         logger.info("resolving remote data source url=%s download_dir=%s", value, resolved_download_dir)
-        return download_remote(
+        return (download_remote or download_remote_data_file)(
             value,
             resolved_download_dir,
             overwrite,

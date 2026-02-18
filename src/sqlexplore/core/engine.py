@@ -368,24 +368,19 @@ class SqlExplorerEngine:
             return {}
         return {str(item[0]): item[1] for item in description if len(item) >= 2}
 
-    @classmethod
+    @staticmethod
     def _build_struct_metadata(
-        cls,
         column_type_objects: dict[str, Any],
     ) -> tuple[dict[str, tuple[StructField, ...]], dict[str, tuple[StructPath, ...]]]:
         struct_fields_by_column: dict[str, tuple[StructField, ...]] = {}
         struct_paths_by_column: dict[str, tuple[StructPath, ...]] = {}
         for column_name, dtype in column_type_objects.items():
-            fields = cls._struct_fields_for_type(dtype)
+            fields = parse_struct_fields(dtype)
             if not fields:
                 continue
             struct_fields_by_column[column_name] = fields
             struct_paths_by_column[column_name] = flatten_struct_paths(fields)
         return struct_fields_by_column, struct_paths_by_column
-
-    @staticmethod
-    def _struct_fields_for_type(dtype: Any) -> tuple[StructField, ...]:
-        return parse_struct_fields(dtype)
 
     def _invalidate_completion_caches(self) -> None:
         if hasattr(self, "_completion_catalog"):
@@ -475,14 +470,11 @@ class SqlExplorerEngine:
         )
         return "\n".join(lines)
 
-    def _resolve_column(self, raw_column: str) -> str | None:
+    def resolve_column(self, raw_column: str) -> str | None:
         candidate = raw_column.strip()
         if candidate.startswith('"') and candidate.endswith('"') and len(candidate) > 1:
             candidate = candidate[1:-1].replace('""', '"')
         return self.column_lookup.get(candidate.lower())
-
-    def resolve_column(self, raw_column: str) -> str | None:
-        return self._resolve_column(raw_column)
 
     @property
     def schema_rows(self) -> list[tuple[Any, ...]]:
@@ -493,7 +485,7 @@ class SqlExplorerEngine:
             return rows, False
         return rows[: self.max_rows_display], True
 
-    def _table_response(self, columns: list[str], rows: list[tuple[Any, ...]], message: str) -> EngineResponse:
+    def table_response(self, columns: list[str], rows: list[tuple[Any, ...]], message: str) -> EngineResponse:
         shown, truncated = self._display_rows(rows)
         result = QueryResult(
             sql="",
@@ -505,9 +497,6 @@ class SqlExplorerEngine:
             truncated=truncated,
         )
         return EngineResponse(status="ok", message=message, result=result)
-
-    def table_response(self, columns: list[str], rows: list[tuple[Any, ...]], message: str) -> EngineResponse:
-        return self._table_response(columns, rows, message)
 
     def _append_history(
         self,
@@ -607,8 +596,7 @@ class SqlExplorerEngine:
             total_rows=len(rows),
             truncated=truncated,
         )
-        out_of_rows = len(rows)
-        out_of_rows = max(out_of_rows, self.row_count())
+        out_of_rows = max(len(rows), self.row_count())
         message = f"{len(shown):,}/{out_of_rows:,} rows shown in {elapsed_ms:.1f} ms"
         if truncated:
             message += f" (row display limit={self.max_rows_display})"

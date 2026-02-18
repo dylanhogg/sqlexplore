@@ -1,7 +1,4 @@
-import sys
 from pathlib import Path
-from typing import Any
-from urllib.request import Request, urlopen
 
 import typer
 from rich import box
@@ -41,57 +38,6 @@ __all__ = [
     "app_version",
     "main",
 ]
-
-
-def _emit_download_log(
-    message: str,
-    activity_messages: list[str] | None = None,
-    *,
-    err: bool = False,
-    echo: bool = True,
-    include_activity: bool = True,
-) -> None:
-    data_paths.emit_download_log(
-        message,
-        activity_messages,
-        err=err,
-        echo=echo,
-        include_activity=include_activity,
-        echo_fn=typer.echo,
-    )
-
-
-def _download_remote_data_file(
-    url: str,
-    download_dir: Path,
-    overwrite: bool = False,
-    activity_messages: list[str] | None = None,
-) -> Path:
-    return data_paths.download_remote_data_file(
-        url,
-        download_dir,
-        overwrite=overwrite,
-        activity_messages=activity_messages,
-        emit_log=_emit_download_log,
-        request_factory=Request,
-        urlopen_fn=urlopen,
-        isatty_fn=lambda: sys.stderr.isatty(),
-    )
-
-
-def _resolve_data_path(
-    data: str,
-    download_dir: Path,
-    overwrite: bool = False,
-    startup_activity_messages: list[str] | None = None,
-) -> Path:
-    return data_paths.resolve_data_path(
-        data,
-        download_dir,
-        overwrite=overwrite,
-        startup_activity_messages=startup_activity_messages,
-        download_remote=_download_remote_data_file,
-    )
 
 
 def _render_console_response(console: Console, response: EngineResponse, max_value_chars: int) -> int:
@@ -223,14 +169,14 @@ def main(
         download_dir=download_dir,
         overwrite=overwrite,
         startup_activity_messages=startup_activity_messages,
-        resolve_data_path=_resolve_data_path,
+        resolve_data_path=data_paths.resolve_data_path,
     )
     resolved_paths = resolved_data_sources.paths
     use_stdin = resolved_data_sources.use_stdin
     stdin_capture = resolved_data_sources.stdin_capture
     if not resolved_paths:
         raise typer.BadParameter("At least one data source is required.")
-    first_data_path = next(iter(resolved_paths))
+    first_data_path = resolved_paths[0]
     logger.info("data sources resolved count=%s use_stdin=%s paths=%s", len(resolved_paths), use_stdin, resolved_paths)
     for file_path in resolved_paths:
         try:
@@ -238,19 +184,25 @@ def main(
         except OSError:
             logger.exception("failed to stat data file path=%s", file_path)
 
-    engine_kwargs: dict[str, Any] = {}
-    if len(resolved_paths) > 1:
-        engine_kwargs["data_paths"] = resolved_paths
-
-    engine = SqlExplorerEngine(
-        data_path=first_data_path,
-        table_name=table_name,
-        database=database,
-        default_limit=limit,
-        max_rows_display=max_rows,
-        max_value_chars=max_value_chars,
-        **engine_kwargs,
-    )
+    if len(resolved_paths) == 1:
+        engine = SqlExplorerEngine(
+            data_path=first_data_path,
+            table_name=table_name,
+            database=database,
+            default_limit=limit,
+            max_rows_display=max_rows,
+            max_value_chars=max_value_chars,
+        )
+    else:
+        engine = SqlExplorerEngine(
+            data_path=first_data_path,
+            data_paths=resolved_paths,
+            table_name=table_name,
+            database=database,
+            default_limit=limit,
+            max_rows_display=max_rows,
+            max_value_chars=max_value_chars,
+        )
     logger.info("engine initialized table=%s database=%s", table_name, database)
 
     try:

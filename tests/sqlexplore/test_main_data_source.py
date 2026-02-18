@@ -80,15 +80,14 @@ def test_remote_filename_defaults_to_sanitized_host_when_path_is_empty() -> None
 
 
 def test_emit_download_log_can_skip_activity_collection(monkeypatch: pytest.MonkeyPatch) -> None:
-    emit_download_log = getattr(app_module, "_emit_download_log")
     calls: list[tuple[str, bool]] = []
 
     def fake_echo(message: str, err: bool = False) -> None:
         calls.append((message, err))
 
-    monkeypatch.setattr(app_module.typer, "echo", fake_echo)
+    monkeypatch.setattr(data_paths_module.typer, "echo", fake_echo)
     messages: list[str] = []
-    emit_download_log("hello", messages, echo=True, include_activity=False)
+    data_paths_module.emit_download_log("hello", messages, echo=True, include_activity=False)
 
     assert calls == [("hello", False)]
     assert messages == []
@@ -129,10 +128,8 @@ def test_download_remote_data_file_writes_file_and_logs(
         assert request.full_url == url
         return _FakeHttpResponse(payload)
 
-    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
-
-    download_remote = getattr(app_module, "_download_remote_data_file")
-    out_path = download_remote(url, tmp_path, activity_messages=startup_activity_messages)
+    monkeypatch.setattr(data_paths_module, "urlopen", fake_urlopen)
+    out_path = data_paths_module.download_remote_data_file(url, tmp_path, activity_messages=startup_activity_messages)
 
     assert out_path.read_bytes() == payload
     out = capsys.readouterr().out
@@ -153,10 +150,8 @@ def test_download_remote_data_file_does_not_log_progress_lines(
         assert request.full_url == url
         return _FakeHttpResponse(payload, read_chunk_size=5, content_length=len(payload))
 
-    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
-
-    download_remote = getattr(app_module, "_download_remote_data_file")
-    out_path = download_remote(url, tmp_path, activity_messages=startup_activity_messages)
+    monkeypatch.setattr(data_paths_module, "urlopen", fake_urlopen)
+    out_path = data_paths_module.download_remote_data_file(url, tmp_path, activity_messages=startup_activity_messages)
 
     assert out_path.read_bytes() == payload
     out = capsys.readouterr().out
@@ -174,10 +169,8 @@ def test_download_remote_data_file_uses_cached_file_when_overwrite_disabled(
     def fail_urlopen(_: Any) -> _FakeHttpResponse:
         raise AssertionError("urlopen should not be called when a cached file exists and overwrite is disabled")
 
-    monkeypatch.setattr(app_module, "urlopen", fail_urlopen)
-
-    download_remote = getattr(app_module, "_download_remote_data_file")
-    out_path = download_remote("https://example.com/data.parquet", tmp_path)
+    monkeypatch.setattr(data_paths_module, "urlopen", fail_urlopen)
+    out_path = data_paths_module.download_remote_data_file("https://example.com/data.parquet", tmp_path)
 
     assert out_path == existing.resolve()
     assert existing.read_bytes() == existing_contents
@@ -199,9 +192,8 @@ def test_download_remote_data_file_overwrites_when_enabled(
         assert request.full_url == url
         return _FakeHttpResponse(payload)
 
-    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
-    download_remote = getattr(app_module, "_download_remote_data_file")
-    out_path = download_remote(url, tmp_path, overwrite=True)
+    monkeypatch.setattr(data_paths_module, "urlopen", fake_urlopen)
+    out_path = data_paths_module.download_remote_data_file(url, tmp_path, overwrite=True)
 
     assert out_path == existing.resolve()
     assert existing.read_bytes() == payload
@@ -212,9 +204,8 @@ def test_download_remote_data_file_overwrites_when_enabled(
 def test_download_remote_data_file_rejects_file_path_as_download_dir(tmp_path: Path) -> None:
     occupied_path = tmp_path / "occupied"
     occupied_path.write_text("not-a-directory", encoding="utf-8")
-    download_remote = getattr(app_module, "_download_remote_data_file")
     with pytest.raises(typer.BadParameter, match=r"Download path is not a directory"):
-        download_remote("https://example.com/data.parquet", occupied_path)
+        data_paths_module.download_remote_data_file("https://example.com/data.parquet", occupied_path)
 
 
 def test_download_remote_data_file_cleans_up_partial_file_when_stream_fails(
@@ -227,11 +218,10 @@ def test_download_remote_data_file_cleans_up_partial_file_when_stream_fails(
         assert request.full_url == url
         return _ExplodingHttpResponse([b"PAR1", b"ABCD"])
 
-    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
-    download_remote = getattr(app_module, "_download_remote_data_file")
+    monkeypatch.setattr(data_paths_module, "urlopen", fake_urlopen)
 
     with pytest.raises(typer.BadParameter, match=r"Failed to download data file"):
-        download_remote(url, tmp_path)
+        data_paths_module.download_remote_data_file(url, tmp_path)
     assert expected.exists() is False
 
 
@@ -245,11 +235,10 @@ def test_download_remote_data_file_wraps_error_before_progress_bar_exists(
         assert request.full_url == url
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(app_module, "urlopen", fail_urlopen)
-    download_remote = getattr(app_module, "_download_remote_data_file")
+    monkeypatch.setattr(data_paths_module, "urlopen", fail_urlopen)
 
     with pytest.raises(typer.BadParameter, match=r"Failed to download data file"):
-        download_remote(url, tmp_path)
+        data_paths_module.download_remote_data_file(url, tmp_path)
     assert expected.exists() is False
 
 
@@ -266,39 +255,34 @@ def test_remote_filename_accepts_csv_tsv_and_txt(url: str, expected: str) -> Non
 
 
 def test_resolve_data_path_rejects_remote_unsupported_extension() -> None:
-    resolve_data_path = getattr(app_module, "_resolve_data_path")
     with pytest.raises(typer.BadParameter, match=r"Remote URL must end with \.csv, \.tsv, \.txt, \.parquet, or \.pq\."):
-        resolve_data_path("https://example.com/data.json", download_dir=Path("/tmp"))
+        data_paths_module.resolve_data_path("https://example.com/data.json", download_dir=Path("/tmp"))
 
 
 def test_resolve_data_path_rejects_empty_value(tmp_path: Path) -> None:
-    resolve_data_path = getattr(app_module, "_resolve_data_path")
     with pytest.raises(typer.BadParameter, match=r"Data path cannot be empty"):
-        resolve_data_path("   ", download_dir=tmp_path)
+        data_paths_module.resolve_data_path("   ", download_dir=tmp_path)
 
 
 def test_resolve_data_path_rejects_missing_local_file(tmp_path: Path) -> None:
-    resolve_data_path = getattr(app_module, "_resolve_data_path")
     with pytest.raises(typer.BadParameter, match=r"Data file not found"):
-        resolve_data_path(str(tmp_path / "missing.csv"), download_dir=tmp_path)
+        data_paths_module.resolve_data_path(str(tmp_path / "missing.csv"), download_dir=tmp_path)
 
 
 def test_resolve_data_path_rejects_directory_path(tmp_path: Path) -> None:
-    resolve_data_path = getattr(app_module, "_resolve_data_path")
     folder = tmp_path / "folder"
     folder.mkdir()
     with pytest.raises(typer.BadParameter, match=r"Data path is not a file"):
-        resolve_data_path(str(folder), download_dir=tmp_path)
+        data_paths_module.resolve_data_path(str(folder), download_dir=tmp_path)
 
 
 def test_resolve_data_path_rejects_unreadable_local_file(tmp_path: Path) -> None:
-    resolve_data_path = getattr(app_module, "_resolve_data_path")
     data_path = (tmp_path / "data.csv").resolve()
     data_path.write_text("x\n1\n", encoding="utf-8")
     data_path.chmod(0o000)
     try:
         with pytest.raises(typer.BadParameter, match=r"Data file is not readable"):
-            resolve_data_path(str(data_path), download_dir=tmp_path)
+            data_paths_module.resolve_data_path(str(data_path), download_dir=tmp_path)
     finally:
         data_path.chmod(0o600)
 
@@ -352,7 +336,7 @@ def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkey
         def close(self) -> None:
             captured["closed"] = True
 
-    monkeypatch.setattr(app_module, "_download_remote_data_file", fake_download)
+    monkeypatch.setattr(app_module.data_paths, "download_remote_data_file", fake_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
     result = runner.invoke(app_module.app, ["--data", remote_url, "--no-ui"])
@@ -406,7 +390,7 @@ def test_main_passes_overwrite_flag_for_remote_url(tmp_path: Path, monkeypatch: 
         def close(self) -> None:
             captured["closed"] = True
 
-    monkeypatch.setattr(app_module, "_download_remote_data_file", fake_download)
+    monkeypatch.setattr(app_module.data_paths, "download_remote_data_file", fake_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
     result = runner.invoke(app_module.app, ["--data", remote_url, "--overwrite", "--no-ui"])
@@ -460,7 +444,7 @@ def test_main_passes_custom_download_dir_for_remote_url(tmp_path: Path, monkeypa
         def close(self) -> None:
             captured["closed"] = True
 
-    monkeypatch.setattr(app_module, "_download_remote_data_file", fake_download)
+    monkeypatch.setattr(app_module.data_paths, "download_remote_data_file", fake_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
     result = runner.invoke(
@@ -529,7 +513,7 @@ def test_main_passes_download_logs_to_tui_on_start(tmp_path: Path, monkeypatch: 
         def run(self) -> None:
             captured["run"] = True
 
-    monkeypatch.setattr(app_module, "_download_remote_data_file", fake_download)
+    monkeypatch.setattr(app_module.data_paths, "download_remote_data_file", fake_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
 
@@ -580,7 +564,7 @@ def test_main_keeps_local_path_behavior(tmp_path: Path, monkeypatch: pytest.Monk
         def close(self) -> None:
             captured["closed"] = True
 
-    monkeypatch.setattr(app_module, "_download_remote_data_file", fail_download)
+    monkeypatch.setattr(app_module.data_paths, "download_remote_data_file", fail_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
     result = runner.invoke(app_module.app, ["--data", str(local_path), "--no-ui"])
@@ -929,7 +913,7 @@ def test_main_rejects_missing_data_when_stdin_is_tty(monkeypatch: pytest.MonkeyP
         def isatty(self) -> bool:
             return True
 
-    monkeypatch.setattr(app_module.sys, "stdin", cast(Any, _TtyStdin()))
+    monkeypatch.setattr(app_module.stdin_io.sys, "stdin", cast(Any, _TtyStdin()))
     with pytest.raises(typer.BadParameter, match=app_module.stdin_io.STDIN_MISSING_SOURCE_ERROR):
         app_module.main(
             data=None,
@@ -979,7 +963,6 @@ def test_main_reads_query_file_for_no_ui_execution(monkeypatch: pytest.MonkeyPat
 
 
 def test_render_console_response_renders_generated_sql_and_table_and_error_status() -> None:
-    render_console_response = getattr(app_module, "_render_console_response")
     output = StringIO()
     console = app_module.Console(file=output, width=120, color_system=None, force_terminal=False)
 
@@ -997,7 +980,7 @@ def test_render_console_response_renders_generated_sql_and_table_and_error_statu
             truncated=True,
         ),
     )
-    exit_code = render_console_response(console, response, max_value_chars=5)
+    exit_code = getattr(app_module, "_render_console_response")(console, response, max_value_chars=5)
 
     assert exit_code == 1
     text = output.getvalue()
@@ -1009,12 +992,11 @@ def test_render_console_response_renders_generated_sql_and_table_and_error_statu
 
 
 def test_render_console_response_returns_zero_without_message_panel() -> None:
-    render_console_response = getattr(app_module, "_render_console_response")
     output = StringIO()
     console = app_module.Console(file=output, width=100, color_system=None, force_terminal=False)
 
     response = app_module.EngineResponse(status="ok", message="")
-    assert render_console_response(console, response, max_value_chars=10) == 0
+    assert getattr(app_module, "_render_console_response")(console, response, max_value_chars=10) == 0
     assert output.getvalue() == ""
 
 
