@@ -64,6 +64,14 @@ class ShortcutSpec:
     key_display: str | None = None
 
 
+@dataclass(slots=True)
+class _ColumnResizeState:
+    column_index: int
+    start_screen_x: float
+    start_content_width: int
+    did_drag: bool = False
+
+
 SHORTCUT_SPECS: tuple[ShortcutSpec, ...] = (
     ShortcutSpec("ctrl+enter", "run_query", "Run"),
     ShortcutSpec("f5", "run_query", "Run", show=False),
@@ -720,10 +728,7 @@ class ResultsTable(DataTable[RenderedCell]):
     ) -> None:
         super().__init__(*args, **kwargs)
         self._on_column_resized = on_column_resized
-        self._resize_column_index: int | None = None
-        self._resize_start_screen_x = 0.0
-        self._resize_start_content_width = 0
-        self._resize_did_drag = False
+        self._resize_state: _ColumnResizeState | None = None
         self._suppress_next_header_select = False
 
     def _get_row_style(self, row_index: int, base_style: Style) -> Style:
@@ -789,13 +794,22 @@ class ResultsTable(DataTable[RenderedCell]):
         if self._on_column_resized is not None:
             self._on_column_resized(column_index, width)
 
-    def _end_resize(self) -> None:
-        self._resize_column_index = None
-        self._resize_start_content_width = 0
-        self._resize_start_screen_x = 0.0
-        self.release_mouse()
+    def _start_resize(self, column_index: int, event: MouseDown) -> None:
+        self._resize_state = _ColumnResizeState(
+            column_index=column_index,
+            start_screen_x=self._event_screen_x(event),
+            start_content_width=self._column_content_width(column_index),
+        )
+        self.capture_mouse()
 
-    def consume_header_select_suppression(self) -> bool:
+    def _end_resize(self) -> bool:
+        state = self._resize_state
+        did_drag = state.did_drag if state is not None else False
+        self._resize_state = None
+        self.release_mouse()
+        return did_drag
+
+    def consume_pending_header_sort_suppression(self) -> bool:
         if not self._suppress_next_header_select:
             return False
         self._suppress_next_header_select = False
@@ -807,31 +821,25 @@ class ResultsTable(DataTable[RenderedCell]):
         resize_column_index = self._resize_candidate_column(event)
         if resize_column_index is None:
             return
-        self._resize_column_index = resize_column_index
-        self._resize_start_content_width = self._column_content_width(resize_column_index)
-        self._resize_start_screen_x = self._event_screen_x(event)
-        self._resize_did_drag = False
-        self.capture_mouse()
+        self._start_resize(resize_column_index, event)
         event.stop()
 
     def on_mouse_move(self, event: MouseMove) -> None:
-        resize_column_index = self._resize_column_index
-        if resize_column_index is None:
+        state = self._resize_state
+        if state is None:
             return
-        delta = int(round(self._event_screen_x(event) - self._resize_start_screen_x))
+        delta = int(round(self._event_screen_x(event) - state.start_screen_x))
         if delta == 0:
             return
-        self._resize_did_drag = True
-        self._set_column_content_width(resize_column_index, self._resize_start_content_width + delta)
+        state.did_drag = True
+        self._set_column_content_width(state.column_index, state.start_content_width + delta)
         event.stop()
 
     def on_mouse_up(self, event: MouseUp) -> None:
-        if self._resize_column_index is None:
+        if self._resize_state is None:
             return
-        if self._resize_did_drag:
+        if self._end_resize():
             self._suppress_next_header_select = True
-        self._resize_did_drag = False
-        self._end_resize()
         event.stop()
 
 
@@ -956,8 +964,8 @@ class SqlExplorerTui(App[None]):
             self._history_cursor += 1
         return history[self._history_cursor].query_text
 
-    def _results_table(self) -> DataTable[RenderedCell]:
-        return cast(DataTable[RenderedCell], self.query_one("#results_table", DataTable))
+    def _results_table(self) -> ResultsTable:
+        return self.query_one("#results_table", ResultsTable)
 
     def _query_editor(self) -> SqlQueryEditor:
         return self.query_one("#query_editor", SqlQueryEditor)
@@ -1229,12 +1237,20 @@ class SqlExplorerTui(App[None]):
         self._sort_column_index = None
         self._sort_reverse = False
         self._active_data_total_rows = self.engine.row_count() if result.sql else None
-        self._results_column_width_overrides = {}
+        self._clear_results_column_width_overrides()
 
         self._redraw_results_table()
 
+    def _clear_results_column_width_overrides(self) -> None:
+        self._results_column_width_overrides.clear()
+
     def _on_results_column_resized(self, column_index: int, width: int) -> None:
         self._results_column_width_overrides[column_index] = width
+
+    def _add_results_columns(self, table: ResultsTable, columns: list[str]) -> None:
+        for column_index, column_name in enumerate(columns):
+            width = self._results_column_width_overrides.get(column_index)
+            table.add_column(column_name, width=width)
 
     def _results_out_of_rows(self, result: QueryResult) -> int:
         if not result.sql:
@@ -1312,9 +1328,7 @@ class SqlExplorerTui(App[None]):
             self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
             return
 
-        for column_index, column_name in enumerate(result.columns):
-            override = self._results_column_width_overrides.get(column_index)
-            table.add_column(column_name, width=override)
+        self._add_results_columns(table, result.columns)
         json_columns = self._detect_json_columns(result)
         for row in result.rows:
             rendered_row: list[RenderedCell] = []
@@ -1438,7 +1452,10 @@ class SqlExplorerTui(App[None]):
         self._update_results_preview(selected_row, selected_column, column_name, type_name, value)
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
-        if cast(ResultsTable, self._results_table()).consume_header_select_suppression():
+        table = self._results_table()
+        if cast(Any, event).data_table is not table:
+            return
+        if table.consume_pending_header_sort_suppression():
             return
         result = self._active_result
         if result is None or not result.rows:
