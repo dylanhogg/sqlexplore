@@ -42,6 +42,7 @@ COMMON_PROVIDER_API_KEY_ENV_VARS = (
 )
 LLM_API_KEY_ENV_VARS = (LITELLM_API_KEY_ENV_VAR, *COMMON_PROVIDER_API_KEY_ENV_VARS)
 DEFAULT_SAMPLE_ROWS = 3
+MAX_SAMPLE_VALUE_CHARS = 512
 DEFAULT_DUCKDB_GUIDANCE_MAX_CHARS = 1_600
 MAX_PROMPT_LOG_CHARS = 64_000
 MAX_RESPONSE_LOG_CHARS = 256_000
@@ -157,7 +158,7 @@ def _format_sample_rows(sample_rows: SampleRows) -> str:
         return "(no rows)"
     lines = [", ".join(sample_rows.columns)]
     for row in sample_rows.rows:
-        values = ", ".join(str(value) for value in row)
+        values = ", ".join(_trim_for_prompt(str(value), max_chars=MAX_SAMPLE_VALUE_CHARS) for value in row)
         lines.append(values)
     return "\n".join(lines)
 

@@ -122,6 +122,21 @@ def test_build_prompt_includes_constraints_schema_and_sample_rows() -> None:
     assert "seattle, 10" in prompt
 
 
+def test_build_prompt_truncates_long_sample_values() -> None:
+    long_value = "x" * 600
+    prompt = build_prompt(
+        user_query="show sample",
+        table_name="data",
+        schema_context="Schema:\n- payload: VARCHAR (nullable=YES)",
+        sample_rows=SampleRows(
+            columns=("payload",),
+            rows=((long_value,),),
+        ),
+    )
+    assert long_value not in prompt
+    assert "x" * 509 + "..." in prompt
+
+
 def test_select_duckdb_guidance_adds_regex_json_struct_and_temporal_sections() -> None:
     guidance = select_duckdb_guidance(
         user_query="extract regex from json field and parse timestamp",
