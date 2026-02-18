@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+from rich.style import Style
 from rich.text import Text
+from textual.events import MouseDown, MouseMove, MouseUp
 from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.completion.models import CompletionItem
 from sqlexplore.core.engine import EngineResponse, SqlExplorerEngine, app_version
-from sqlexplore.ui.tui import NULL_VALUE_COLOR, URL_COLOR, ResultsPreview, SqlExplorerTui, SqlQueryEditor
+from sqlexplore.ui.tui import NULL_VALUE_COLOR, URL_COLOR, ResultsPreview, ResultsTable, SqlExplorerTui, SqlQueryEditor
 
 
 def _build_app(
@@ -60,8 +62,33 @@ def _preview_text(app: SqlExplorerTui) -> str:
     return str(rendered)
 
 
-def _column_values(table: DataTable[str], column_index: int) -> list[str]:
+def _column_values(table: DataTable[Any], column_index: int) -> list[str]:
     return [str(table.get_row_at(row_index)[column_index]) for row_index in range(table.row_count)]
+
+
+def _column_content_width(table: DataTable[Any], column_index: int) -> int:
+    column = table.ordered_columns[column_index]
+    return column.content_width if column.auto_width else column.width
+
+
+def _header_resize_x(table: DataTable[Any], column_index: int) -> int:
+    private_table = cast(Any, table)
+    region = private_table._get_column_region(column_index)
+    return int(region.x + region.width - table.scroll_x)
+
+
+def _drag_column_resize(table: ResultsTable, column_index: int, delta_x: int) -> None:
+    start_x = _header_resize_x(table, column_index)
+    header_style = Style.from_meta({"row": -1, "column": column_index})
+    table.on_mouse_down(MouseDown(table, start_x, 0, 0, 0, 1, False, False, False, style=header_style))
+    table.on_mouse_move(MouseMove(table, start_x + delta_x, 0, delta_x, 0, 1, False, False, False, style=header_style))
+    table.on_mouse_up(MouseUp(table, start_x + delta_x, 0, 0, 0, 1, False, False, False, style=header_style))
+
+
+def _cell_plain_text(cell: object) -> str:
+    if isinstance(cell, Text):
+        return cell.plain
+    return str(cell)
 
 
 def _parse_tsv(text: str) -> list[list[str]]:
@@ -815,6 +842,105 @@ def test_results_header_click_sorts_asc_desc(tmp_path: Path) -> None:
                 app.on_data_table_header_selected(click)
                 await pilot.pause()
                 assert _column_values(results, 1) == ["100", "20", "3"]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_header_drag_resizes_column_and_suppresses_next_sort_click(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\nx,20\ny,3\nz,100\n")
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+
+                results = app.query_one("#results_table", ResultsTable)
+                before_width = _column_content_width(results, 1)
+                _drag_column_resize(results, 1, 6)
+                await pilot.pause()
+                assert _column_content_width(results, 1) == before_width + 6
+
+                second_column = results.ordered_columns[1]
+                click = DataTable.HeaderSelected(results, second_column.key, 1, second_column.label)
+                app.on_data_table_header_selected(click)
+                await pilot.pause()
+                assert _column_values(results, 1) == ["20", "3", "100"]
+
+                app.on_data_table_header_selected(click)
+                await pilot.pause()
+                assert _column_values(results, 1) == ["3", "20", "100"]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_column_resize_clamps_to_minimum_width(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\nx,20\ny,3\nz,100\n")
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = app.query_one("#results_table", ResultsTable)
+                _drag_column_resize(results, 1, -10_000)
+                await pilot.pause()
+                assert _column_content_width(results, 1) == ResultsTable.MIN_RESIZED_CONTENT_WIDTH
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_column_resize_persists_across_redraws(tmp_path: Path) -> None:
+    async def run() -> None:
+        csv_text = 'id,j\n1,"{""a"":1}"\n2,"{""a"":2}"\n3,"{""a"":3}"\n'
+        app, engine = _build_app(tmp_path, csv_text=csv_text)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = app.query_one("#results_table", ResultsTable)
+                _drag_column_resize(results, 1, 5)
+                await pilot.pause()
+                resized_width = _column_content_width(results, 1)
+
+                await pilot.press("f3")
+                await pilot.pause()
+                assert _column_content_width(results, 1) == resized_width
+
+                second_column = results.ordered_columns[1]
+                click = DataTable.HeaderSelected(results, second_column.key, 1, second_column.label)
+                app.on_data_table_header_selected(click)
+                await pilot.pause()
+                app.on_data_table_header_selected(click)
+                await pilot.pause()
+                assert _column_content_width(results, 1) == resized_width
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_column_resize_expansion_reveals_more_text(tmp_path: Path) -> None:
+    async def run() -> None:
+        long_value = "x" * 400
+        app, engine = _build_app(tmp_path, csv_text=f"txt\n{long_value}\n")
+        engine.max_value_chars = 40
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = app.query_one("#results_table", ResultsTable)
+
+                before_text = _cell_plain_text(results.get_row_at(0)[0])
+                assert before_text.endswith("...")
+                assert len(before_text) < len(long_value)
+
+                _drag_column_resize(results, 0, 500)
+                await pilot.pause()
+
+                after_text = _cell_plain_text(results.get_row_at(0)[0])
+                assert len(after_text) > len(before_text)
+                assert after_text == long_value
         finally:
             engine.close()
 
