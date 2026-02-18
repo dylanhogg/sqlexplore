@@ -28,6 +28,11 @@ run-example-multiple-union:
 		--data https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00001-of-00017.parquet \
 		--data https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00002-of-00017.parquet
 
+run-example-multiple-union-mismatch:
+	uv run sqlexplore \
+		--data https://huggingface.co/datasets/moonworks/lunara-aesthetic-image-variations/resolve/main/data/train-00000-of-00017.parquet \
+		--data https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
+
 run-example-images-1:
 	uv run sqlexplore --data https://huggingface.co/datasets/mteb/tiny-imagenet/resolve/main/data/valid-00000-of-00001-70d52db3c749a935.parquet
 

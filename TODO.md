@@ -9,6 +9,9 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
+- Fix duplicated cache filename!
+    - uv run sqlexplore --data https://huggingface.co/datasets/ylecun/mnist/resolve/main/mnist/test-00000-of-00001.parquet
+    - 
 - Union multiple input files into a single table
     - Fix total row count on `SELECT * FROM "data_src_3" LIMIT 10`
     - If only 1 data source, don't have a union table, just use the single source table
@@ -16,7 +19,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
     - Review tables names when multiple: remove default "data" and auto-generate all names?
     - Fix bad union `Binder Error: Set operations can only apply to expressions with the same number of result columns`: uv run python -m sqlexplore.app data/example.parquet https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
 - ! Enable reproduce this results in a bash file that installs `uv` and runs `sqlexplore` with the same data files and SQL query
-- LLM: config thinking and temperature params
+- LLM: config thinking and temperature params (?)
 - Make default /rows up to 1,000,000 (?)
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
 - Test all startup options and CLI args
@@ -41,6 +44,9 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
     - /llm-summarize-data
     - /llm-chat-data
     - /llm-categoise-data col
+- LLM General:
+    - Render LLM thinking and reasoning steps in Activity, with replacing line so it doesn't scroll away
+    - Add dataset cols or name to /llm-history for better context
 
 ## App code quality
 

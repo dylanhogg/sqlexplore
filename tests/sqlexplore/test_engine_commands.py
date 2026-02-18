@@ -1,4 +1,5 @@
 import inspect
+import re
 from pathlib import Path
 from typing import Any
 
@@ -583,6 +584,9 @@ def test_llm_command_returns_provider_error(tmp_path: Path, monkeypatch: Any) ->
         assert len(out.activity_messages) == 1
         assert out.activity_messages[0][0] == "info"
         assert out.activity_messages[0][1].startswith("[llm] ")
+        assert "model=openai/gpt-5-mini" in out.activity_messages[0][1]
+        assert "total_tokens=" in out.activity_messages[0][1]
+        assert "reasoning_tokens=" in out.activity_messages[0][1]
     finally:
         engine.close()
 
@@ -606,6 +610,9 @@ def test_llm_command_returns_invalid_sql_error(tmp_path: Path, monkeypatch: Any)
         assert out.activity_messages is not None
         assert len(out.activity_messages) == 2
         assert all(status == "info" and message.startswith("[llm] ") for status, message in out.activity_messages)
+        assert all("model=openai/gpt-5-mini" in message for _, message in out.activity_messages)
+        assert all("total_tokens=" in message for _, message in out.activity_messages)
+        assert all("reasoning_tokens=" in message for _, message in out.activity_messages)
     finally:
         engine.close()
 
@@ -633,6 +640,9 @@ def test_llm_command_retries_validation_once_then_succeeds(tmp_path: Path, monke
         assert out.activity_messages is not None
         assert len(out.activity_messages) == 2
         assert all(status == "info" and message.startswith("[llm] ") for status, message in out.activity_messages)
+        assert all("model=openai/gpt-5-mini" in message for _, message in out.activity_messages)
+        assert all("total_tokens=" in message for _, message in out.activity_messages)
+        assert all("reasoning_tokens=" in message for _, message in out.activity_messages)
         assert len(attempts) == 2
     finally:
         engine.close()
@@ -661,6 +671,9 @@ def test_llm_command_retries_duckdb_error_once_then_succeeds(tmp_path: Path, mon
         assert out.activity_messages is not None
         assert len(out.activity_messages) == 2
         assert all(status == "info" and message.startswith("[llm] ") for status, message in out.activity_messages)
+        assert all("model=openai/gpt-5-mini" in message for _, message in out.activity_messages)
+        assert all("total_tokens=" in message for _, message in out.activity_messages)
+        assert all("reasoning_tokens=" in message for _, message in out.activity_messages)
         assert len(attempts) == 2
     finally:
         engine.close()
@@ -684,6 +697,9 @@ def test_llm_command_retry_is_capped_at_one(tmp_path: Path, monkeypatch: Any) ->
         assert out.activity_messages is not None
         assert len(out.activity_messages) == 2
         assert all(status == "info" and message.startswith("[llm] ") for status, message in out.activity_messages)
+        assert all("model=openai/gpt-5-mini" in message for _, message in out.activity_messages)
+        assert all("total_tokens=" in message for _, message in out.activity_messages)
+        assert all("reasoning_tokens=" in message for _, message in out.activity_messages)
         assert len(attempts) == 2
     finally:
         engine.close()
@@ -720,8 +736,11 @@ def test_llm_command_executes_generated_sql_via_existing_path(tmp_path: Path, mo
         assert out.activity_messages is not None
         assert len(out.activity_messages) == 1
         assert out.activity_messages[0][0] == "info"
+        assert "model=openai/gpt-5-mini" in out.activity_messages[0][1]
         assert "request_tokens=" in out.activity_messages[0][1]
         assert "response_tokens=" in out.activity_messages[0][1]
+        assert "total_tokens=" in out.activity_messages[0][1]
+        assert "reasoning_tokens=" in out.activity_messages[0][1]
         assert "elapsed_secs=" in out.activity_messages[0][1]
         assert "total_cost_cents=" in out.activity_messages[0][1]
         assert out.result is not None
@@ -758,7 +777,12 @@ def test_llm_history_and_show_commands_replay_logged_bundle(tmp_path: Path, monk
             self.choices = [_Choice(content)]
             self.model = "openai/gpt-5-mini"
             self.id = "resp-123"
-            self.usage = {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
+            self.usage = {
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14,
+                "completion_tokens_details": {"reasoning_tokens": 3},
+            }
 
     def fake_completion(**kwargs: Any) -> _Response:
         _ = kwargs
@@ -775,13 +799,45 @@ def test_llm_history_and_show_commands_replay_logged_bundle(tmp_path: Path, monk
         history_out = engine.run_input("/llm-history 1")
         assert history_out.status == "ok"
         assert history_out.result is not None
-        assert history_out.result.columns == ["trace_id", "status", "retries", "model", "query", "generated_sql"]
+        assert history_out.result.columns == [
+            "trace_id",
+            "status",
+            "retries",
+            "total_tokens",
+            "elapsed_secs",
+            "total_cost_cents",
+            "query",
+            "generated_sql",
+            "model",
+            "request_tokens",
+            "response_tokens",
+            "reasoning_tokens",
+        ]
         assert len(history_out.result.rows) == 1
 
-        trace_id, status, retries, _model, query, generated_sql = history_out.result.rows[0]
+        (
+            trace_id,
+            status,
+            retries,
+            total_tokens,
+            elapsed_secs,
+            total_cost_cents,
+            query,
+            generated_sql,
+            _model,
+            request_tokens,
+            response_tokens,
+            reasoning_tokens,
+        ) = history_out.result.rows[0]
         assert isinstance(trace_id, str) and trace_id
         assert status == "success"
         assert retries == "0"
+        assert request_tokens == "10"
+        assert response_tokens == "4"
+        assert total_tokens == "14"
+        assert reasoning_tokens == "3"
+        assert re.fullmatch(r"\d+\.\d", elapsed_secs) is not None
+        assert re.fullmatch(r"\d+\.\d{4}", total_cost_cents) is not None
         assert query == "count rows by col_name"
         assert generated_sql == sql
 

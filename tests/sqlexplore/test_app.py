@@ -429,7 +429,10 @@ def test_activity_log_renders_info_activity_messages(tmp_path: Path) -> None:
                         activity_messages=[
                             (
                                 "info",
-                                "[llm] request_tokens=10 response_tokens=4 elapsed_secs=0.123 total_cost_cents=0.4567",
+                                "[llm] model=openai/gpt-5-mini "
+                                "request_tokens=10 response_tokens=4 "
+                                "total_tokens=14 reasoning_tokens=3 "
+                                "elapsed_secs=0.123 total_cost_cents=0.4567",
                             )
                         ],
                     ),
@@ -437,8 +440,10 @@ def test_activity_log_renders_info_activity_messages(tmp_path: Path) -> None:
                     await pilot.press("ctrl+enter")
                     await pilot.pause()
                     assert (
-                        "[INFO] [llm] request_tokens=10 response_tokens=4 elapsed_secs=0.123 total_cost_cents=0.4567"
-                        in _log_text(app)
+                        "[INFO] [llm] model=openai/gpt-5-mini "
+                        "request_tokens=10 response_tokens=4 "
+                        "total_tokens=14 reasoning_tokens=3 "
+                        "elapsed_secs=0.123 total_cost_cents=0.4567" in _log_text(app)
                     )
         finally:
             engine.close()

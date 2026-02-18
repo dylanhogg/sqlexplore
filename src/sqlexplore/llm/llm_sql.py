@@ -66,16 +66,26 @@ class SampleRows:
 
 @dataclass(frozen=True, slots=True)
 class LlmCallMetrics:
+    model: str | None
     request_tokens: int | None
     response_tokens: int | None
+    total_tokens: int | None
+    reasoning_tokens: int | None
     elapsed_secs: float | None
     total_cost_cents: float | None
 
     @classmethod
-    def unknown(cls, elapsed_secs: float | None = None) -> "LlmCallMetrics":
+    def unknown(
+        cls,
+        model: str | None = None,
+        elapsed_secs: float | None = None,
+    ) -> "LlmCallMetrics":
         return cls(
+            model=model,
             request_tokens=None,
             response_tokens=None,
+            total_tokens=None,
+            reasoning_tokens=None,
             elapsed_secs=elapsed_secs,
             total_cost_cents=None,
         )
@@ -92,8 +102,11 @@ class LlmCallMetrics:
         return (
             "[llm] "
             f"attempt={attempt}/{total_attempts} "
+            f"model={self.model or 'n/a'} "
             f"request_tokens={self._format_optional_int(self.request_tokens)} "
             f"response_tokens={self._format_optional_int(self.response_tokens)} "
+            f"total_tokens={self._format_optional_int(self.total_tokens)} "
+            f"reasoning_tokens={self._format_optional_int(self.reasoning_tokens)} "
             f"elapsed_secs={self._format_optional_float(self.elapsed_secs, 3)} "
             f"total_cost_cents={self._format_optional_float(self.total_cost_cents, 4)}"
         )
@@ -338,15 +351,34 @@ def _value_from_object(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
+def _extract_reasoning_tokens(usage: Any) -> int | None:
+    direct_reasoning_tokens = _value_from_object(usage, "reasoning_tokens")
+    if isinstance(direct_reasoning_tokens, int):
+        return int(direct_reasoning_tokens)
+
+    completion_details = _value_from_object(usage, "completion_tokens_details")
+    completion_reasoning_tokens = _value_from_object(completion_details, "reasoning_tokens")
+    if isinstance(completion_reasoning_tokens, int):
+        return int(completion_reasoning_tokens)
+
+    output_details = _value_from_object(usage, "output_tokens_details")
+    output_reasoning_tokens = _value_from_object(output_details, "reasoning_tokens")
+    if isinstance(output_reasoning_tokens, int):
+        return int(output_reasoning_tokens)
+    return None
+
+
 def _extract_usage_stats(response: Any) -> dict[str, int | None]:
     usage = _value_from_object(response, "usage")
     prompt_tokens = _value_from_object(usage, "prompt_tokens")
     completion_tokens = _value_from_object(usage, "completion_tokens")
     total_tokens = _value_from_object(usage, "total_tokens")
+    reasoning_tokens = _extract_reasoning_tokens(usage)
     return {
         "prompt_tokens": int(prompt_tokens) if isinstance(prompt_tokens, int) else None,
         "completion_tokens": int(completion_tokens) if isinstance(completion_tokens, int) else None,
         "total_tokens": int(total_tokens) if isinstance(total_tokens, int) else None,
+        "reasoning_tokens": reasoning_tokens,
     }
 
 
@@ -411,7 +443,7 @@ def generate_sql(prompt: str, model: str) -> str:
         response = litellm_completion(**request_payload)
     except Exception as exc:  # noqa: BLE001
         elapsed_secs = time.perf_counter() - t0
-        _llm_last_call_metrics_var.set(LlmCallMetrics.unknown(elapsed_secs))
+        _llm_last_call_metrics_var.set(LlmCallMetrics.unknown(model=model, elapsed_secs=elapsed_secs))
         if trace_id is not None:
             log_event(
                 "llm.response",
@@ -438,8 +470,11 @@ def generate_sql(prompt: str, model: str) -> str:
     total_cost_cents = response_cost_usd * 100.0 if response_cost_usd is not None else None
     _llm_last_call_metrics_var.set(
         LlmCallMetrics(
+            model=model,
             request_tokens=usage_stats["prompt_tokens"],
             response_tokens=usage_stats["completion_tokens"],
+            total_tokens=usage_stats["total_tokens"],
+            reasoning_tokens=usage_stats["reasoning_tokens"],
             elapsed_secs=elapsed_secs,
             total_cost_cents=total_cost_cents,
         )
@@ -448,7 +483,7 @@ def generate_sql(prompt: str, model: str) -> str:
     response_id = _value_from_object(response, "id")
     logger.info(
         "llm response model=%s response_model=%s response_id=%s elapsed_ms=%.1f prompt_tokens=%s "
-        "completion_tokens=%s total_tokens=%s total_cost_cents=%s",
+        "completion_tokens=%s total_tokens=%s reasoning_tokens=%s total_cost_cents=%s",
         model,
         response_model,
         response_id,
@@ -456,6 +491,7 @@ def generate_sql(prompt: str, model: str) -> str:
         usage_stats["prompt_tokens"],
         usage_stats["completion_tokens"],
         usage_stats["total_tokens"],
+        usage_stats["reasoning_tokens"],
         total_cost_cents,
     )
 

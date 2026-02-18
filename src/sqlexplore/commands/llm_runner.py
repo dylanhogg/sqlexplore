@@ -99,6 +99,16 @@ class LlmRunResult:
         return cls(status="response", retry_count=retry_count, response=response, llm_call_metrics=llm_call_metrics)
 
 
+@dataclass(frozen=True, slots=True)
+class LlmMetricsSummary:
+    request_tokens: int | None
+    response_tokens: int | None
+    total_tokens: int | None
+    reasoning_tokens: int | None
+    elapsed_secs: float | None
+    total_cost_cents: float | None
+
+
 def is_retryable_duckdb_sql_error(message: str, retryable_error_markers: tuple[str, ...]) -> bool:
     payload = message.strip().casefold()
     return any(marker in payload for marker in retryable_error_markers)
@@ -193,8 +203,25 @@ def llm_activity_lines(llm_call_metrics: tuple[LlmCallMetrics, ...]) -> list[str
     ]
 
 
-def _append_last_call_metrics(llm_call_metrics: list[LlmCallMetrics]) -> None:
-    llm_call_metrics.append(consume_last_llm_call_metrics() or LlmCallMetrics.unknown())
+def summarize_llm_call_metrics(llm_call_metrics: tuple[LlmCallMetrics, ...]) -> LlmMetricsSummary:
+    request_tokens = [item.request_tokens for item in llm_call_metrics if item.request_tokens is not None]
+    response_tokens = [item.response_tokens for item in llm_call_metrics if item.response_tokens is not None]
+    total_tokens = [item.total_tokens for item in llm_call_metrics if item.total_tokens is not None]
+    reasoning_tokens = [item.reasoning_tokens for item in llm_call_metrics if item.reasoning_tokens is not None]
+    elapsed_secs = [item.elapsed_secs for item in llm_call_metrics if item.elapsed_secs is not None]
+    total_cost_cents = [item.total_cost_cents for item in llm_call_metrics if item.total_cost_cents is not None]
+    return LlmMetricsSummary(
+        request_tokens=sum(request_tokens) if request_tokens else None,
+        response_tokens=sum(response_tokens) if response_tokens else None,
+        total_tokens=sum(total_tokens) if total_tokens else None,
+        reasoning_tokens=sum(reasoning_tokens) if reasoning_tokens else None,
+        elapsed_secs=sum(elapsed_secs) if elapsed_secs else None,
+        total_cost_cents=sum(total_cost_cents) if total_cost_cents else None,
+    )
+
+
+def _append_last_call_metrics(llm_call_metrics: list[LlmCallMetrics], model: str) -> None:
+    llm_call_metrics.append(consume_last_llm_call_metrics() or LlmCallMetrics.unknown(model=model))
 
 
 def run_llm_query_with_retry(
@@ -227,11 +254,11 @@ def run_llm_query_with_retry(
             try:
                 sql = active_deps.generate_sql(current_prompt, model)
             except Exception:  # noqa: BLE001
-                _append_last_call_metrics(llm_call_metrics)
+                _append_last_call_metrics(llm_call_metrics, model)
                 logger.exception("llm command provider error model=%s retry_count=%s", model, retry_count)
                 return LlmRunResult.provider_error(retry_count, tuple(llm_call_metrics))
 
-            _append_last_call_metrics(llm_call_metrics)
+            _append_last_call_metrics(llm_call_metrics, model)
 
             sql_error = active_deps.validate_generated_sql(sql, engine.table_name)
             if sql_error is not None:
