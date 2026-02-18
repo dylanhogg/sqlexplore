@@ -30,6 +30,16 @@ from sqlexplore.core.engine_models import (
 )
 from sqlexplore.core.logging_utils import get_logger, log_event, new_trace_id, truncate_for_log
 from sqlexplore.core.result_utils import format_scalar, result_column_types, result_columns, sql_literal
+from sqlexplore.core.source_union import (
+    SchemaSignature,
+    StartupTableInfo,
+    count_table_rows,
+    format_schema_mismatch,
+    normalize_data_paths,
+    schema_signature_from_rows,
+    source_view_name,
+    union_sql,
+)
 from sqlexplore.core.sql_templates import (
     DEFAULT_LOAD_QUERY_TEMPLATE,
     TXT_LOAD_QUERY_TEMPLATE,
@@ -110,42 +120,6 @@ class StructField:
 
 
 StructPath = tuple[str, str]
-SchemaSignature = tuple[tuple[str, str], ...]
-
-
-@dataclass(frozen=True, slots=True)
-class StartupTableInfo:
-    role: Literal["source", "union"]
-    table_name: str
-    source: str
-    row_count: int
-
-
-def schema_signature_from_rows(rows: list[tuple[Any, ...]]) -> SchemaSignature:
-    return tuple((str(row[0]), str(row[1])) for row in rows)
-
-
-def format_schema_mismatch(
-    expected: SchemaSignature,
-    actual: SchemaSignature,
-    *,
-    source_index: int,
-    source_label: str,
-) -> str:
-    prefix = f"Schema mismatch in source {source_index}: {source_label}"
-    if len(expected) != len(actual):
-        return f"{prefix}. Expected {len(expected)} columns, got {len(actual)}."
-    for column_index, (expected_col, actual_col) in enumerate(zip(expected, actual), start=1):
-        expected_name, expected_type = expected_col
-        actual_name, actual_type = actual_col
-        if expected_name != actual_name:
-            return f"{prefix}. Column {column_index} name mismatch: expected {expected_name}, got {actual_name}."
-        if expected_type != actual_type:
-            return (
-                f"{prefix}. Column {column_index} type mismatch for {expected_name}: "
-                f"expected {expected_type}, got {actual_type}."
-            )
-    return f"{prefix}. Source schema does not match expected schema."
 
 
 def _detect_reader(file_path: Path) -> FileReader:
@@ -245,7 +219,7 @@ class SqlExplorerEngine:
         max_value_chars: int,
         data_paths: tuple[Path, ...] | None = None,
     ) -> None:
-        normalized_paths = self._normalize_data_paths(data_path, data_paths)
+        normalized_paths = normalize_data_paths(data_path, data_paths)
         logger.info(
             "engine init start data_paths=%s table_name=%s database=%s default_limit=%s max_rows_display=%s "
             "max_value_chars=%s",
@@ -268,38 +242,33 @@ class SqlExplorerEngine:
         self._startup_tables: tuple[StartupTableInfo, ...] = ()
 
         self.conn = duckdb.connect(database=database)
-        self.executed_sql: list[str] = []
-        self.query_history: list[QueryHistoryEntry] = []
-        self.last_sql = self.default_query
-        self.last_result_sql: str | None = None
+        try:
+            self.executed_sql: list[str] = []
+            self.query_history: list[QueryHistoryEntry] = []
+            self.last_sql = self.default_query
+            self.last_result_sql: str | None = None
 
-        self._load_data_views()
+            self._load_data_views()
 
-        self._schema_rows: list[tuple[Any, ...]] = []
-        self.columns: list[str] = []
-        self.column_types: dict[str, str] = {}
-        self.struct_fields_by_column: dict[str, tuple[StructField, ...]] = {}
-        self.struct_paths_by_column: dict[str, tuple[StructPath, ...]] = {}
-        self.column_lookup: dict[str, str] = {}
-        self.refresh_schema()
+            self._schema_rows: list[tuple[Any, ...]] = []
+            self.columns: list[str] = []
+            self.column_types: dict[str, str] = {}
+            self.struct_fields_by_column: dict[str, tuple[StructField, ...]] = {}
+            self.struct_paths_by_column: dict[str, tuple[StructPath, ...]] = {}
+            self.column_lookup: dict[str, str] = {}
+            self.refresh_schema()
 
-        self._completion_catalog = EngineCompletionCatalog(self)
-        self._command_specs = build_command_specs(self, self._completion_catalog)
-        self._command_lookup = index_command_specs(self._command_specs)
-        self._completion_engine = CompletionEngine(self)
+            self._completion_catalog = EngineCompletionCatalog(self)
+            self._command_specs = build_command_specs(self, self._completion_catalog)
+            self._command_lookup = index_command_specs(self._command_specs)
+            self._completion_engine = CompletionEngine(self)
+        except Exception:
+            self.conn.close()
+            raise
         logger.info("engine init complete columns=%s", len(self.columns))
 
-    @staticmethod
-    def _normalize_data_paths(data_path: Path, data_paths: tuple[Path, ...] | None) -> tuple[Path, ...]:
-        if data_paths is None:
-            return (data_path.expanduser().resolve(),)
-        normalized = tuple(path.expanduser().resolve() for path in data_paths)
-        if not normalized:
-            raise typer.BadParameter("At least one data file is required.")
-        return normalized
-
     def _source_view_name(self, source_index: int) -> str:
-        return f"{self.table_name}_src_{source_index + 1}"
+        return source_view_name(self.table_name, source_index)
 
     def _load_source_view(self, source_index: int, data_path: Path) -> str:
         view_name = self._source_view_name(source_index)
@@ -343,14 +312,10 @@ class SqlExplorerEngine:
 
     @staticmethod
     def _union_sql(source_views: tuple[str, ...]) -> str:
-        selects = [f'SELECT * FROM "{source_view}"' for source_view in source_views]
-        return " UNION ALL ".join(selects)
+        return union_sql(source_views)
 
     def _count_table_rows(self, table_name: str) -> int:
-        out = self.conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()
-        if out is None:
-            return 0
-        return int(out[0])
+        return count_table_rows(self.conn, table_name)
 
     def _refresh_startup_tables(self) -> None:
         source_rows = tuple(

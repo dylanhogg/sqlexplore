@@ -360,7 +360,7 @@ def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkey
     monkeypatch.setattr(app_module, "_download_remote_data_file", fake_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
-    result = runner.invoke(app_module.app, [remote_url, "--no-ui"])
+    result = runner.invoke(app_module.app, ["--data", remote_url, "--no-ui"])
 
     assert result.exit_code == 0
     assert captured["download_url"] == remote_url
@@ -414,7 +414,7 @@ def test_main_passes_overwrite_flag_for_remote_url(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(app_module, "_download_remote_data_file", fake_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
-    result = runner.invoke(app_module.app, [remote_url, "--overwrite", "--no-ui"])
+    result = runner.invoke(app_module.app, ["--data", remote_url, "--overwrite", "--no-ui"])
 
     assert result.exit_code == 0
     assert captured["download_url"] == remote_url
@@ -470,7 +470,7 @@ def test_main_passes_custom_download_dir_for_remote_url(tmp_path: Path, monkeypa
 
     result = runner.invoke(
         app_module.app,
-        [remote_url, "--download-dir", str(custom_download_dir), "--no-ui"],
+        ["--data", remote_url, "--download-dir", str(custom_download_dir), "--no-ui"],
     )
 
     assert result.exit_code == 0
@@ -538,7 +538,7 @@ def test_main_passes_download_logs_to_tui_on_start(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
 
-    result = runner.invoke(app_module.app, [remote_url])
+    result = runner.invoke(app_module.app, ["--data", remote_url])
 
     assert result.exit_code == 0
     assert captured["data_path"] == downloaded
@@ -588,11 +588,83 @@ def test_main_keeps_local_path_behavior(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(app_module, "_download_remote_data_file", fail_download)
     monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
 
-    result = runner.invoke(app_module.app, [str(local_path), "--no-ui"])
+    result = runner.invoke(app_module.app, ["--data", str(local_path), "--no-ui"])
 
     assert result.exit_code == 0
     assert captured["data_path"] == local_path.resolve()
     assert captured["closed"] is True
+
+
+def test_main_passes_multiple_data_paths_to_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    first = tmp_path / "a.csv"
+    second = tmp_path / "b.csv"
+    first.write_text("x\n1\n", encoding="utf-8")
+    second.write_text("x\n2\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    class FakeEngine:
+        def __init__(
+            self,
+            data_path: Path,
+            table_name: str,
+            database: str,
+            default_limit: int,
+            max_rows_display: int,
+            max_value_chars: int,
+            data_paths: tuple[Path, ...] | None = None,
+        ) -> None:
+            _ = table_name
+            _ = database
+            _ = default_limit
+            _ = max_rows_display
+            captured["data_path"] = data_path
+            captured["data_paths"] = data_paths
+            self.default_query = 'SELECT * FROM "data" LIMIT 100'
+            self.max_value_chars = max_value_chars
+
+        def run_sql(self, sql_text: str, remember: bool = True) -> app_module.EngineResponse:
+            captured["run_sql"] = (sql_text, remember)
+            return app_module.EngineResponse(status="ok", message="ok")
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
+    result = runner.invoke(
+        app_module.app,
+        ["--data", str(first), "--data", str(second), "--no-ui"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["data_path"] == first.resolve()
+    assert captured["data_paths"] == (first.resolve(), second.resolve())
+    assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
+    assert captured["closed"] is True
+
+
+def test_main_rejects_stdin_marker_mixed_with_other_data_values(tmp_path: Path) -> None:
+    runner = CliRunner()
+    data_path = tmp_path / "a.csv"
+    data_path.write_text("x\n1\n", encoding="utf-8")
+
+    result = runner.invoke(app_module.app, ["--data", "-", "--data", str(data_path)], input="alpha\n")
+    assert result.exit_code == 2
+    assert "When using stdin, provide only --data -." in _strip_ansi(result.output)
+
+
+def test_main_exits_on_schema_mismatch_for_multiple_data_sources(tmp_path: Path) -> None:
+    runner = CliRunner()
+    first = tmp_path / "a.csv"
+    second = tmp_path / "b.csv"
+    first.write_text("city,x\na,1\n", encoding="utf-8")
+    second.write_text("city,x\nb,nope\n", encoding="utf-8")
+
+    result = runner.invoke(app_module.app, ["--data", str(first), "--data", str(second), "--no-ui"])
+    assert result.exit_code == 2
+    output = _strip_ansi(result.output)
+    assert "Schema mismatch in source 2" in output
+    assert second.name in output
 
 
 def _patch_stdin_fake_engine(
@@ -661,7 +733,7 @@ def test_main_reads_stdin_when_data_arg_is_dash(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
     _patch_stdin_tty(monkeypatch, can_run_tui=True)
 
-    result = runner.invoke(app_module.app, ["-"], input="alpha\nbeta\n")
+    result = runner.invoke(app_module.app, ["--data", "-"], input="alpha\nbeta\n")
 
     assert result.exit_code == 0
     data_path = cast(Path, captured["data_path"])
@@ -725,7 +797,7 @@ def test_main_runs_no_ui_for_stdin_when_requested(monkeypatch: pytest.MonkeyPatc
     _patch_stdin_fake_engine(monkeypatch, captured)
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
 
-    result = runner.invoke(app_module.app, ["-", "--no-ui"], input="a\nb\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--no-ui"], input="a\nb\n")
 
     assert result.exit_code == 0
     assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
@@ -756,7 +828,7 @@ def test_main_uses_execute_as_startup_query_in_tui(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
     _patch_stdin_tty(monkeypatch, can_run_tui=True)
 
-    result = runner.invoke(app_module.app, ["-", "--execute", sql], input="alpha\npython\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--execute", sql], input="alpha\npython\n")
 
     assert result.exit_code == 0
     assert captured["tui_run"] is True
@@ -784,7 +856,7 @@ def test_main_runs_execute_in_no_ui_mode(monkeypatch: pytest.MonkeyPatch) -> Non
     _patch_stdin_fake_engine(monkeypatch, captured)
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
 
-    result = runner.invoke(app_module.app, ["-", "--execute", sql, "--no-ui"], input="alpha\npython\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--execute", sql, "--no-ui"], input="alpha\npython\n")
 
     assert result.exit_code == 0
     assert captured["run_input"] == sql
@@ -811,7 +883,7 @@ def test_main_runs_execute_when_tty_is_unavailable(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
     _patch_stdin_tty(monkeypatch, can_run_tui=False)
 
-    result = runner.invoke(app_module.app, ["-", "--execute", sql], input="alpha\npython\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--execute", sql], input="alpha\npython\n")
 
     assert result.exit_code == 0
     assert captured["run_input"] == sql
@@ -824,7 +896,7 @@ def test_main_strips_ansi_escape_sequences_from_stdin(monkeypatch: pytest.Monkey
     captured: dict[str, Any] = {}
 
     _patch_stdin_fake_engine(monkeypatch, captured, capture_text=True)
-    result = runner.invoke(app_module.app, ["-", "--no-ui"], input="\x1b[31malpha\x1b[0m\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--no-ui"], input="\x1b[31malpha\x1b[0m\n")
 
     assert result.exit_code == 0
     assert captured["data_text"] == "alpha\n"
@@ -849,7 +921,7 @@ def test_main_falls_back_to_no_ui_when_tty_is_unavailable(monkeypatch: pytest.Mo
     monkeypatch.setattr(app_module, "SqlExplorerTui", cast(Any, FakeTui))
     _patch_stdin_tty(monkeypatch, can_run_tui=False)
 
-    result = runner.invoke(app_module.app, ["-"], input="alpha\n")
+    result = runner.invoke(app_module.app, ["--data", "-"], input="alpha\n")
 
     assert result.exit_code == 0
     assert captured["run_sql"] == ('SELECT * FROM "data" LIMIT 100', False)
@@ -882,7 +954,7 @@ def test_main_rejects_missing_data_when_stdin_is_tty(monkeypatch: pytest.MonkeyP
 
 def test_main_rejects_empty_stdin_input() -> None:
     runner = CliRunner()
-    result = runner.invoke(app_module.app, ["-"], input="")
+    result = runner.invoke(app_module.app, ["--data", "-"], input="")
     assert result.exit_code == 2
     assert app_module.stdin_io.STDIN_EMPTY_ERROR in result.output
 
@@ -904,7 +976,7 @@ def test_main_reads_query_file_for_no_ui_execution(monkeypatch: pytest.MonkeyPat
     query_file.write_text("  SELECT line FROM data  \n", encoding="utf-8")
 
     _patch_stdin_fake_engine(monkeypatch, captured)
-    result = runner.invoke(app_module.app, ["-", "--file", str(query_file), "--no-ui"], input="alpha\n")
+    result = runner.invoke(app_module.app, ["--data", "-", "--file", str(query_file), "--no-ui"], input="alpha\n")
 
     assert result.exit_code == 0
     assert captured["run_input"] == "SELECT line FROM data"

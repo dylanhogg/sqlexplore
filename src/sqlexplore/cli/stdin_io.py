@@ -14,7 +14,7 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x1B\x07
 _STDIN_TEMP_FILENAME = "stdin.txt"
 _STDIN_CHUNK_CHARS = 1024 * 1024
 STDIN_EMPTY_ERROR = "No stdin input received."
-STDIN_MISSING_SOURCE_ERROR = "Provide a data path/URL or pipe text via stdin."
+STDIN_MISSING_SOURCE_ERROR = "Provide one or more --data values, or pipe text via stdin."
 STDIN_TTY_FALLBACK_MESSAGE = "[stdin] No controlling TTY available; falling back to --no-ui."
 STDIN_LOCAL_PREFIX = "[stdin] local="
 

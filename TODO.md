@@ -10,6 +10,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 ## -> Next feature!
 
 - Union multiple input files into a single table
+    - Fix total row count on `SELECT * FROM "data_src_3" LIMIT 10`
     - Show loaded file(s) and row counts via /list-tables command
     - Review tables names when multiple: remove default "data" and auto-generate all names?
     - Fix bad union `Binder Error: Set operations can only apply to expressions with the same number of result columns`: uv run python -m sqlexplore.app data/example.parquet https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
