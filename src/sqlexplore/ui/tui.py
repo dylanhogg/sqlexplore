@@ -791,8 +791,6 @@ class ResultsTable(DataTable[RenderedCell]):
         self._require_update_dimensions = True
         self.check_idle()
         self.refresh(layout=True)
-        if self._on_column_resized is not None:
-            self._on_column_resized(column_index, width)
 
     def _start_resize(self, column_index: int, event: MouseDown) -> None:
         self._resize_state = _ColumnResizeState(
@@ -802,12 +800,11 @@ class ResultsTable(DataTable[RenderedCell]):
         )
         self.capture_mouse()
 
-    def _end_resize(self) -> bool:
+    def _end_resize(self) -> _ColumnResizeState | None:
         state = self._resize_state
-        did_drag = state.did_drag if state is not None else False
         self._resize_state = None
         self.release_mouse()
-        return did_drag
+        return state
 
     def consume_pending_header_sort_suppression(self) -> bool:
         if not self._suppress_next_header_select:
@@ -838,8 +835,13 @@ class ResultsTable(DataTable[RenderedCell]):
     def on_mouse_up(self, event: MouseUp) -> None:
         if self._resize_state is None:
             return
-        if self._end_resize():
+        state = self._end_resize()
+        if state is None:
+            return
+        if state.did_drag:
             self._suppress_next_header_select = True
+            if self._on_column_resized is not None:
+                self._on_column_resized(state.column_index, self._column_content_width(state.column_index))
         event.stop()
 
 
@@ -938,6 +940,7 @@ class SqlExplorerTui(App[None]):
         self._activity_lines: list[str] = []
         self._json_highlighter = JSONHighlighter()
         self._json_rendering_enabled = True
+        self._active_json_columns: set[int] = set()
         self._query_task: asyncio.Task[None] | None = None
         self._results_column_width_overrides: dict[int, int] = {}
 
@@ -1244,13 +1247,63 @@ class SqlExplorerTui(App[None]):
     def _clear_results_column_width_overrides(self) -> None:
         self._results_column_width_overrides.clear()
 
+    @staticmethod
+    def _header_selected_table(event: DataTable.HeaderSelected) -> ResultsTable:
+        return cast(ResultsTable, cast(Any, event).data_table)
+
     def _on_results_column_resized(self, column_index: int, width: int) -> None:
         self._results_column_width_overrides[column_index] = width
+        self._refresh_results_column_cells(column_index)
 
     def _add_results_columns(self, table: ResultsTable, columns: list[str]) -> None:
         for column_index, column_name in enumerate(columns):
             width = self._results_column_width_overrides.get(column_index)
             table.add_column(column_name, width=width)
+
+    def _results_column_render_char_limit(self, table: ResultsTable, column_index: int) -> int:
+        column = table.ordered_columns[column_index]
+        column_width = column.content_width if column.auto_width else column.width
+        return max(self.engine.max_value_chars, column_width)
+
+    def _results_column_char_limits(self, table: ResultsTable, column_count: int) -> list[int]:
+        return [self._results_column_render_char_limit(table, column_index) for column_index in range(column_count)]
+
+    def _render_results_cell(
+        self,
+        column_index: int,
+        value: CellValue,
+        json_columns: set[int],
+        max_value_chars: int,
+    ) -> RenderedCell:
+        if column_index in json_columns:
+            return self._render_json_cell(value, max_value_chars=max_value_chars)
+        return self._render_scalar_cell(value, max_value_chars=max_value_chars)
+
+    def _refresh_results_column_cells(self, column_index: int) -> None:
+        result = self._active_result
+        if result is None or not result.rows:
+            return
+        table = self._results_table()
+        if not table.is_valid_column_index(column_index) or column_index >= len(result.columns):
+            return
+
+        max_value_chars = self._results_column_render_char_limit(table, column_index)
+        json_columns = self._active_json_columns
+        private_table = cast(Any, table)
+        ordered_rows = table.ordered_rows
+        column_key = table.ordered_columns[column_index].key
+        if len(ordered_rows) != len(result.rows):
+            return
+
+        # Update only one column after resize commit to keep drag UX responsive.
+        for row_index, row in enumerate(result.rows):
+            if column_index >= len(row):
+                continue
+            rendered = self._render_results_cell(column_index, row[column_index], json_columns, max_value_chars)
+            row_key = ordered_rows[row_index].key
+            private_table._data[row_key][column_key] = rendered
+        private_table._update_count += 1
+        table.refresh_column(column_index)
 
     def _results_out_of_rows(self, result: QueryResult) -> int:
         if not result.sql:
@@ -1282,26 +1335,28 @@ class SqlExplorerTui(App[None]):
                 detected.add(index)
         return detected
 
-    def _render_json_cell(self, value: CellValue) -> RenderedCell:
+    def _render_json_cell(self, value: CellValue, *, max_value_chars: int | None = None) -> RenderedCell:
+        value_chars = self.engine.max_value_chars if max_value_chars is None else max_value_chars
         if not self._json_rendering_enabled:
-            return self._render_scalar_cell(value)
+            return self._render_scalar_cell(value, max_value_chars=value_chars)
         image = summarize_image_cell(value)
         if image is not None:
             return Text(format_image_cell_token(image), end="", no_wrap=True)
         compact = _compact_json_cell(value)
         if compact is None:
-            return self._render_scalar_cell(value)
+            return self._render_scalar_cell(value, max_value_chars=value_chars)
         highlighted = Text(compact, end="", no_wrap=True)
         self._json_highlighter.highlight(highlighted)
-        truncated = _truncate_highlighted_text(highlighted, self.engine.max_value_chars)
+        truncated = _truncate_highlighted_text(highlighted, value_chars)
         _stylize_links(truncated, clickable=False)
         return truncated
 
-    def _render_scalar_cell(self, value: CellValue) -> RenderedCell:
+    def _render_scalar_cell(self, value: CellValue, *, max_value_chars: int | None = None) -> RenderedCell:
+        value_chars = self.engine.max_value_chars if max_value_chars is None else max_value_chars
         if value is None:
             return Text("NULL", style=NULL_VALUE_STYLE, end="", no_wrap=True)
         if not self._json_rendering_enabled:
-            text = format_scalar(value, self.engine.max_value_chars)
+            text = format_scalar(value, value_chars)
             rendered = Text(text, end="", no_wrap=True)
             if not _stylize_links(rendered, clickable=False):
                 return text
@@ -1309,7 +1364,7 @@ class SqlExplorerTui(App[None]):
         image = summarize_image_cell(value)
         if image is not None:
             return Text(format_image_cell_token(image), end="", no_wrap=True)
-        text = format_scalar(value, self.engine.max_value_chars)
+        text = format_scalar(value, value_chars)
         rendered = Text(text, end="", no_wrap=True)
         if not _stylize_links(rendered, clickable=False):
             return text
@@ -1324,19 +1379,26 @@ class SqlExplorerTui(App[None]):
         table = self._results_table()
         table.clear(columns=True)
         if result is None or not result.columns:
+            self._active_json_columns = set()
             self.query_one("#results_header", Static).update(f"Results{self._json_rendering_status_suffix()}")
             self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
             return
 
         self._add_results_columns(table, result.columns)
         json_columns = self._detect_json_columns(result)
+        self._active_json_columns = json_columns
+        char_limits = self._results_column_char_limits(table, len(result.columns))
         for row in result.rows:
             rendered_row: list[RenderedCell] = []
             for index, value in enumerate(row):
-                if index in json_columns:
-                    rendered_row.append(self._render_json_cell(value))
-                else:
-                    rendered_row.append(self._render_scalar_cell(value))
+                rendered_row.append(
+                    self._render_results_cell(
+                        index,
+                        value,
+                        json_columns,
+                        char_limits[index] if index < len(char_limits) else self.engine.max_value_chars,
+                    )
+                )
             table.add_row(*rendered_row)
 
         out_of_rows = self._results_out_of_rows(result)
@@ -1453,7 +1515,7 @@ class SqlExplorerTui(App[None]):
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         table = self._results_table()
-        if cast(Any, event).data_table is not table:
+        if self._header_selected_table(event) is not table:
             return
         if table.consume_pending_header_sort_suppression():
             return

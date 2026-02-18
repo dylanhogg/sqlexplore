@@ -85,6 +85,12 @@ def _drag_column_resize(table: ResultsTable, column_index: int, delta_x: int) ->
     table.on_mouse_up(MouseUp(table, start_x + delta_x, 0, 0, 0, 1, False, False, False, style=header_style))
 
 
+def _cell_plain_text(cell: object) -> str:
+    if isinstance(cell, Text):
+        return cell.plain
+    return str(cell)
+
+
 def _parse_tsv(text: str) -> list[list[str]]:
     return list(csv.reader(StringIO(text), delimiter="\t"))
 
@@ -909,6 +915,32 @@ def test_results_column_resize_persists_across_redraws(tmp_path: Path) -> None:
                 app.on_data_table_header_selected(click)
                 await pilot.pause()
                 assert _column_content_width(results, 1) == resized_width
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_column_resize_expansion_reveals_more_text(tmp_path: Path) -> None:
+    async def run() -> None:
+        long_value = "x" * 400
+        app, engine = _build_app(tmp_path, csv_text=f"txt\n{long_value}\n")
+        engine.max_value_chars = 40
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                results = app.query_one("#results_table", ResultsTable)
+
+                before_text = _cell_plain_text(results.get_row_at(0)[0])
+                assert before_text.endswith("...")
+                assert len(before_text) < len(long_value)
+
+                _drag_column_resize(results, 0, 500)
+                await pilot.pause()
+
+                after_text = _cell_plain_text(results.get_row_at(0)[0])
+                assert len(after_text) > len(before_text)
+                assert after_text == long_value
         finally:
             engine.close()
 
