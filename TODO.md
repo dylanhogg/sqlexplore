@@ -14,7 +14,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
     - Show loaded file(s) and row counts via /list-tables command
     - Review tables names when multiple: remove default "data" and auto-generate all names?
     - Fix bad union `Binder Error: Set operations can only apply to expressions with the same number of result columns`: uv run python -m sqlexplore.app data/example.parquet https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
-- Make default /rows up to 1,000,000
+- ! Enable reproduce this results in a bash file that installs `uv` and runs `sqlexplore` with the same data files and SQL query
+- Make default /rows up to 1,000,000 (?)
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
 - Test all startup options and CLI args
 - Enable resize columns in results pane

@@ -9,6 +9,7 @@ import typer
 from typer.testing import CliRunner
 
 import sqlexplore.app as app_module
+import sqlexplore.cli.data_paths as data_paths_module
 import sqlexplore.core.engine as engine_module
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -69,15 +70,13 @@ class _ExplodingHttpResponse:
 
 
 def test_format_byte_count_scales_kb_mb_and_gb() -> None:
-    format_byte_count = getattr(app_module, "_format_byte_count")
-    assert format_byte_count(1024) == "1.0 KB"
-    assert format_byte_count(1024 * 1024) == "1.0 MB"
-    assert format_byte_count(1024 * 1024 * 1024) == "1.0 GB"
+    assert data_paths_module.format_byte_count(1024) == "1.0 KB"
+    assert data_paths_module.format_byte_count(1024 * 1024) == "1.0 MB"
+    assert data_paths_module.format_byte_count(1024 * 1024 * 1024) == "1.0 GB"
 
 
 def test_remote_filename_defaults_to_sanitized_host_when_path_is_empty() -> None:
-    remote_filename = getattr(app_module, "_remote_filename")
-    assert remote_filename("https://example.com:8443") == "example.com-8443.parquet"
+    assert data_paths_module.remote_filename("https://example.com:8443") == "example.com-8443.parquet"
 
 
 def test_emit_download_log_can_skip_activity_collection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,19 +95,16 @@ def test_emit_download_log_can_skip_activity_collection(monkeypatch: pytest.Monk
 
 
 def test_remote_content_length_handles_missing_and_invalid_headers() -> None:
-    remote_content_length = getattr(app_module, "_remote_content_length")
-
     class _NoHeaders:
         headers: Any = None
 
-    assert remote_content_length(_NoHeaders()) is None
-    assert remote_content_length(type("R", (), {"headers": {"Content-Length": "bad"}})()) is None
-    assert remote_content_length(type("R", (), {"headers": {"Content-Length": "0"}})()) is None
-    assert remote_content_length(type("R", (), {"headers": {"Content-Length": "7"}})()) == 7
+    assert data_paths_module.remote_content_length(_NoHeaders()) is None
+    assert data_paths_module.remote_content_length(type("R", (), {"headers": {"Content-Length": "bad"}})()) is None
+    assert data_paths_module.remote_content_length(type("R", (), {"headers": {"Content-Length": "0"}})()) is None
+    assert data_paths_module.remote_content_length(type("R", (), {"headers": {"Content-Length": "7"}})()) == 7
 
 
 def test_ensure_download_dir_wraps_mkdir_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    ensure_download_dir = getattr(app_module, "_ensure_download_dir")
     target = tmp_path / "downloads"
     real_mkdir = Path.mkdir
 
@@ -119,7 +115,7 @@ def test_ensure_download_dir_wraps_mkdir_oserror(tmp_path: Path, monkeypatch: py
 
     monkeypatch.setattr(Path, "mkdir", failing_mkdir)
     with pytest.raises(typer.BadParameter, match=r"Download directory is not writable"):
-        ensure_download_dir(target)
+        data_paths_module.ensure_download_dir(target)
 
 
 def test_download_remote_data_file_writes_file_and_logs(
@@ -266,8 +262,7 @@ def test_download_remote_data_file_wraps_error_before_progress_bar_exists(
     ],
 )
 def test_remote_filename_accepts_csv_tsv_and_txt(url: str, expected: str) -> None:
-    remote_filename = getattr(app_module, "_remote_filename")
-    assert remote_filename(url) == expected
+    assert data_paths_module.remote_filename(url) == expected
 
 
 def test_resolve_data_path_rejects_remote_unsupported_extension() -> None:

@@ -43,19 +43,6 @@ __all__ = [
 ]
 
 
-_is_http_url = data_paths.is_http_url
-
-
-def _default_download_dir() -> Path:
-    return data_paths.default_download_dir()
-
-
-_format_byte_count = data_paths.format_byte_count
-
-
-_remote_filename = data_paths.remote_filename
-
-
 def _emit_download_log(
     message: str,
     activity_messages: list[str] | None = None,
@@ -72,12 +59,6 @@ def _emit_download_log(
         include_activity=include_activity,
         echo_fn=typer.echo,
     )
-
-
-_remote_content_length = data_paths.remote_content_length
-
-
-_ensure_download_dir = data_paths.ensure_download_dir
 
 
 def _download_remote_data_file(
@@ -111,10 +92,6 @@ def _resolve_data_path(
         startup_activity_messages=startup_activity_messages,
         download_remote=_download_remote_data_file,
     )
-
-
-def _file_debug_metadata(file_path: Path) -> dict[str, Any]:
-    return data_paths.file_debug_metadata(file_path)
 
 
 def _render_console_response(console: Console, response: EngineResponse, max_value_chars: int) -> int:
@@ -154,22 +131,6 @@ def _run_console_query_and_exit(engine: SqlExplorerEngine, query: str | None) ->
     )
     exit_code = _render_console_response(Console(), response, engine.max_value_chars)
     raise typer.Exit(code=exit_code)
-
-
-def _resolve_main_data_sources(
-    data: list[str] | None,
-    download_dir: Path,
-    overwrite: bool,
-    startup_activity_messages: list[str],
-) -> tuple[tuple[Path, ...], bool, stdin_io.StdinCapture | None]:
-    resolved = data_args.resolve_main_data_sources(
-        data,
-        download_dir=download_dir,
-        overwrite=overwrite,
-        startup_activity_messages=startup_activity_messages,
-        resolve_data_path=_resolve_data_path,
-    )
-    return resolved.paths, resolved.use_stdin, resolved.stdin_capture
 
 
 def _version_callback(version: bool) -> None:
@@ -222,7 +183,7 @@ def main(
         help="When any --data value is an HTTP(S) URL, overwrite existing local download if present.",
     ),
     download_dir: Path = typer.Option(
-        _default_download_dir(),
+        data_paths.default_download_dir(),
         "--download-dir",
         help="When any --data value is an HTTP(S) URL, directory used for downloaded files.",
     ),
@@ -257,25 +218,29 @@ def main(
         raise typer.BadParameter("Use either --execute or --file, not both.")
 
     startup_activity_messages: list[str] = []
-    data_paths, use_stdin, stdin_capture = _resolve_main_data_sources(
+    resolved_data_sources = data_args.resolve_main_data_sources(
         data,
         download_dir=download_dir,
         overwrite=overwrite,
         startup_activity_messages=startup_activity_messages,
+        resolve_data_path=_resolve_data_path,
     )
-    if not data_paths:
+    resolved_paths = resolved_data_sources.paths
+    use_stdin = resolved_data_sources.use_stdin
+    stdin_capture = resolved_data_sources.stdin_capture
+    if not resolved_paths:
         raise typer.BadParameter("At least one data source is required.")
-    first_data_path = next(iter(data_paths))
-    logger.info("data sources resolved count=%s use_stdin=%s paths=%s", len(data_paths), use_stdin, data_paths)
-    for file_path in data_paths:
+    first_data_path = next(iter(resolved_paths))
+    logger.info("data sources resolved count=%s use_stdin=%s paths=%s", len(resolved_paths), use_stdin, resolved_paths)
+    for file_path in resolved_paths:
         try:
-            logger.debug("data file metadata=%s", _file_debug_metadata(file_path))
+            logger.debug("data file metadata=%s", data_paths.file_debug_metadata(file_path))
         except OSError:
             logger.exception("failed to stat data file path=%s", file_path)
 
     engine_kwargs: dict[str, Any] = {}
-    if len(data_paths) > 1:
-        engine_kwargs["data_paths"] = data_paths
+    if len(resolved_paths) > 1:
+        engine_kwargs["data_paths"] = resolved_paths
 
     engine = SqlExplorerEngine(
         data_path=first_data_path,

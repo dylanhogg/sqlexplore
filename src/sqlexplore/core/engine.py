@@ -267,11 +267,8 @@ class SqlExplorerEngine:
             raise
         logger.info("engine init complete columns=%s", len(self.columns))
 
-    def _source_view_name(self, source_index: int) -> str:
-        return source_view_name(self.table_name, source_index)
-
     def _load_source_view(self, source_index: int, data_path: Path) -> str:
-        view_name = self._source_view_name(source_index)
+        view_name = source_view_name(self.table_name, source_index)
         reader = _detect_reader(data_path)
         source_sql = f"{reader.function_name}({sql_literal(str(data_path))}{reader.args})"
         load_query = render_load_query(source_sql, reader.query_template)
@@ -310,20 +307,13 @@ class SqlExplorerEngine:
                 )
             )
 
-    @staticmethod
-    def _union_sql(source_views: tuple[str, ...]) -> str:
-        return union_sql(source_views)
-
-    def _count_table_rows(self, table_name: str) -> int:
-        return count_table_rows(self.conn, table_name)
-
     def _refresh_startup_tables(self) -> None:
         source_rows = tuple(
             StartupTableInfo(
                 role="source",
                 table_name=source_view,
                 source=str(source_path),
-                row_count=self._count_table_rows(source_view),
+                row_count=count_table_rows(self.conn, source_view),
             )
             for source_view, source_path in zip(self.source_view_names, self.data_paths, strict=False)
         )
@@ -332,7 +322,7 @@ class SqlExplorerEngine:
             role="union",
             table_name=self.table_name,
             source=union_source,
-            row_count=self._count_table_rows(self.table_name),
+            row_count=count_table_rows(self.conn, self.table_name),
         )
         self._startup_tables = (*source_rows, union_row)
 
@@ -344,7 +334,7 @@ class SqlExplorerEngine:
         )
         self._validate_source_schemas(source_views)
         self.source_view_names = source_views
-        self._union_source_sql = self._union_sql(source_views)
+        self._union_source_sql = union_sql(source_views)
         self.conn.execute(f'CREATE VIEW "{self.table_name}" AS {self._union_source_sql}')
         self._refresh_startup_tables()
 
@@ -416,7 +406,7 @@ class SqlExplorerEngine:
         return command_usage_lines(self._command_specs)
 
     def row_count(self) -> int:
-        return self._count_table_rows(self.table_name)
+        return count_table_rows(self.conn, self.table_name)
 
     def startup_tables(self) -> list[tuple[str, str, str, int]]:
         return [
