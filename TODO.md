@@ -9,14 +9,13 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
+- Enable resize columns in results pane
 - Union multiple input files into a single table
     - Fix total row count on `SELECT * FROM "data_src_3" LIMIT 10`
     - If only 1 data source, don't have a union table, just use the single source table
 - ! Enable reproduce this results in a bash file that installs `uv` and runs `sqlexplore` with the same data files and SQL query
-- Make default /rows 1,000,000  (?)
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
 - Test all startup options and CLI args
-- Enable resize columns in results pane
 - Update README docs
 - Migrate logging from file to sqlite database
 - Textual double click to select row? & Cmd+A to select all? (maybe not? codex://threads/019c6a4a-4e25-7842-a7db-356a983f93b7)
