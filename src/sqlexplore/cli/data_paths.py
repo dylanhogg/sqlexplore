@@ -1,3 +1,4 @@
+import hashlib
 import re
 import sys
 import time
@@ -13,6 +14,7 @@ from sqlexplore.core.logging_utils import get_logger
 
 REMOTE_FILENAME_SAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
 REMOTE_DOWNLOAD_CHUNK_SIZE = 5 * 1024 * 1024
+REMOTE_URL_HASH_LENGTH = 12
 logger = get_logger(__name__)
 
 
@@ -41,9 +43,12 @@ def remote_filename(url: str) -> str:
     if not file_name:
         host_name = REMOTE_FILENAME_SAFE_CHARS_RE.sub("-", parsed.netloc).strip("-")
         file_name = f"{host_name or 'download'}.parquet"
-    if Path(file_name).suffix.lower() not in {".csv", ".tsv", ".txt", ".parquet", ".pq"}:
+    suffix = Path(file_name).suffix.lower()
+    if suffix not in {".csv", ".tsv", ".txt", ".parquet", ".pq"}:
         raise typer.BadParameter("Remote URL must end with .csv, .tsv, .txt, .parquet, or .pq.")
-    return file_name
+    stem = Path(file_name).stem
+    url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:REMOTE_URL_HASH_LENGTH]
+    return f"{stem}-{url_hash}{suffix}"
 
 
 def emit_download_log(
