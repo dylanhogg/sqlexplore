@@ -169,7 +169,6 @@ def main(
         download_dir=download_dir,
         overwrite=overwrite,
         startup_activity_messages=startup_activity_messages,
-        resolve_data_path=data_paths.resolve_data_path,
     )
     resolved_paths = resolved_data_sources.paths
     use_stdin = resolved_data_sources.use_stdin

@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from sqlexplore.core.engine import SqlExplorerEngine
 from sqlexplore.llm.llm_sql import (
     DEFAULT_LLM_MODEL,
@@ -38,30 +40,34 @@ def _build_engine(
     )
 
 
-def test_resolve_llm_model_uses_default_when_missing_or_blank() -> None:
-    assert resolve_llm_model({}) == DEFAULT_LLM_MODEL
-    assert resolve_llm_model({SQLEXPLORE_LLM_MODEL_ENV_VAR: "   "}) == DEFAULT_LLM_MODEL
+def test_resolve_llm_model_uses_default_when_missing_or_blank(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(SQLEXPLORE_LLM_MODEL_ENV_VAR, raising=False)
+    assert resolve_llm_model() == DEFAULT_LLM_MODEL
+    monkeypatch.setenv(SQLEXPLORE_LLM_MODEL_ENV_VAR, "   ")
+    assert resolve_llm_model() == DEFAULT_LLM_MODEL
 
 
-def test_resolve_llm_model_uses_env_value() -> None:
-    env = {SQLEXPLORE_LLM_MODEL_ENV_VAR: "anthropic/claude-3-5-sonnet"}
-    assert resolve_llm_model(env) == "anthropic/claude-3-5-sonnet"
+def test_resolve_llm_model_uses_env_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(SQLEXPLORE_LLM_MODEL_ENV_VAR, "anthropic/claude-3-5-sonnet")
+    assert resolve_llm_model() == "anthropic/claude-3-5-sonnet"
 
 
-def test_resolve_llm_api_key_env_var_prefers_litellm_key() -> None:
-    env = {
-        "OPENAI_API_KEY": "openai-key",
-        LITELLM_API_KEY_ENV_VAR: "litellm-key",
-    }
-    assert resolve_llm_api_key_env_var(env) == LITELLM_API_KEY_ENV_VAR
+def test_resolve_llm_api_key_env_var_prefers_litellm_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv(LITELLM_API_KEY_ENV_VAR, "litellm-key")
+    assert resolve_llm_api_key_env_var() == LITELLM_API_KEY_ENV_VAR
 
 
-def test_validate_llm_api_key_accepts_common_provider_key() -> None:
-    assert validate_llm_api_key({"OPENAI_API_KEY": "key"}) is None
+def test_validate_llm_api_key_accepts_common_provider_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    assert validate_llm_api_key() is None
 
 
-def test_validate_llm_api_key_returns_explicit_message_when_missing() -> None:
-    message = validate_llm_api_key({})
+def test_validate_llm_api_key_returns_explicit_message_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(SQLEXPLORE_LLM_MODEL_ENV_VAR, raising=False)
+    for env_var in LLM_API_KEY_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+    message = validate_llm_api_key()
     assert message is not None
     assert "LLM API key not found in environment." in message
     assert LITELLM_API_KEY_ENV_VAR in message

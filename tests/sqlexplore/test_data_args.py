@@ -16,7 +16,7 @@ class _FakeCapture:
         return f"{stdin_io.STDIN_LOCAL_PREFIX}{self.path}"
 
 
-def test_resolve_main_data_sources_resolves_multiple_values(tmp_path: Path) -> None:
+def test_resolve_main_data_sources_resolves_multiple_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, Path, bool]] = []
     activity_messages: list[str] = []
 
@@ -30,12 +30,13 @@ def test_resolve_main_data_sources_resolves_multiple_values(tmp_path: Path) -> N
         assert startup_activity_messages is activity_messages
         return (tmp_path / raw_value).resolve()
 
+    monkeypatch.setattr(data_args.data_paths, "resolve_data_path", fake_resolve)
+
     out = data_args.resolve_main_data_sources(
         ["a.csv", "b.csv"],
         download_dir=tmp_path,
         overwrite=True,
         startup_activity_messages=activity_messages,
-        resolve_data_path=fake_resolve,
     )
 
     assert out.use_stdin is False
@@ -45,42 +46,17 @@ def test_resolve_main_data_sources_resolves_multiple_values(tmp_path: Path) -> N
 
 
 def test_resolve_main_data_sources_requires_exclusive_stdin_marker(tmp_path: Path) -> None:
-    def resolve_to_tmp(
-        raw_value: str,
-        download_dir: Path,
-        overwrite: bool,
-        startup_activity_messages: list[str] | None = None,
-    ) -> Path:
-        _ = raw_value
-        _ = download_dir
-        _ = overwrite
-        _ = startup_activity_messages
-        return tmp_path
-
     with pytest.raises(typer.BadParameter, match=r"only --data -"):
         data_args.resolve_main_data_sources(
             ["-", "a.csv"],
             download_dir=tmp_path,
             overwrite=False,
             startup_activity_messages=[],
-            resolve_data_path=resolve_to_tmp,
         )
 
 
 def test_resolve_main_data_sources_reads_stdin_when_no_data(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     capture = _FakeCapture((tmp_path / "stdin.txt").resolve())
-
-    def resolve_to_tmp(
-        raw_value: str,
-        download_dir: Path,
-        overwrite: bool,
-        startup_activity_messages: list[str] | None = None,
-    ) -> Path:
-        _ = raw_value
-        _ = download_dir
-        _ = overwrite
-        _ = startup_activity_messages
-        return tmp_path
 
     def use_stdin(_data: str | None = None) -> bool:
         _ = _data
@@ -98,7 +74,6 @@ def test_resolve_main_data_sources_reads_stdin_when_no_data(monkeypatch: pytest.
         download_dir=tmp_path,
         overwrite=False,
         startup_activity_messages=messages,
-        resolve_data_path=resolve_to_tmp,
     )
 
     assert out.use_stdin is True
@@ -110,18 +85,6 @@ def test_resolve_main_data_sources_reads_stdin_when_no_data(monkeypatch: pytest.
 def test_resolve_main_data_sources_errors_without_data_or_stdin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    def resolve_to_tmp(
-        raw_value: str,
-        download_dir: Path,
-        overwrite: bool,
-        startup_activity_messages: list[str] | None = None,
-    ) -> Path:
-        _ = raw_value
-        _ = download_dir
-        _ = overwrite
-        _ = startup_activity_messages
-        return tmp_path
-
     def no_stdin(_data: str | None = None) -> bool:
         _ = _data
         return False
@@ -134,5 +97,4 @@ def test_resolve_main_data_sources_errors_without_data_or_stdin(
             download_dir=tmp_path,
             overwrite=False,
             startup_activity_messages=[],
-            resolve_data_path=resolve_to_tmp,
         )

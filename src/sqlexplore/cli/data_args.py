@@ -1,12 +1,10 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Sequence
 
 import typer
 
-from sqlexplore.cli import stdin_io
-
-type ResolveDataPathFn = Callable[[str, Path, bool, list[str] | None], Path]
+from sqlexplore.cli import data_paths, stdin_io
 
 
 @dataclass(slots=True, frozen=True)
@@ -33,7 +31,6 @@ def resolve_main_data_sources(
     download_dir: Path,
     overwrite: bool,
     startup_activity_messages: list[str],
-    resolve_data_path: ResolveDataPathFn,
 ) -> ResolvedMainDataSources:
     normalized = _normalize_data_values(data_values)
     has_stdin_marker = any(raw_value == "-" for raw_value in normalized)
@@ -47,7 +44,7 @@ def resolve_main_data_sources(
 
     if normalized:
         paths: tuple[Path, ...] = tuple(
-            resolve_data_path(
+            data_paths.resolve_data_path(
                 raw_value,
                 download_dir,
                 overwrite,
