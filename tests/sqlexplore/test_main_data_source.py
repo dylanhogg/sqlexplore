@@ -945,7 +945,7 @@ def test_main_rejects_missing_data_when_stdin_is_tty(monkeypatch: pytest.MonkeyP
             data=None,
             table_name="data",
             limit=100,
-            max_rows=1000,
+            max_rows=10000,
             max_value_chars=160,
             database=":memory:",
             execute=None,
