@@ -13,7 +13,7 @@ from sqlexplore.commands.llm_runner import (
 )
 from sqlexplore.commands.protocols import CommandEngine
 from sqlexplore.core.engine_models import EngineResponse, HistoryQueryType, QueryHistoryEntry
-from sqlexplore.llm.llm_sql import SampleRows
+from sqlexplore.llm.llm_sql import LlmTableContext, SampleRows, TableSampleRows
 
 
 def test_run_llm_query_with_retry_default_deps_pass_allowed_tables(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -25,12 +25,14 @@ def test_run_llm_query_with_retry_default_deps_pass_allowed_tables(monkeypatch: 
         schema_context: str,
         sample_rows: SampleRows,
         allowed_table_names: tuple[str, ...] | None = None,
+        table_context: LlmTableContext | None = None,
     ) -> str:
         _ = user_query
         _ = table_name
         _ = schema_context
         _ = sample_rows
         captured["prompt"] = allowed_table_names
+        captured["prompt_ctx_tables"] = table_context.allowed_table_names if table_context is not None else None
         return "prompt"
 
     def fake_build_repair_prompt(
@@ -41,6 +43,7 @@ def test_run_llm_query_with_retry_default_deps_pass_allowed_tables(monkeypatch: 
         schema_context: str,
         sample_rows: SampleRows,
         allowed_table_names: tuple[str, ...] | None = None,
+        table_context: LlmTableContext | None = None,
     ) -> str:
         _ = user_query
         _ = previous_sql
@@ -49,6 +52,7 @@ def test_run_llm_query_with_retry_default_deps_pass_allowed_tables(monkeypatch: 
         _ = schema_context
         _ = sample_rows
         captured["repair"] = allowed_table_names
+        captured["repair_ctx_tables"] = table_context.allowed_table_names if table_context is not None else None
         return "repair"
 
     def fake_validate(sql: str, table_name: str, allowed_table_names: tuple[str, ...] | None = None) -> str | None:
@@ -57,21 +61,31 @@ def test_run_llm_query_with_retry_default_deps_pass_allowed_tables(monkeypatch: 
         captured["validate"] = allowed_table_names
         return None
 
-    def fake_build_schema_context(engine: CommandEngine) -> str:
+    def fake_build_table_context(
+        engine: CommandEngine,
+        allowed_table_names: tuple[str, ...] | None = None,
+        sample_rows_per_table: int = 3,
+        max_tables_with_samples: int = 3,
+    ) -> LlmTableContext:
         _ = engine
-        return "Schema:\n- x: VARCHAR"
-
-    def fake_fetch_sample_rows(engine: CommandEngine) -> SampleRows:
-        _ = engine
-        return SampleRows(columns=("x",), rows=(("a",),))
+        _ = sample_rows_per_table
+        _ = max_tables_with_samples
+        return LlmTableContext(
+            active_table_name="users",
+            allowed_table_names=tuple(allowed_table_names or ("users",)),
+            schema_context='Schema:\n- Table "users":\n  - id: BIGINT (nullable=YES)',
+            active_sample_rows=SampleRows(columns=("id",), rows=((1,),)),
+            sample_rows_by_table=(
+                TableSampleRows(table_name="users", sample_rows=SampleRows(columns=("id",), rows=((1,),))),
+            ),
+        )
 
     def fake_generate_sql(prompt: str, model: str) -> str:
         _ = prompt
         _ = model
         return 'SELECT * FROM "users"'
 
-    monkeypatch.setattr(llm_runner_module, "build_schema_context", fake_build_schema_context)
-    monkeypatch.setattr(llm_runner_module, "fetch_sample_rows", fake_fetch_sample_rows)
+    monkeypatch.setattr(llm_runner_module, "build_llm_table_context", fake_build_table_context)
     monkeypatch.setattr(llm_runner_module, "build_prompt", fake_build_prompt)
     monkeypatch.setattr(llm_runner_module, "build_repair_prompt", fake_build_repair_prompt)
     monkeypatch.setattr(llm_runner_module, "validate_generated_sql", fake_validate)
@@ -84,6 +98,7 @@ def test_run_llm_query_with_retry_default_deps_pass_allowed_tables(monkeypatch: 
     assert out.status == "response"
     assert captured == {
         "prompt": ("users", "events"),
+        "prompt_ctx_tables": ("users", "events"),
         "validate": ("users", "events"),
     }
 

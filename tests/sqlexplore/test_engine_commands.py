@@ -1536,6 +1536,26 @@ def test_use_command_completion_suggests_loaded_tables(tmp_path: Path) -> None:
         engine.close()
 
 
+def test_table_completion_scores_do_not_depend_on_completion_call_order(tmp_path: Path) -> None:
+    engine = _build_tables_engine(tmp_path)
+    try:
+        _ = engine.completion_items("/use ", (0, len("/use ")))
+        from_items = engine.completion_items("SELECT * FROM ", (0, len("SELECT * FROM ")))
+        users_item = next(item for item in from_items if item.insert_text == "users")
+        assert users_item.score == 150
+    finally:
+        engine.close()
+
+    engine = _build_tables_engine(tmp_path)
+    try:
+        _ = engine.completion_items("SELECT * FROM ", (0, len("SELECT * FROM ")))
+        use_items = engine.completion_items("/use ", (0, len("/use ")))
+        users_item = next(item for item in use_items if item.insert_text == "users")
+        assert users_item.score == 140
+    finally:
+        engine.close()
+
+
 def test_sql_where_context_suggests_predicates(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path)
     try:

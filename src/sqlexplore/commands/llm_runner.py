@@ -7,11 +7,11 @@ from typing import Literal
 from sqlexplore.core.engine_models import EngineResponse
 from sqlexplore.core.logging_utils import get_logger, log_event
 from sqlexplore.llm.llm_sql import (
+    LlmTableContext,
     SampleRows,
+    build_llm_table_context,
     build_prompt,
     build_repair_prompt,
-    build_schema_context,
-    fetch_sample_rows,
     generate_sql,
     llm_trace_context,
     validate_generated_sql,
@@ -148,45 +148,15 @@ def _log_sql_execution_event(
     )
 
 
-def _default_runner_deps(allowed_table_names: tuple[str, ...] | None) -> LlmRunnerDeps:
-    def build_prompt_with_tables(user_query: str, table_name: str, schema_context: str, sample_rows: SampleRows) -> str:
-        return build_prompt(
-            user_query,
-            table_name,
-            schema_context,
-            sample_rows,
-            allowed_table_names=allowed_table_names,
-        )
+@dataclass(frozen=True, slots=True)
+class DefaultLlmContext:
+    allowed_table_names: tuple[str, ...]
+    table_context: LlmTableContext
 
-    def build_repair_prompt_with_tables(
-        user_query: str,
-        previous_sql: str,
-        error_message: str,
-        table_name: str,
-        schema_context: str,
-        sample_rows: SampleRows,
-    ) -> str:
-        return build_repair_prompt(
-            user_query,
-            previous_sql,
-            error_message,
-            table_name,
-            schema_context,
-            sample_rows,
-            allowed_table_names=allowed_table_names,
-        )
 
-    def validate_generated_sql_with_tables(sql: str, table_name: str) -> str | None:
-        return validate_generated_sql(sql, table_name, allowed_table_names=allowed_table_names)
-
-    return LlmRunnerDeps(
-        build_schema_context=build_schema_context,
-        fetch_sample_rows=fetch_sample_rows,
-        build_prompt=build_prompt_with_tables,
-        build_repair_prompt=build_repair_prompt_with_tables,
-        generate_sql=generate_sql,
-        validate_generated_sql=validate_generated_sql_with_tables,
-    )
+def _resolve_allowed_table_names(engine: CommandEngine) -> tuple[str, ...]:
+    engine_table_names = getattr(engine, "table_names", ())
+    return tuple(engine_table_names) or (engine.table_name,)
 
 
 def run_llm_query_with_retry(
@@ -197,32 +167,54 @@ def run_llm_query_with_retry(
     deps: LlmRunnerDeps | None = None,
     trace_id: str | None = None,
 ) -> LlmRunResult:
-    engine_table_names = getattr(engine, "table_names", ())
-    allowed_table_names = tuple(engine_table_names) or (engine.table_name,)
+    default_context: DefaultLlmContext | None = None
+    allowed_table_names = _resolve_allowed_table_names(engine)
     active_config = config or LlmRunnerConfig()
     if active_config.max_retries < 0:
         raise ValueError(f"Expected non-negative retries, got {active_config.max_retries=}")
-    active_deps = deps or _default_runner_deps(allowed_table_names)
-
-    schema_context = active_deps.build_schema_context(engine)
-    sample_rows = active_deps.fetch_sample_rows(engine)
-    current_prompt = active_deps.build_prompt(
-        user_query,
-        engine.table_name,
-        schema_context,
-        sample_rows,
-    )
+    if deps is None:
+        table_context = build_llm_table_context(engine, allowed_table_names=allowed_table_names)
+        default_context = DefaultLlmContext(
+            allowed_table_names=allowed_table_names,
+            table_context=table_context,
+        )
+        schema_context = table_context.schema_context
+        sample_rows = table_context.active_sample_rows
+        current_prompt = build_prompt(
+            user_query,
+            engine.table_name,
+            schema_context,
+            sample_rows,
+            allowed_table_names=allowed_table_names,
+            table_context=table_context,
+        )
+    else:
+        schema_context = deps.build_schema_context(engine)
+        sample_rows = deps.fetch_sample_rows(engine)
+        current_prompt = deps.build_prompt(
+            user_query,
+            engine.table_name,
+            schema_context,
+            sample_rows,
+        )
     retry_count = 0
     sql: str
     with llm_trace_context(trace_id):
         while True:
             try:
-                sql = active_deps.generate_sql(current_prompt, model)
+                sql = generate_sql(current_prompt, model) if deps is None else deps.generate_sql(current_prompt, model)
             except Exception:  # noqa: BLE001
                 logger.exception("llm command provider error model=%s retry_count=%s", model, retry_count)
                 return LlmRunResult.provider_error(retry_count)
 
-            sql_error = active_deps.validate_generated_sql(sql, engine.table_name)
+            if deps is None:
+                sql_error = validate_generated_sql(
+                    sql,
+                    engine.table_name,
+                    allowed_table_names=default_context.allowed_table_names if default_context is not None else None,
+                )
+            else:
+                sql_error = deps.validate_generated_sql(sql, engine.table_name)
             if sql_error is not None:
                 if retry_count >= active_config.max_retries:
                     logger.error("llm command invalid sql reason=%s", sql_error)
@@ -230,15 +222,28 @@ def run_llm_query_with_retry(
                 retry_count += 1
                 logger.info("llm command retry=%s reason=validation error=%s", retry_count, sql_error)
                 _log_retry_event(trace_id, retry_count, "validation_error", sql_error, sql)
-                current_prompt = _build_repair_prompt(
-                    active_deps,
-                    user_query,
-                    sql,
-                    sql_error,
-                    engine.table_name,
-                    schema_context,
-                    sample_rows,
-                )
+                if deps is None:
+                    assert default_context is not None
+                    current_prompt = build_repair_prompt(
+                        user_query,
+                        sql,
+                        sql_error,
+                        engine.table_name,
+                        schema_context,
+                        sample_rows,
+                        allowed_table_names=default_context.allowed_table_names,
+                        table_context=default_context.table_context,
+                    )
+                else:
+                    current_prompt = _build_repair_prompt(
+                        deps,
+                        user_query,
+                        sql,
+                        sql_error,
+                        engine.table_name,
+                        schema_context,
+                        sample_rows,
+                    )
                 continue
 
             logger.info("llm command generated sql chars=%s retry_count=%s", len(sql), retry_count)
@@ -254,12 +259,25 @@ def run_llm_query_with_retry(
             retry_count += 1
             logger.info("llm command retry=%s reason=duckdb_error error=%s", retry_count, out.message)
             _log_retry_event(trace_id, retry_count, "duckdb_error", out.message, sql)
-            current_prompt = _build_repair_prompt(
-                active_deps,
-                user_query,
-                sql,
-                out.message,
-                engine.table_name,
-                schema_context,
-                sample_rows,
-            )
+            if deps is None:
+                assert default_context is not None
+                current_prompt = build_repair_prompt(
+                    user_query,
+                    sql,
+                    out.message,
+                    engine.table_name,
+                    schema_context,
+                    sample_rows,
+                    allowed_table_names=default_context.allowed_table_names,
+                    table_context=default_context.table_context,
+                )
+            else:
+                current_prompt = _build_repair_prompt(
+                    deps,
+                    user_query,
+                    sql,
+                    out.message,
+                    engine.table_name,
+                    schema_context,
+                    sample_rows,
+                )

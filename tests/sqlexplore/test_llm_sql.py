@@ -1,14 +1,17 @@
 from pathlib import Path
 from typing import Any
 
-from sqlexplore.core.engine import SqlExplorerEngine
+from sqlexplore.core.engine import DataSourceBinding, SqlExplorerEngine
 from sqlexplore.llm.llm_sql import (
     DEFAULT_LLM_MODEL,
     DEFAULT_SAMPLE_ROWS,
     LITELLM_API_KEY_ENV_VAR,
     LLM_API_KEY_ENV_VARS,
     SQLEXPLORE_LLM_MODEL_ENV_VAR,
+    LlmTableContext,
     SampleRows,
+    TableSampleRows,
+    build_llm_table_context,
     build_prompt,
     build_repair_prompt,
     build_schema_context,
@@ -35,6 +38,27 @@ def _build_engine(
         default_limit=10,
         max_rows_display=100,
         max_value_chars=80,
+    )
+
+
+def _build_tables_engine(tmp_path: Path) -> SqlExplorerEngine:
+    users_path = tmp_path / "users.csv"
+    events_path = tmp_path / "events.csv"
+    users_path.write_text("id,name\n1,Alice\n2,Bob\n", encoding="utf-8")
+    events_path.write_text("user_id,event\n1,login\n2,logout\n", encoding="utf-8")
+    return SqlExplorerEngine(
+        data_path=users_path,
+        table_name="data",
+        database=":memory:",
+        default_limit=10,
+        max_rows_display=100,
+        max_value_chars=80,
+        data_sources=(
+            DataSourceBinding(path=users_path, table_name="users"),
+            DataSourceBinding(path=events_path, table_name="events"),
+        ),
+        load_mode="tables",
+        active_table="users",
     )
 
 
@@ -129,6 +153,51 @@ def test_build_prompt_allows_multiple_loaded_tables() -> None:
     )
     assert 'Use only loaded tables: "users", "events".' in prompt
     assert 'Use "users" when one table is sufficient.' in prompt
+
+
+def test_build_prompt_uses_table_context_for_schema_and_samples() -> None:
+    schema_context = (
+        'Schema:\n- Table "users":\n  - id: BIGINT (nullable=YES)\n- Table "events":\n  - event: VARCHAR (nullable=YES)'
+    )
+    table_context = LlmTableContext(
+        active_table_name="users",
+        allowed_table_names=("users", "events"),
+        schema_context=schema_context,
+        active_sample_rows=SampleRows(columns=("id", "name"), rows=((1, "Alice"),)),
+        sample_rows_by_table=(
+            TableSampleRows(table_name="users", sample_rows=SampleRows(columns=("id",), rows=((1,),))),
+            TableSampleRows(table_name="events", sample_rows=SampleRows(columns=("event",), rows=(("login",),))),
+        ),
+    )
+    prompt = build_prompt(
+        user_query="join users and events",
+        table_name="users",
+        schema_context="Schema:\n- id: BIGINT (nullable=YES)",
+        sample_rows=SampleRows(columns=("id",), rows=((1,),)),
+        table_context=table_context,
+    )
+    assert 'Use only loaded tables: "users", "events".' in prompt
+    assert 'Table "events"' in prompt
+    assert "Sample rows by table:" in prompt
+
+
+def test_build_llm_table_context_includes_schema_for_all_allowed_tables(tmp_path: Path) -> None:
+    engine = _build_tables_engine(tmp_path)
+    try:
+        table_context = build_llm_table_context(
+            engine,
+            allowed_table_names=("users", "events"),
+            sample_rows_per_table=2,
+            max_tables_with_samples=2,
+        )
+    finally:
+        engine.close()
+    assert table_context.allowed_table_names == ("users", "events")
+    assert table_context.active_table_name == "users"
+    assert '- Table "users":' in table_context.schema_context
+    assert '- Table "events":' in table_context.schema_context
+    assert table_context.sample_rows_by_table[0].table_name == "users"
+    assert table_context.sample_rows_by_table[1].table_name == "events"
 
 
 def test_select_duckdb_guidance_adds_regex_json_struct_and_temporal_sections() -> None:

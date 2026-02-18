@@ -21,6 +21,7 @@ from sqlexplore.commands.registry import (
 )
 from sqlexplore.completion.completions import CompletionEngine, EngineCompletionCatalog
 from sqlexplore.completion.models import CompletionItem, CompletionResult, SqlClause
+from sqlexplore.core.data_source_plan import DataLoadMode, DataSourceBinding, plan_engine_data_sources
 from sqlexplore.core.engine_models import (
     EngineResponse,
     HistoryQueryType,
@@ -97,15 +98,6 @@ class FileReader:
     function_name: str
     args: str
     query_template: str = DEFAULT_LOAD_QUERY_TEMPLATE
-
-
-type DataLoadMode = Literal["union", "tables"]
-
-
-@dataclass(frozen=True, slots=True)
-class DataSourceBinding:
-    path: Path
-    table_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,13 +196,6 @@ def sort_cell_key(value: Any) -> tuple[int, int, float | str]:
     return (0, 1, str(value).casefold())
 
 
-def _normalize_table_name(raw_name: str) -> str:
-    normalized = raw_name.replace('"', "").strip()
-    if not normalized:
-        raise typer.BadParameter("Table name cannot be empty.")
-    return normalized
-
-
 class SqlExplorerEngine:
     def __init__(
         self,
@@ -237,23 +222,19 @@ class SqlExplorerEngine:
             len(data_sources) if data_sources is not None else 1,
             active_table,
         )
-        if load_mode not in {"union", "tables"}:
-            raise typer.BadParameter(f"Unknown load mode: {load_mode}")
-
+        plan = plan_engine_data_sources(
+            data_path=data_path,
+            table_name=table_name,
+            data_sources=data_sources,
+            load_mode=load_mode,
+            active_table=active_table,
+        )
         self.load_mode = load_mode
-        self._primary_table_name = _normalize_table_name(table_name)
-        self.data_sources = self._resolve_data_sources(data_path, self._primary_table_name, data_sources, load_mode)
-        ordered_unique_table_names: list[str] = []
-        seen_table_names: set[str] = set()
-        for source in self.data_sources:
-            key = source.table_name.casefold()
-            if key in seen_table_names:
-                continue
-            seen_table_names.add(key)
-            ordered_unique_table_names.append(source.table_name)
-        self.table_names = tuple(ordered_unique_table_names)
+        self._primary_table_name = plan.primary_table_name
+        self.data_sources = plan.data_sources
+        self.table_names = plan.table_names
         self._table_lookup = {name.casefold(): name for name in self.table_names}
-        self.table_name = self._resolve_active_table_name(active_table)
+        self.table_name = plan.active_table_name
         self.data_path = self._active_data_path()
 
         self.database = database
@@ -282,53 +263,6 @@ class SqlExplorerEngine:
         self._command_lookup = index_command_specs(self._command_specs)
         self._completion_engine = CompletionEngine(self)
         logger.info("engine init complete columns=%s", len(self.columns))
-
-    @staticmethod
-    def _resolve_data_sources(
-        data_path: Path,
-        table_name: str,
-        data_sources: tuple[DataSourceBinding, ...] | None,
-        load_mode: DataLoadMode,
-    ) -> tuple[DataSourceBinding, ...]:
-        if data_sources is None:
-            return (DataSourceBinding(path=data_path, table_name=table_name),)
-        if not data_sources:
-            raise typer.BadParameter("Expected at least one data source.")
-
-        normalized_sources = tuple(
-            DataSourceBinding(
-                path=Path(source.path).expanduser().resolve(),
-                table_name=_normalize_table_name(source.table_name),
-            )
-            for source in data_sources
-        )
-        if load_mode == "tables":
-            seen: set[str] = set()
-            for source in normalized_sources:
-                key = source.table_name.casefold()
-                if key in seen:
-                    raise typer.BadParameter(f"Duplicate table name: {source.table_name}")
-                seen.add(key)
-        return normalized_sources
-
-    def _resolve_active_table_name(self, active_table: str | None) -> str:
-        if self.load_mode == "union":
-            return self._primary_table_name
-        if active_table is None:
-            primary_key = self._primary_table_name.casefold()
-            for table_name in self.table_names:
-                if table_name.casefold() == primary_key:
-                    return table_name
-            return self.table_names[0]
-        normalized_active_table = _normalize_table_name(active_table)
-        active_key = normalized_active_table.casefold()
-        for table_name in self.table_names:
-            if table_name.casefold() == active_key:
-                return table_name
-        known_tables = ", ".join(self.table_names)
-        raise typer.BadParameter(
-            f"Active table is not loaded: {normalized_active_table}. Loaded tables: {known_tables}"
-        )
 
     def _active_data_path(self) -> Path:
         if self.load_mode == "union":

@@ -63,6 +63,21 @@ class SampleRows:
     rows: tuple[tuple[Any, ...], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class TableSampleRows:
+    table_name: str
+    sample_rows: SampleRows
+
+
+@dataclass(frozen=True, slots=True)
+class LlmTableContext:
+    active_table_name: str
+    allowed_table_names: tuple[str, ...]
+    schema_context: str
+    active_sample_rows: SampleRows
+    sample_rows_by_table: tuple[TableSampleRows, ...]
+
+
 CompletionFn = Callable[..., Any]
 REGEX_KEYWORDS = (
     "regex",
@@ -146,13 +161,48 @@ def fetch_sample_rows(engine: LlmSqlEngine, n: int = DEFAULT_SAMPLE_ROWS) -> Sam
     assert n > 0
     table_name = quote_ident(engine.table_name)
     query = f"SELECT * FROM {table_name} LIMIT {n}"
-    result = engine.conn.execute(query)
+    return fetch_sample_rows_for_table(engine.conn, query)
+
+
+def fetch_sample_rows_for_table(conn: Any, query: str) -> SampleRows:
+    result = conn.execute(query)
     description_raw = getattr(result, "description", ())
     description = cast(Sequence[Sequence[Any]], description_raw or ())
     columns = tuple(str(item[0]) for item in description if item)
     fetched_rows = cast(Sequence[Sequence[Any]], result.fetchall())
     rows = tuple(tuple(row) for row in fetched_rows)
     return SampleRows(columns=columns, rows=rows)
+
+
+def fetch_sample_rows_from_table_name(conn: Any, table_name: str, n: int = DEFAULT_SAMPLE_ROWS) -> SampleRows:
+    assert n > 0
+    query = f"SELECT * FROM {quote_ident(table_name)} LIMIT {n}"
+    return fetch_sample_rows_for_table(conn, query)
+
+
+def _schema_rows_for_table(conn: Any, table_name: str) -> tuple[tuple[str, str, str], ...]:
+    rows = conn.execute(f"DESCRIBE {quote_ident(table_name)}").fetchall()
+    return tuple((str(row[0]), str(row[1]), str(row[2]) if len(row) > 2 else "?") for row in rows)
+
+
+def _format_schema_context_for_tables(
+    table_names: tuple[str, ...],
+    schema_rows_by_table: dict[str, tuple[tuple[str, str, str], ...]],
+) -> str:
+    lines = ["Schema:"]
+    for table_name in table_names:
+        lines.append(f'- Table "{table_name}":')
+        for column_name, column_type, nullable in schema_rows_by_table.get(table_name, ()):
+            lines.append(f"  - {column_name}: {column_type} (nullable={nullable})")
+    return "\n".join(lines)
+
+
+def _format_sample_rows_by_table(sample_rows_by_table: Sequence[TableSampleRows]) -> str:
+    sections: list[str] = []
+    for table_sample in sample_rows_by_table:
+        rows_text = _format_sample_rows(table_sample.sample_rows)
+        sections.append(f'Table "{table_sample.table_name}":\n{rows_text}')
+    return "\n\n".join(sections)
 
 
 def _format_sample_rows(sample_rows: SampleRows) -> str:
@@ -217,6 +267,34 @@ def _resolve_allowed_table_names(
     return tuple(ordered)
 
 
+def build_llm_table_context(
+    engine: LlmSqlEngine,
+    allowed_table_names: Sequence[str] | None = None,
+    sample_rows_per_table: int = DEFAULT_SAMPLE_ROWS,
+    max_tables_with_samples: int = 3,
+) -> LlmTableContext:
+    resolved_allowed_table_names = _resolve_allowed_table_names(engine.table_name, allowed_table_names)
+    schema_rows_by_table = {
+        table_name: _schema_rows_for_table(engine.conn, table_name) for table_name in resolved_allowed_table_names
+    }
+    sample_table_names = resolved_allowed_table_names[: max(1, max_tables_with_samples)]
+    sample_rows_by_table = tuple(
+        TableSampleRows(
+            table_name=table_name,
+            sample_rows=fetch_sample_rows_from_table_name(engine.conn, table_name, sample_rows_per_table),
+        )
+        for table_name in sample_table_names
+    )
+    active_sample_rows = sample_rows_by_table[0].sample_rows if sample_rows_by_table else SampleRows((), ())
+    return LlmTableContext(
+        active_table_name=engine.table_name,
+        allowed_table_names=resolved_allowed_table_names,
+        schema_context=_format_schema_context_for_tables(resolved_allowed_table_names, schema_rows_by_table),
+        active_sample_rows=active_sample_rows,
+        sample_rows_by_table=sample_rows_by_table,
+    )
+
+
 def _format_allowed_tables(allowed_table_names: tuple[str, ...]) -> str:
     return ", ".join(f'"{table_name}"' for table_name in allowed_table_names)
 
@@ -251,20 +329,34 @@ def build_prompt(
     schema_context: str,
     sample_rows: SampleRows,
     allowed_table_names: Sequence[str] | None = None,
+    table_context: LlmTableContext | None = None,
 ) -> str:
     payload = user_query.strip()
     assert payload
-    columns = ", ".join(sample_rows.columns) if sample_rows.columns else "(none)"
-    formatted_sample_rows = _format_sample_rows(sample_rows)
-    constraints = _prompt_constraints(table_name, columns, allowed_table_names)
-    duckdb_guidance = select_duckdb_guidance(payload, schema_context)
+    resolved_allowed_tables = allowed_table_names
+    schema_payload = schema_context
+    sample_rows_payload = sample_rows
+    sample_rows_section_title = "First rows:"
+    if table_context is not None:
+        resolved_allowed_tables = table_context.allowed_table_names
+        schema_payload = table_context.schema_context
+        sample_rows_payload = table_context.active_sample_rows
+        sample_rows_section_title = "Sample rows by table:"
+    columns = ", ".join(sample_rows_payload.columns) if sample_rows_payload.columns else "(none)"
+    formatted_sample_rows = (
+        _format_sample_rows_by_table(table_context.sample_rows_by_table)
+        if table_context is not None
+        else _format_sample_rows(sample_rows_payload)
+    )
+    constraints = _prompt_constraints(table_name, columns, resolved_allowed_tables)
+    duckdb_guidance = select_duckdb_guidance(payload, schema_payload)
     return (
         "Generate SQL for DuckDB.\n"
         f"{constraints}\n\n"
         f"User request:\n{payload}\n\n"
         f"DuckDB guidance:\n{duckdb_guidance}\n\n"
-        f"{schema_context}\n\n"
-        "First rows:\n"
+        f"{schema_payload}\n\n"
+        f"{sample_rows_section_title}\n"
         f"{formatted_sample_rows}"
     )
 
@@ -277,6 +369,7 @@ def build_repair_prompt(
     schema_context: str,
     sample_rows: SampleRows,
     allowed_table_names: Sequence[str] | None = None,
+    table_context: LlmTableContext | None = None,
 ) -> str:
     payload = user_query.strip()
     old_sql = previous_sql.strip()
@@ -284,10 +377,23 @@ def build_repair_prompt(
     assert payload
     assert old_sql
     assert failure
-    columns = ", ".join(sample_rows.columns) if sample_rows.columns else "(none)"
-    constraints = _prompt_constraints(table_name, columns, allowed_table_names)
-    duckdb_guidance = select_duckdb_guidance(payload, schema_context)
-    formatted_sample_rows = _format_sample_rows(sample_rows)
+    resolved_allowed_tables = allowed_table_names
+    schema_payload = schema_context
+    sample_rows_payload = sample_rows
+    sample_rows_section_title = "First rows:"
+    if table_context is not None:
+        resolved_allowed_tables = table_context.allowed_table_names
+        schema_payload = table_context.schema_context
+        sample_rows_payload = table_context.active_sample_rows
+        sample_rows_section_title = "Sample rows by table:"
+    columns = ", ".join(sample_rows_payload.columns) if sample_rows_payload.columns else "(none)"
+    constraints = _prompt_constraints(table_name, columns, resolved_allowed_tables)
+    duckdb_guidance = select_duckdb_guidance(payload, schema_payload)
+    formatted_sample_rows = (
+        _format_sample_rows_by_table(table_context.sample_rows_by_table)
+        if table_context is not None
+        else _format_sample_rows(sample_rows_payload)
+    )
     return (
         "Fix this SQL for DuckDB.\n"
         f"{constraints}\n"
@@ -296,8 +402,8 @@ def build_repair_prompt(
         f"Previous SQL:\n{old_sql}\n\n"
         f"Error:\n{failure}\n\n"
         f"DuckDB guidance:\n{duckdb_guidance}\n\n"
-        f"{schema_context}\n\n"
-        "First rows:\n"
+        f"{schema_payload}\n\n"
+        f"{sample_rows_section_title}\n"
         f"{formatted_sample_rows}"
     )
 

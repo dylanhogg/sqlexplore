@@ -32,6 +32,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Distinguish /describe from /summary
 - Enable /history results to be copied to clipboard
 - Add CLI arg for default number of rows to display (i.e. limit)
+- LiteLLM, return error messages, e.g. litellm.exceptions.ContextWindowExceededError: litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - Input tokens exceed the configured limit of 272000 tokens. Your messages resulted in 2211484 tokens. Please reduce the length of the messages.
 - Integrate more LLM features:
     - /llm suggest
     - /llm analyse

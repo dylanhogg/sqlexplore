@@ -77,7 +77,7 @@ class EngineCompletionCatalog:
 
     def clear_cache(self) -> None:
         self._column_completion_cache: list[CompletionItem] | None = None
-        self._table_completion_cache: list[CompletionItem] | None = None
+        self._table_completion_cache: dict[tuple[int, int], list[CompletionItem]] = {}
         self._aggregate_completion_cache: list[CompletionItem] | None = None
         self._aggregate_arg_completion_cache: dict[str, list[CompletionItem]] = {}
         self._predicate_completion_cache: list[CompletionItem] | None = None
@@ -629,8 +629,10 @@ class EngineCompletionCatalog:
         return merged
 
     def _table_completion_items(self, active_score: int = 150, table_score: int = 132) -> list[CompletionItem]:
-        if self._table_completion_cache is not None:
-            return self._table_completion_cache
+        cache_key = (active_score, table_score)
+        cached = self._table_completion_cache.get(cache_key)
+        if cached is not None:
+            return cached
         items: list[CompletionItem] = []
         seen: set[str] = set()
         for table_name in self.table_names:
@@ -644,7 +646,7 @@ class EngineCompletionCatalog:
             items.append(self._base_completion_item(table_name, "table", detail, score=score))
         if not items:
             items.append(self._base_completion_item(self.table_name, "table", "active table/view", score=active_score))
-        self._table_completion_cache = items
+        self._table_completion_cache[cache_key] = items
         return items
 
     def _default_sql_completion_items(self) -> list[CompletionItem]:

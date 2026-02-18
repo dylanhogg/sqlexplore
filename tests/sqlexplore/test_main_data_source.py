@@ -924,6 +924,21 @@ def test_resolve_data_sources_rejects_stdin_mixed_with_files(tmp_path: Path) -> 
         )
 
 
+def test_resolve_data_sources_strips_local_file_paths(tmp_path: Path) -> None:
+    local_file = tmp_path / "data.csv"
+    local_file.write_text("x\n1\n", encoding="utf-8")
+    resolve_data_sources = getattr(app_module, "_resolve_data_sources")
+    out = resolve_data_sources(
+        [f"   {local_file}   "],
+        download_dir=tmp_path,
+        overwrite=False,
+        startup_activity_messages=[],
+    )
+    assert out.paths == (local_file.resolve(),)
+    assert out.use_stdin is False
+    assert out.stdin_capture is None
+
+
 def test_main_passes_multiple_data_sources_to_engine_in_union_mode(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
