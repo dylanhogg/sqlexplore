@@ -29,6 +29,7 @@ class EngineResponse:
     result: QueryResult | None = None
     generated_sql: str | None = None
     executed_sql: str | None = None
+    activity_messages: list[tuple[ResultStatus, str]] | None = None
     should_exit: bool = False
     load_query: str | None = None
     clear_editor: bool = False

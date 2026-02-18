@@ -412,6 +412,40 @@ def test_slash_helper_query_sql_is_written_to_activity(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_activity_log_renders_info_activity_messages(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                editor = app.query_one("#query_editor", SqlQueryEditor)
+                await pilot.pause()
+                editor.text = "/llm-query count rows"
+                with patch.object(
+                    engine,
+                    "run_input",
+                    return_value=EngineResponse(
+                        status="ok",
+                        message="ok",
+                        activity_messages=[
+                            (
+                                "info",
+                                "[llm] request_tokens=10 response_tokens=4 elapsed_secs=0.123 total_cost_cents=0.4567",
+                            )
+                        ],
+                    ),
+                ):
+                    await pilot.press("ctrl+enter")
+                    await pilot.pause()
+                    assert (
+                        "[INFO] [llm] request_tokens=10 response_tokens=4 elapsed_secs=0.123 total_cost_cents=0.4567"
+                        in _log_text(app)
+                    )
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_copy_tsv_shortcut_copies_visible_results_table(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path, csv_text="a,b\n1,x\n2,y\n3,z\n4,w\n5,v\n", max_rows_display=2)

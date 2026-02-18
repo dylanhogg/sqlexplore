@@ -1101,6 +1101,9 @@ class SqlExplorerTui(App[None]):
 
         if response.message:
             self._log(response.message, response.status)
+        if response.activity_messages:
+            for status, message in response.activity_messages:
+                self._log(message, status)
 
         if response.load_query is not None:
             self._set_editor_text(response.load_query)
