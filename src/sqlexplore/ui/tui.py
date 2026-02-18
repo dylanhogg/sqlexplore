@@ -16,7 +16,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.coordinate import Coordinate
-from textual.events import Blur, Focus, Key
+from textual.events import Blur, Focus, Key, MouseDown, MouseMove, MouseUp
 from textual.widget import Widget
 from textual.widgets import DataTable, Footer, Header, OptionList, Static, TextArea
 
@@ -704,11 +704,27 @@ class ResultsPreview(TextArea):
 
 class ResultsTable(DataTable[RenderedCell]):
     COMPONENT_CLASSES = DataTable.COMPONENT_CLASSES | {"results-table--cursor-row"}
+    RESIZE_HANDLE_WIDTH = 1
+    MIN_RESIZED_CONTENT_WIDTH = 3
     DEFAULT_CSS = """
     ResultsTable > .results-table--cursor-row {
         background: #223744;
     }
     """
+
+    def __init__(
+        self,
+        *args: Any,
+        on_column_resized: Callable[[int, int], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_column_resized = on_column_resized
+        self._resize_column_index: int | None = None
+        self._resize_start_screen_x = 0.0
+        self._resize_start_content_width = 0
+        self._resize_did_drag = False
+        self._suppress_next_header_select = False
 
     def _get_row_style(self, row_index: int, base_style: Style) -> Style:
         row_style = super()._get_row_style(row_index, base_style)
@@ -728,6 +744,95 @@ class ResultsTable(DataTable[RenderedCell]):
             return
         for row_index in {old_coordinate.row, new_coordinate.row}:
             self.refresh_row(row_index)
+
+    @staticmethod
+    def _event_screen_x(event: MouseDown | MouseMove | MouseUp) -> float:
+        return float(event.screen_x)
+
+    def _event_virtual_x(self, event: MouseDown | MouseMove | MouseUp) -> int:
+        return int(round(event.x + self.scroll_x))
+
+    def _resize_candidate_column(self, event: MouseDown) -> int | None:
+        meta = event.style.meta
+        if not meta or meta.get("row") != -1 or meta.get("out_of_bounds", False):
+            return None
+        column_index = meta.get("column")
+        if not isinstance(column_index, int) or not self.is_valid_column_index(column_index):
+            return None
+        pointer_x = self._event_virtual_x(event)
+        region = self._get_column_region(column_index)
+        right_edge = region.x + region.width
+        if abs(pointer_x - right_edge) <= self.RESIZE_HANDLE_WIDTH:
+            return column_index
+        left_edge = region.x
+        if column_index > 0 and abs(pointer_x - left_edge) <= self.RESIZE_HANDLE_WIDTH:
+            return column_index - 1
+        return None
+
+    def _column_content_width(self, column_index: int) -> int:
+        column = self.ordered_columns[column_index]
+        return column.content_width if column.auto_width else column.width
+
+    def _set_column_content_width(self, column_index: int, content_width: int) -> None:
+        if not self.is_valid_column_index(column_index):
+            return
+        width = max(self.MIN_RESIZED_CONTENT_WIDTH, content_width)
+        column = self.ordered_columns[column_index]
+        if not column.auto_width and column.width == width:
+            return
+        column.auto_width = False
+        column.width = width
+        self._update_count += 1
+        self._require_update_dimensions = True
+        self.check_idle()
+        self.refresh(layout=True)
+        if self._on_column_resized is not None:
+            self._on_column_resized(column_index, width)
+
+    def _end_resize(self) -> None:
+        self._resize_column_index = None
+        self._resize_start_content_width = 0
+        self._resize_start_screen_x = 0.0
+        self.release_mouse()
+
+    def consume_header_select_suppression(self) -> bool:
+        if not self._suppress_next_header_select:
+            return False
+        self._suppress_next_header_select = False
+        return True
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        if event.button != 1:
+            return
+        resize_column_index = self._resize_candidate_column(event)
+        if resize_column_index is None:
+            return
+        self._resize_column_index = resize_column_index
+        self._resize_start_content_width = self._column_content_width(resize_column_index)
+        self._resize_start_screen_x = self._event_screen_x(event)
+        self._resize_did_drag = False
+        self.capture_mouse()
+        event.stop()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        resize_column_index = self._resize_column_index
+        if resize_column_index is None:
+            return
+        delta = int(round(self._event_screen_x(event) - self._resize_start_screen_x))
+        if delta == 0:
+            return
+        self._resize_did_drag = True
+        self._set_column_content_width(resize_column_index, self._resize_start_content_width + delta)
+        event.stop()
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if self._resize_column_index is None:
+            return
+        if self._resize_did_drag:
+            self._suppress_next_header_select = True
+        self._resize_did_drag = False
+        self._end_resize()
+        event.stop()
 
 
 class SqlExplorerTui(App[None]):
@@ -826,6 +931,7 @@ class SqlExplorerTui(App[None]):
         self._json_highlighter = JSONHighlighter()
         self._json_rendering_enabled = True
         self._query_task: asyncio.Task[None] | None = None
+        self._results_column_width_overrides: dict[int, int] = {}
 
     def _reset_history_cursor(self) -> None:
         self._history_cursor = None
@@ -962,7 +1068,7 @@ class SqlExplorerTui(App[None]):
                 yield OptionList(id="completion_menu")
                 yield Static("Tab accept | Esc close | Up/Down navigate", id="completion_hint")
                 yield Static("Results", id="results_header", classes="section-title")
-                yield ResultsTable(id="results_table")
+                yield ResultsTable(id="results_table", on_column_resized=self._on_results_column_resized)
                 yield ResultsPreview("", id="results_preview")
                 yield Static("Activity", classes="section-title")
                 yield TextArea(
@@ -1123,8 +1229,12 @@ class SqlExplorerTui(App[None]):
         self._sort_column_index = None
         self._sort_reverse = False
         self._active_data_total_rows = self.engine.row_count() if result.sql else None
+        self._results_column_width_overrides = {}
 
         self._redraw_results_table()
+
+    def _on_results_column_resized(self, column_index: int, width: int) -> None:
+        self._results_column_width_overrides[column_index] = width
 
     def _results_out_of_rows(self, result: QueryResult) -> int:
         if not result.sql:
@@ -1202,7 +1312,9 @@ class SqlExplorerTui(App[None]):
             self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
             return
 
-        table.add_columns(*result.columns)
+        for column_index, column_name in enumerate(result.columns):
+            override = self._results_column_width_overrides.get(column_index)
+            table.add_column(column_name, width=override)
         json_columns = self._detect_json_columns(result)
         for row in result.rows:
             rendered_row: list[RenderedCell] = []
@@ -1326,6 +1438,8 @@ class SqlExplorerTui(App[None]):
         self._update_results_preview(selected_row, selected_column, column_name, type_name, value)
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        if cast(ResultsTable, self._results_table()).consume_header_select_suppression():
+            return
         result = self._active_result
         if result is None or not result.rows:
             return
