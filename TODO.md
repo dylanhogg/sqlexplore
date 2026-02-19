@@ -37,6 +37,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
     - /llm-chat-data
     - /llm-categoise-data col
 - LLM General:
+    - Add `llm_request` text/prompt to /llm-history for the user
     - Render LLM thinking and reasoning steps in Activity, with replacing line so it doesn't scroll away
     - Add dataset cols or name to /llm-history for better context
     - Config thinking and temperature params (?)
@@ -129,3 +130,10 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Support SQLite
 - Support Excel
 - Ensure multipart parquet files are supported
+
+## Future language migration
+
+- Investigate golang version:
+    - https://github.com/charmbracelet/bubbletea (A powerful little TUI framework)
+    - https://github.com/charmbracelet/lipgloss (Style definitions for nice terminal layouts)
+    - https://github.com/charmbracelet/wish (Make SSH apps)
