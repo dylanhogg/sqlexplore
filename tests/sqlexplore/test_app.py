@@ -13,6 +13,7 @@ from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.completion.models import CompletionItem
 from sqlexplore.core.engine import EngineResponse, SqlExplorerEngine, app_version
+from sqlexplore.ui.activity_log import ActivityLog
 from sqlexplore.ui.pane_splitter import PaneSplitter
 from sqlexplore.ui.query_editor import SqlQueryEditor
 from sqlexplore.ui.results_preview import ResultsPreview
@@ -131,6 +132,10 @@ def _has_url_color(style: Any) -> bool:
 
 def _has_null_value_color(style: Any) -> bool:
     return style is not None and NULL_VALUE_COLOR.lower() in str(style).lower()
+
+
+def _has_activity_key_color(style: Any) -> bool:
+    return style is not None and "9abed8" in str(style).lower()
 
 
 def test_query_and_results_panes_share_status_key_order() -> None:
@@ -494,6 +499,38 @@ def test_activity_log_renders_info_activity_messages(tmp_path: Path) -> None:
                         "total_tokens=14 reasoning_tokens=3 "
                         "elapsed_secs=0.123 total_cost_cents=0.4567" in _log_text(app)
                     )
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_activity_log_applies_rich_text_styling(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                activity = app.query_one("#activity_log", ActivityLog)
+                activity.load_text("[INFO] [llm] model=openai/gpt-5-mini request_tokens=10")
+                rendered = activity.get_line(0)
+                assert rendered.plain.startswith("[INFO] [llm] model=openai/gpt-5-mini")
+                assert any(_has_activity_key_color(span.style) for span in rendered.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_activity_log_disables_cursor_line_overlay(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                activity = app.query_one("#activity_log", ActivityLog)
+                assert activity.highlight_cursor_line is False
+                assert activity.show_cursor is False
         finally:
             engine.close()
 

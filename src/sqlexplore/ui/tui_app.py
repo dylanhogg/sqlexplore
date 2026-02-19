@@ -25,6 +25,7 @@ from sqlexplore.core.engine import (
     sort_cell_key,
 )
 from sqlexplore.core.logging_utils import get_logger, truncate_for_log
+from sqlexplore.ui.activity_log import ActivityLog
 from sqlexplore.ui.image_cells import format_image_cell_token, format_image_preview_metadata, summarize_image_cell
 from sqlexplore.ui.pane_splitter import PaneSplitter
 from sqlexplore.ui.query_editor import SqlQueryEditor
@@ -222,8 +223,8 @@ class SqlExplorerTui(App[None]):
     def _results_preview(self) -> ResultsPreview:
         return self.query_one("#results_preview", ResultsPreview)
 
-    def _activity_log(self) -> TextArea:
-        return self.query_one("#activity_log", TextArea)
+    def _activity_log(self) -> ActivityLog:
+        return self.query_one("#activity_log", ActivityLog)
 
     @classmethod
     def _pane_min_height(cls, pane: PaneId) -> int:
@@ -475,11 +476,9 @@ class SqlExplorerTui(App[None]):
                     id="pane_splitter_cell_activity",
                     classes="pane-splitter",
                 )
-                yield TextArea(
+                yield ActivityLog(
                     "",
                     id="activity_log",
-                    read_only=True,
-                    soft_wrap=True,
                 )
         yield Footer()
 
