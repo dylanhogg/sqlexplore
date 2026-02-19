@@ -171,7 +171,9 @@ def _source_load_bad_parameter(
     error_message = " ".join(str(exc).split())
     source_label = f"source {source_index + 1}" if source_index is not None else "source"
     hint = _load_failure_hint(data_path, error_message)
-    return typer.BadParameter(f"Failed to load {source_label}: {data_path}\nDuckDB: {error_message}\n{hint}")
+    return typer.BadParameter(
+        f"Failed to load {source_label}: {data_path.name}\nPath: {data_path}\nDuckDB: {error_message}\n{hint}"
+    )
 
 
 def _multi_source_load_bad_parameter(data_paths: tuple[Path, ...], exc: Exception) -> typer.BadParameter:
