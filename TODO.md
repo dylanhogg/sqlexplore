@@ -10,10 +10,12 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 ## -> Next feature!
 
 - Enable vertical resize display panes in results pane
+- Apply lost text highlighting to Activity panel
 - Add a `/load` filename command
 - Add session id to log
 - Autodetect csv/tsv (vs plain text) piped stdin and open in TUI
 - Enable load from BQ/Snowflake/other DBs
+- Add quick actions to ^p palette
 - Write log history session to Marimo notebook to track analysis discoveries (with optional LLM summary of each query and result)
 - Key binding: Write marimo notebook and uvx open it
 - Union multiple input files into a single table
