@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from io import StringIO
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, Sequence, cast
 
 from rich.highlighter import JSONHighlighter
 from rich.style import Style
@@ -69,6 +69,36 @@ class _ColumnResizeState:
     column_index: int
     start_screen_x: float
     start_content_width: int
+    did_drag: bool = False
+
+
+PaneId = Literal["query", "results", "cell_detail", "activity"]
+PaneResizePhase = Literal["start", "update", "end"]
+
+PANE_QUERY: PaneId = "query"
+PANE_RESULTS: PaneId = "results"
+PANE_CELL_DETAIL: PaneId = "cell_detail"
+PANE_ACTIVITY: PaneId = "activity"
+PANE_ORDER: tuple[PaneId, ...] = (PANE_QUERY, PANE_RESULTS, PANE_CELL_DETAIL, PANE_ACTIVITY)
+SPLITTER_PANE_PAIRS: tuple[tuple[PaneId, PaneId], ...] = (
+    (PANE_QUERY, PANE_RESULTS),
+    (PANE_RESULTS, PANE_CELL_DETAIL),
+    (PANE_CELL_DETAIL, PANE_ACTIVITY),
+)
+FIXED_HEIGHT_PANES: tuple[PaneId, ...] = (PANE_QUERY, PANE_CELL_DETAIL, PANE_ACTIVITY)
+
+
+@dataclass(slots=True)
+class _PaneResizeSession:
+    splitter_index: int
+    base_heights: dict[PaneId, int]
+    did_drag: bool = False
+
+
+@dataclass(slots=True)
+class _PaneSplitterDragState:
+    start_screen_y: float
+    last_delta: int = 0
     did_drag: bool = False
 
 
@@ -845,9 +875,81 @@ class ResultsTable(DataTable[RenderedCell]):
         event.stop()
 
 
+class PaneSplitter(Static):
+    DEFAULT_CSS = """
+    PaneSplitter {
+        height: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        splitter_index: int,
+        on_resize: Callable[[int, PaneResizePhase, int], None],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__("", **kwargs)
+        self._splitter_index = splitter_index
+        self._on_resize = on_resize
+        self._drag_state: _PaneSplitterDragState | None = None
+
+    @staticmethod
+    def _event_screen_y(event: MouseDown | MouseMove | MouseUp) -> float:
+        return float(event.screen_y)
+
+    def _end_drag(self) -> _PaneSplitterDragState | None:
+        state = self._drag_state
+        self._drag_state = None
+        self.release_mouse()
+        return state
+
+    def _commit_drag(self) -> None:
+        state = self._end_drag()
+        if state is None:
+            return
+        if state.did_drag:
+            self._on_resize(self._splitter_index, "end", state.last_delta)
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        if event.button != 1:
+            return
+        self._drag_state = _PaneSplitterDragState(start_screen_y=self._event_screen_y(event))
+        self.capture_mouse()
+        self._on_resize(self._splitter_index, "start", 0)
+        event.stop()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        state = self._drag_state
+        if state is None:
+            return
+        delta = int(round(self._event_screen_y(event) - state.start_screen_y))
+        if delta == state.last_delta:
+            return
+        state.last_delta = delta
+        if delta != 0:
+            state.did_drag = True
+        self._on_resize(self._splitter_index, "update", delta)
+        event.stop()
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if self._drag_state is None:
+            return
+        self._commit_drag()
+        event.stop()
+
+    def on_blur(self, _event: Blur) -> None:
+        if self._drag_state is None:
+            return
+        self._commit_drag()
+
+
 class SqlExplorerTui(App[None]):
     TITLE = f"sqlexplorer v{app_version()}"
     SUB_TITLE = "explore your data"
+    QUERY_PANE_MIN_HEIGHT = 5
+    RESULTS_PANE_MIN_HEIGHT = 5
+    CELL_DETAIL_PANE_MIN_HEIGHT = 5
+    ACTIVITY_PANE_MIN_HEIGHT = 5
 
     CSS = """
     Screen {
@@ -879,6 +981,7 @@ class SqlExplorerTui(App[None]):
 
     #query_editor {
         height: 5;
+        min-height: 5;
         border: round #4d7ea8;
     }
 
@@ -898,11 +1001,13 @@ class SqlExplorerTui(App[None]):
 
     #results_table {
         height: 1fr;
+        min-height: 5;
         border: round #5b8f67;
     }
 
     #results_preview {
         height: 5;
+        min-height: 5;
         border: round #5b8f67;
         color: #d8e3ec;
         overflow-y: scroll;
@@ -910,8 +1015,14 @@ class SqlExplorerTui(App[None]):
 
     #activity_log {
         height: 5;
+        min-height: 5;
         border: round #b18b3d;
         overflow-y: scroll;
+    }
+
+    .pane-splitter {
+        height: 1;
+        background: #17303b;
     }
     """
 
@@ -943,6 +1054,12 @@ class SqlExplorerTui(App[None]):
         self._active_json_columns: set[int] = set()
         self._query_task: asyncio.Task[None] | None = None
         self._results_column_width_overrides: dict[int, int] = {}
+        self._pane_resize_session: _PaneResizeSession | None = None
+        self._fixed_pane_heights: dict[PaneId, int] = {
+            PANE_QUERY: self.QUERY_PANE_MIN_HEIGHT,
+            PANE_CELL_DETAIL: self.CELL_DETAIL_PANE_MIN_HEIGHT,
+            PANE_ACTIVITY: self.ACTIVITY_PANE_MIN_HEIGHT,
+        }
 
     def _reset_history_cursor(self) -> None:
         self._history_cursor = None
@@ -984,6 +1101,142 @@ class SqlExplorerTui(App[None]):
 
     def _activity_log(self) -> TextArea:
         return self.query_one("#activity_log", TextArea)
+
+    @classmethod
+    def _pane_min_height(cls, pane: PaneId) -> int:
+        if pane == PANE_QUERY:
+            return cls.QUERY_PANE_MIN_HEIGHT
+        if pane == PANE_RESULTS:
+            return cls.RESULTS_PANE_MIN_HEIGHT
+        if pane == PANE_CELL_DETAIL:
+            return cls.CELL_DETAIL_PANE_MIN_HEIGHT
+        return cls.ACTIVITY_PANE_MIN_HEIGHT
+
+    def _fixed_height_pane_widget(self, pane: PaneId) -> Widget:
+        if pane == PANE_QUERY:
+            return self._query_editor()
+        if pane == PANE_CELL_DETAIL:
+            return self._results_preview()
+        assert pane == PANE_ACTIVITY, f"unsupported fixed-height pane: {pane}"
+        return self._activity_log()
+
+    def _set_fixed_height_pane(self, pane: PaneId, height: int) -> None:
+        clamped_height = max(self._pane_min_height(pane), height)
+        self._fixed_pane_heights[pane] = clamped_height
+        self._fixed_height_pane_widget(pane).styles.height = clamped_height
+
+    def _pane_heights(self) -> dict[PaneId, int]:
+        heights = dict(self._fixed_pane_heights)
+        heights[PANE_RESULTS] = max(self.RESULTS_PANE_MIN_HEIGHT, self._results_table().size.height)
+        return heights
+
+    @staticmethod
+    def _sorted_by_height_desc(heights: dict[PaneId, int], panes: Sequence[PaneId]) -> list[PaneId]:
+        return sorted(panes, key=lambda pane: (-heights[pane], PANE_ORDER.index(pane)))
+
+    @classmethod
+    def _pane_shrink_capacity(cls, heights: dict[PaneId, int], pane: PaneId) -> int:
+        return max(0, heights[pane] - cls._pane_min_height(pane))
+
+    def _donor_order_for_growth(
+        self,
+        heights: dict[PaneId, int],
+        target: PaneId,
+        preferred_donor: PaneId | None,
+    ) -> list[PaneId]:
+        donors: list[PaneId] = [pane for pane in PANE_ORDER if pane != target]
+        if target != PANE_RESULTS:
+            ordered: list[PaneId] = []
+            if PANE_RESULTS in donors:
+                ordered.append(PANE_RESULTS)
+                donors.remove(PANE_RESULTS)
+            ordered.extend(self._sorted_by_height_desc(heights, donors))
+            return ordered
+
+        ordered_results: list[PaneId] = []
+        if preferred_donor is not None and preferred_donor in donors:
+            ordered_results.append(preferred_donor)
+            donors.remove(preferred_donor)
+        ordered_results.extend(self._sorted_by_height_desc(heights, donors))
+        return ordered_results
+
+    def _grow_pane(
+        self,
+        heights: dict[PaneId, int],
+        target: PaneId,
+        amount: int,
+        preferred_donor: PaneId | None = None,
+    ) -> dict[PaneId, int]:
+        if amount <= 0:
+            return heights
+        resized = dict(heights)
+        remaining = amount
+        for donor in self._donor_order_for_growth(resized, target, preferred_donor):
+            if remaining <= 0:
+                break
+            capacity = self._pane_shrink_capacity(resized, donor)
+            if capacity <= 0:
+                continue
+            transfer = min(capacity, remaining)
+            resized[donor] -= transfer
+            remaining -= transfer
+        resized[target] += amount - remaining
+        return resized
+
+    def _target_for_splitter_delta(self, splitter_index: int, delta: int) -> tuple[PaneId, int, PaneId | None] | None:
+        if delta == 0 or splitter_index < 0 or splitter_index >= len(SPLITTER_PANE_PAIRS):
+            return None
+        upper, lower = SPLITTER_PANE_PAIRS[splitter_index]
+        if delta > 0:
+            target = upper
+            preferred_donor = lower if target == PANE_RESULTS else None
+            return target, delta, preferred_donor
+        target = lower
+        preferred_donor = upper if target == PANE_RESULTS else None
+        return target, -delta, preferred_donor
+
+    def _apply_pane_heights(self, heights: dict[PaneId, int]) -> None:
+        for pane in FIXED_HEIGHT_PANES:
+            self._set_fixed_height_pane(pane, heights[pane])
+
+    def _apply_pane_resize_delta(self, splitter_index: int, delta: int) -> None:
+        session = self._pane_resize_session
+        if session is None or session.splitter_index != splitter_index:
+            return
+        target = self._target_for_splitter_delta(splitter_index, delta)
+        if target is None:
+            return
+        pane, amount, preferred_donor = target
+        resized = self._grow_pane(session.base_heights, pane, amount, preferred_donor)
+        self._apply_pane_heights(resized)
+        if delta != 0:
+            session.did_drag = True
+
+    def _refresh_panes_after_resize(self) -> None:
+        for widget in (self._results_table(), self._results_preview(), self._activity_log(), self._query_editor()):
+            widget.refresh(layout=True)
+
+    def _start_pane_resize_session(self, splitter_index: int) -> None:
+        self._pane_resize_session = _PaneResizeSession(
+            splitter_index=splitter_index,
+            base_heights=self._pane_heights(),
+        )
+
+    def _finish_pane_resize_session(self) -> bool:
+        session = self._pane_resize_session
+        self._pane_resize_session = None
+        return session is not None and session.did_drag
+
+    def _on_pane_splitter_resize(self, splitter_index: int, phase: PaneResizePhase, delta: int) -> None:
+        if phase == "start":
+            self._start_pane_resize_session(splitter_index)
+            return
+        if phase == "update":
+            self._apply_pane_resize_delta(splitter_index, delta)
+            return
+        self._apply_pane_resize_delta(splitter_index, delta)
+        if self._finish_pane_resize_session():
+            self._refresh_panes_after_resize()
 
     def _set_results_loading(self, loading: bool) -> None:
         if not self.screen.is_mounted:
@@ -1078,9 +1331,27 @@ class SqlExplorerTui(App[None]):
                 )
                 yield OptionList(id="completion_menu")
                 yield Static("Tab accept | Esc close | Up/Down navigate", id="completion_hint")
+                yield PaneSplitter(
+                    0,
+                    self._on_pane_splitter_resize,
+                    id="pane_splitter_query_results",
+                    classes="pane-splitter",
+                )
                 yield Static("Results", id="results_header", classes="section-title")
                 yield ResultsTable(id="results_table", on_column_resized=self._on_results_column_resized)
+                yield PaneSplitter(
+                    1,
+                    self._on_pane_splitter_resize,
+                    id="pane_splitter_results_cell",
+                    classes="pane-splitter",
+                )
                 yield ResultsPreview("", id="results_preview")
+                yield PaneSplitter(
+                    2,
+                    self._on_pane_splitter_resize,
+                    id="pane_splitter_cell_activity",
+                    classes="pane-splitter",
+                )
                 yield Static("Activity", classes="section-title")
                 yield TextArea(
                     "",

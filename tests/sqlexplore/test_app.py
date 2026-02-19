@@ -13,7 +13,15 @@ from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.completion.models import CompletionItem
 from sqlexplore.core.engine import EngineResponse, SqlExplorerEngine, app_version
-from sqlexplore.ui.tui import NULL_VALUE_COLOR, URL_COLOR, ResultsPreview, ResultsTable, SqlExplorerTui, SqlQueryEditor
+from sqlexplore.ui.tui import (
+    NULL_VALUE_COLOR,
+    URL_COLOR,
+    PaneSplitter,
+    ResultsPreview,
+    ResultsTable,
+    SqlExplorerTui,
+    SqlQueryEditor,
+)
 
 
 def _build_app(
@@ -83,6 +91,23 @@ def _drag_column_resize(table: ResultsTable, column_index: int, delta_x: int) ->
     table.on_mouse_down(MouseDown(table, start_x, 0, 0, 0, 1, False, False, False, style=header_style))
     table.on_mouse_move(MouseMove(table, start_x + delta_x, 0, delta_x, 0, 1, False, False, False, style=header_style))
     table.on_mouse_up(MouseUp(table, start_x + delta_x, 0, 0, 0, 1, False, False, False, style=header_style))
+
+
+def _drag_pane_splitter(splitter: PaneSplitter, delta_y: int) -> None:
+    style = Style()
+    splitter.on_mouse_down(MouseDown(splitter, 0, 0, 0, 0, 1, False, False, False, style=style))
+    splitter.on_mouse_move(MouseMove(splitter, 0, delta_y, 0, delta_y, 1, False, False, False, style=style))
+    splitter.on_mouse_up(MouseUp(splitter, 0, delta_y, 0, 0, 1, False, False, False, style=style))
+
+
+def _pane_heights(app: SqlExplorerTui) -> dict[str, int]:
+    heights = cast(Any, app)._pane_heights()
+    return {
+        "query": int(heights["query"]),
+        "results": int(heights["results"]),
+        "cell_detail": int(heights["cell_detail"]),
+        "activity": int(heights["activity"]),
+    }
 
 
 def _cell_plain_text(cell: object) -> str:
@@ -941,6 +966,124 @@ def test_results_column_resize_expansion_reveals_more_text(tmp_path: Path) -> No
                 after_text = _cell_plain_text(results.get_row_at(0)[0])
                 assert len(after_text) > len(before_text)
                 assert after_text == long_value
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_query_pane_resize_grows_query_and_shrinks_results_first(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,2\n3,4\n")
+        try:
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                splitter = app.query_one("#pane_splitter_query_results", PaneSplitter)
+                before = _pane_heights(app)
+
+                _drag_pane_splitter(splitter, 2)
+                await pilot.pause()
+                after = _pane_heights(app)
+
+                assert after["query"] == before["query"] + 2
+                assert after["results"] == before["results"] - 2
+                assert after["cell_detail"] == before["cell_detail"]
+                assert after["activity"] == before["activity"]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_pane_minimum_height_is_enforced_during_pane_resize(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,2\n3,4\n")
+        try:
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                splitter = app.query_one("#pane_splitter_query_results", PaneSplitter)
+                minimum_visual_height = _pane_heights(app)["query"]
+
+                _drag_pane_splitter(splitter, 10_000)
+                await pilot.pause()
+
+                after = _pane_heights(app)
+                assert after["results"] == minimum_visual_height
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_cell_detail_pane_resize_grows_cell_detail_and_shrinks_results_first(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,2\n3,4\n")
+        try:
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                splitter = app.query_one("#pane_splitter_results_cell", PaneSplitter)
+                before = _pane_heights(app)
+
+                _drag_pane_splitter(splitter, -2)
+                await pilot.pause()
+                after = _pane_heights(app)
+
+                assert after["cell_detail"] == before["cell_detail"] + 2
+                assert after["results"] == before["results"] - 2
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_activity_pane_resize_uses_next_largest_when_results_is_at_minimum(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,2\n3,4\n")
+        try:
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                query_splitter = app.query_one("#pane_splitter_query_results", PaneSplitter)
+                activity_splitter = app.query_one("#pane_splitter_cell_activity", PaneSplitter)
+                minimum_visual_height = _pane_heights(app)["query"]
+
+                _drag_pane_splitter(query_splitter, 10_000)
+                await pilot.pause()
+                mid = _pane_heights(app)
+                assert mid["results"] == minimum_visual_height
+
+                _drag_pane_splitter(activity_splitter, -3)
+                await pilot.pause()
+                after = _pane_heights(app)
+
+                assert after["results"] == mid["results"]
+                assert after["activity"] == mid["activity"] + 3
+                assert after["query"] == mid["query"] - 3
+                assert after["cell_detail"] == mid["cell_detail"]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_pane_resize_can_grow_by_shrinking_cell_detail(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,2\n3,4\n")
+        try:
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                cell_splitter = app.query_one("#pane_splitter_cell_activity", PaneSplitter)
+                results_splitter = app.query_one("#pane_splitter_results_cell", PaneSplitter)
+
+                _drag_pane_splitter(cell_splitter, 3)
+                await pilot.pause()
+                mid = _pane_heights(app)
+
+                _drag_pane_splitter(results_splitter, 2)
+                await pilot.pause()
+                after = _pane_heights(app)
+
+                assert after["results"] == mid["results"] + 2
+                assert after["cell_detail"] == mid["cell_detail"] - 2
         finally:
             engine.close()
 
