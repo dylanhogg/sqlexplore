@@ -9,7 +9,13 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Enable resize columns in results pane
+- Enable vertical resize display panes in results pane
+- Add a `/load` filename command
+- Add session id to log
+- Autodetect csv/tsv (vs plain text) piped stdin and open in TUI
+- Enable load from BQ/Snowflake/other DBs
+- Write log history session to Marimo notebook to track analysis discoveries (with optional LLM summary of each query and result)
+- Key binding: Write marimo notebook and uvx open it
 - Union multiple input files into a single table
     - Fix total row count on `SELECT * FROM "data_src_3" LIMIT 10`
     - If only 1 data source, don't have a union table, just use the single source table
