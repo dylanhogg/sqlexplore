@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from io import StringIO
 from typing import Any, Sequence, cast
 
-from rich.highlighter import JSONHighlighter
+from rich.highlighter import JSONHighlighter, ReprHighlighter
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -58,6 +58,7 @@ from sqlexplore.ui.tui_shared import (
 )
 
 logger = get_logger(__name__)
+PREVIEW_HEADER_STYLE = "bold #7AB6E8"
 
 
 @dataclass(slots=True)
@@ -174,6 +175,7 @@ class SqlExplorerTui(App[None]):
         self._results_preview_plain_text = ""
         self._activity_lines: list[str] = []
         self._json_highlighter = JSONHighlighter()
+        self._repr_highlighter = ReprHighlighter()
         self._json_rendering_enabled = True
         self._active_json_columns: set[int] = set()
         self._query_task: asyncio.Task[None] | None = None
@@ -859,6 +861,8 @@ class SqlExplorerTui(App[None]):
         rendered = Text(formatted_value, end="")
         if is_json:
             self._json_highlighter.highlight(rendered)
+        else:
+            self._repr_highlighter.highlight(rendered)
         return rendered
 
     def _safe_len(self, value: CellValue) -> int | None:
@@ -883,7 +887,9 @@ class SqlExplorerTui(App[None]):
         type_label = preview_type_label(type_name)
         value_len = self._safe_len(value)
         header = f"{column_name}, {type_label}, row {row_index + 1}, col {column_index + 1}, len {value_len}"
-        preview_text = Text(f"{header}\n", end="")
+        preview_text = Text(end="")
+        preview_text.append(header, style=PREVIEW_HEADER_STYLE)
+        preview_text.append("\n")
         preview_text.append_text(self._render_preview_value(value, type_name))
         preview = self._results_preview()
         self._results_preview_plain_text = preview_text.plain
