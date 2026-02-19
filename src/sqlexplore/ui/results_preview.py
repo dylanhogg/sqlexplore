@@ -8,7 +8,7 @@ from sqlexplore.ui.tui_shared import PreviewContent, stylize_links
 
 class ResultsPreview(TextArea):
     def __init__(self, content: PreviewContent = "", **kwargs: Any) -> None:
-        super().__init__("", read_only=True, soft_wrap=True, **kwargs)
+        super().__init__("", read_only=True, soft_wrap=True, show_cursor=False, highlight_cursor_line=False, **kwargs)
         self._content: PreviewContent = ""
         self._rendered_lines: list[Text] | None = None
         self.update(content)

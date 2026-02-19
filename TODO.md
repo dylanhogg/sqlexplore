@@ -9,7 +9,6 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Apply text highlighting to Cell Detail panel
 - Add a `/load` filename command
 - Add session id to log
 - Update README docs (follow exaple from `uvx showboat --help`)
