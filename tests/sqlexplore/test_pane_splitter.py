@@ -16,16 +16,9 @@ class _FakeMouseEvent:
         self.stopped = True
 
 
-def test_pane_splitter_hover_updates_handle() -> None:
+def test_pane_splitter_default_render_is_empty() -> None:
     splitter = PaneSplitter(0, lambda _idx, _phase, _delta: None)
-
-    assert str(splitter.render()) == splitter.DEFAULT_HANDLE
-
-    splitter.on_enter(None)  # type: ignore[arg-type]
-    assert str(splitter.render()) == splitter.HOVER_HANDLE
-
-    splitter.on_leave(None)  # type: ignore[arg-type]
-    assert str(splitter.render()) == splitter.DEFAULT_HANDLE
+    assert str(splitter.render()) == ""
 
 
 def test_pane_splitter_drag_updates_handle_and_resets_state(monkeypatch: Any) -> None:
@@ -37,11 +30,9 @@ def test_pane_splitter_drag_updates_handle_and_resets_state(monkeypatch: Any) ->
 
     splitter.on_mouse_down(cast(MouseDown, _FakeMouseEvent(screen_y=10)))
     assert splitter.has_class("-dragging")
-    assert str(splitter.render()) == splitter.DRAG_HANDLE
 
     splitter.on_mouse_move(cast(MouseMove, _FakeMouseEvent(screen_y=13)))
     splitter.on_mouse_up(cast(MouseUp, _FakeMouseEvent(screen_y=13)))
 
     assert not splitter.has_class("-dragging")
-    assert str(splitter.render()) == splitter.DEFAULT_HANDLE
     assert calls == [(2, "start", 0), (2, "update", 3), (2, "end", 3)]

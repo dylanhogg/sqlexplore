@@ -145,7 +145,7 @@ class SqlExplorerTui(App[None]):
 
     .pane-splitter {
         height: 1;
-        background: #17303b;
+        background: $background;
     }
     """
 

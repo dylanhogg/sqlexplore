@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from textual.events import Blur, Enter, Leave, MouseDown, MouseMove, MouseUp
+from textual.events import Blur, MouseDown, MouseMove, MouseUp
 from textual.widgets import Static
 
 from sqlexplore.ui.tui_shared import PaneResizePhase
@@ -15,31 +15,22 @@ class _PaneSplitterDragState:
 
 
 class PaneSplitter(Static):
-    DEFAULT_HANDLE = "-----|||-----"
-    HOVER_HANDLE = "====|||===="
-    DRAG_HANDLE = "====###===="
     DEFAULT_CSS = """
     PaneSplitter {
         height: 1;
         min-height: 1;
-        content-align: center middle;
-        background: #17303b;
-        color: #7ea1b5;
-        border-top: heavy #365567;
+        background: $background;
+        border-top: heavy #5f7b8c;
     }
 
     PaneSplitter:hover {
-        background: #21414f;
-        color: #d9eef9;
-        border-top: heavy #7ea1b5;
-        text-style: bold;
+        background: $background;
+        border-top: heavy #b7d2e2;
     }
 
     PaneSplitter.-dragging {
-        background: #2b5568;
-        color: #ffffff;
-        border-top: heavy #d9eef9;
-        text-style: bold;
+        background: $background;
+        border-top: heavy #f0f9ff;
     }
     """
 
@@ -49,14 +40,11 @@ class PaneSplitter(Static):
         on_resize: Callable[[int, PaneResizePhase, int], None],
         **kwargs: Any,
     ) -> None:
-        super().__init__(self.DEFAULT_HANDLE, **kwargs)
+        super().__init__("", **kwargs)
         self._splitter_index = splitter_index
         self._on_resize = on_resize
         self._drag_state: _PaneSplitterDragState | None = None
         self.tooltip = "Drag to resize panes"
-
-    def _set_handle(self, value: str) -> None:
-        self.update(value)
 
     @staticmethod
     def _event_screen_y(event: MouseDown | MouseMove | MouseUp) -> float:
@@ -67,7 +55,6 @@ class PaneSplitter(Static):
         self._drag_state = None
         self.release_mouse()
         self.remove_class("-dragging")
-        self._set_handle(self.HOVER_HANDLE if self.mouse_hover else self.DEFAULT_HANDLE)
         return state
 
     def _commit_drag(self) -> None:
@@ -83,7 +70,6 @@ class PaneSplitter(Static):
         self._drag_state = _PaneSplitterDragState(start_screen_y=self._event_screen_y(event))
         self.capture_mouse()
         self.add_class("-dragging")
-        self._set_handle(self.DRAG_HANDLE)
         self._on_resize(self._splitter_index, "start", 0)
         event.stop()
 
@@ -110,13 +96,3 @@ class PaneSplitter(Static):
         if self._drag_state is None:
             return
         self._commit_drag()
-
-    def on_enter(self, _event: Enter) -> None:
-        if self._drag_state is not None:
-            return
-        self._set_handle(self.HOVER_HANDLE)
-
-    def on_leave(self, _event: Leave) -> None:
-        if self._drag_state is not None:
-            return
-        self._set_handle(self.DEFAULT_HANDLE)
