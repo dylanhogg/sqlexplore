@@ -689,6 +689,30 @@ def test_activity_and_preview_selection_can_be_copied(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_results_preview_update_clears_stale_selection(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                preview = app.query_one("#results_preview", ResultsPreview)
+                preview.update("alpha\nbeta\ngamma")
+                preview.focus()
+                preview.select_line(1)
+                await pilot.pause()
+                assert preview.selected_text == "beta"
+
+                preview.update("first\nsecond")
+                await pilot.pause()
+                assert preview.selected_text == ""
+                assert preview.selection.start == (0, 0)
+                assert preview.selection.end == (0, 0)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_activity_and_preview_panes_can_scroll(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)

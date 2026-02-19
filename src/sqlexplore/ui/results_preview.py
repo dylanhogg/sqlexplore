@@ -26,7 +26,9 @@ class ResultsPreview(TextArea):
             self._rendered_lines = None
             content_text = str(content)
         self.load_text(content_text)
-        self.move_cursor((0, 0))
+        # With read_only=True and show_cursor=False, TextArea.move_cursor is a no-op.
+        # Reset selection explicitly so stale selection does not survive new preview content.
+        self.selection = type(self.selection).cursor((0, 0))
 
     def get_line(self, line_index: int) -> Text:
         if self._rendered_lines is not None and line_index < len(self._rendered_lines):
