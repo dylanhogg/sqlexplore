@@ -99,7 +99,7 @@ class SqlExplorerTui(App[None]):
     .section-title {
         color: #9abed8;
         text-style: bold;
-        margin-top: 1;
+        margin-top: 0;
     }
 
     #query_editor {
@@ -440,7 +440,7 @@ class SqlExplorerTui(App[None]):
             with Vertical(id="sidebar"):
                 yield Static(self.engine.schema_preview(), id="sidebar_text")
             with Vertical(id="workspace"):
-                yield Static("Query", classes="section-title")
+                yield Static("SQL Query or /command", classes="section-title")
                 yield SqlQueryEditor(
                     self._startup_query,
                     self.engine.completion_tokens,
@@ -475,7 +475,6 @@ class SqlExplorerTui(App[None]):
                     id="pane_splitter_cell_activity",
                     classes="pane-splitter",
                 )
-                yield Static("Activity", classes="section-title")
                 yield TextArea(
                     "",
                     id="activity_log",
