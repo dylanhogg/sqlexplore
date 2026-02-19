@@ -13,6 +13,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Apply lost text highlighting to Activity panel
 - Add a `/load` filename command
 - Add session id to log
+- Update README docs (follow exaple from `uvx showboat --help`)
 - Autodetect csv/tsv (vs plain text) piped stdin and open in TUI
 - Enable load from BQ/Snowflake/other DBs
 - Add quick actions to ^p palette
@@ -24,7 +25,6 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - ! Enable reproduce this results in a bash file that installs `uv` and runs `sqlexplore` with the same data files and SQL query
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
 - Test all startup options and CLI args
-- Update README docs
 - Migrate logging from file to sqlite database
 - Textual double click to select row? & Cmd+A to select all? (maybe not? codex://threads/019c6a4a-4e25-7842-a7db-356a983f93b7)
 - Improve persistent file log life cycle management (rotate, cleanup, use for /llm-history, etc.)
