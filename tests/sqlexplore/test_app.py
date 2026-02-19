@@ -13,15 +13,12 @@ from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.completion.models import CompletionItem
 from sqlexplore.core.engine import EngineResponse, SqlExplorerEngine, app_version
-from sqlexplore.ui.tui import (
-    NULL_VALUE_COLOR,
-    URL_COLOR,
-    PaneSplitter,
-    ResultsPreview,
-    ResultsTable,
-    SqlExplorerTui,
-    SqlQueryEditor,
-)
+from sqlexplore.ui.pane_splitter import PaneSplitter
+from sqlexplore.ui.query_editor import SqlQueryEditor
+from sqlexplore.ui.results_preview import ResultsPreview
+from sqlexplore.ui.results_table import ResultsTable
+from sqlexplore.ui.tui_app import SqlExplorerTui
+from sqlexplore.ui.tui_shared import NULL_VALUE_COLOR, URL_COLOR
 
 
 def _build_app(

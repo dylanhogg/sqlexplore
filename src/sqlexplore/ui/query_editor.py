@@ -13,12 +13,11 @@ from sqlexplore.completion.models import (
     CompletionItem,
     CompletionResult,
 )
-from sqlexplore.ui.tui_shared import CompletionMode
-from sqlexplore.ui.tui_shared import build_shortcuts as _build_shortcuts
+from sqlexplore.ui.tui_shared import CompletionMode, build_shortcuts
 
 
 class SqlQueryEditor(TextArea):
-    BINDINGS = _build_shortcuts(for_editor=True)
+    BINDINGS = build_shortcuts(for_editor=True)
 
     def __init__(
         self,

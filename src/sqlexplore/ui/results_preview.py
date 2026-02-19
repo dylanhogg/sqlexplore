@@ -3,8 +3,7 @@ from typing import Any
 from rich.text import Text
 from textual.widgets import TextArea
 
-from sqlexplore.ui.tui_shared import PreviewContent
-from sqlexplore.ui.tui_shared import stylize_links as _stylize_links
+from sqlexplore.ui.tui_shared import PreviewContent, stylize_links
 
 
 class ResultsPreview(TextArea):
@@ -36,5 +35,5 @@ class ResultsPreview(TextArea):
         else:
             line_text = self.document.get_line(line_index)
             rendered = Text(line_text, end="")
-        _stylize_links(rendered, clickable=True)
+        stylize_links(rendered, clickable=True)
         return rendered

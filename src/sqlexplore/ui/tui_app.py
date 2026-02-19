@@ -47,38 +47,16 @@ from sqlexplore.ui.tui_shared import (
     PaneId,
     PaneResizePhase,
     RenderedCell,
-)
-from sqlexplore.ui.tui_shared import (
-    NULL_VALUE_COLOR as _NULL_VALUE_COLOR,
-)
-from sqlexplore.ui.tui_shared import (
-    URL_COLOR as _URL_COLOR,
-)
-from sqlexplore.ui.tui_shared import (
-    build_shortcuts as _build_shortcuts,
-)
-from sqlexplore.ui.tui_shared import (
-    column_looks_like_json as _column_looks_like_json,
-)
-from sqlexplore.ui.tui_shared import (
-    compact_json_cell as _compact_json_cell,
-)
-from sqlexplore.ui.tui_shared import (
-    pretty_json_cell as _pretty_json_cell,
-)
-from sqlexplore.ui.tui_shared import (
-    preview_type_label as _preview_type_label,
-)
-from sqlexplore.ui.tui_shared import (
-    stylize_links as _stylize_links,
-)
-from sqlexplore.ui.tui_shared import (
-    truncate_highlighted_text as _truncate_highlighted_text,
+    build_shortcuts,
+    column_looks_like_json,
+    compact_json_cell,
+    pretty_json_cell,
+    preview_type_label,
+    stylize_links,
+    truncate_highlighted_text,
 )
 
 logger = get_logger(__name__)
-URL_COLOR = _URL_COLOR
-NULL_VALUE_COLOR = _NULL_VALUE_COLOR
 
 
 @dataclass(slots=True)
@@ -171,7 +149,7 @@ class SqlExplorerTui(App[None]):
     }
     """
 
-    BINDINGS = _build_shortcuts(for_editor=False)
+    BINDINGS = build_shortcuts(for_editor=False)
 
     def __init__(
         self,
@@ -747,7 +725,7 @@ class SqlExplorerTui(App[None]):
                 continue
             if not is_varchar_type(type_name):
                 continue
-            if _column_looks_like_json(result.rows, index):
+            if column_looks_like_json(result.rows, index):
                 detected.add(index)
         return detected
 
@@ -758,13 +736,13 @@ class SqlExplorerTui(App[None]):
         image = summarize_image_cell(value)
         if image is not None:
             return Text(format_image_cell_token(image), end="", no_wrap=True)
-        compact = _compact_json_cell(value)
+        compact = compact_json_cell(value)
         if compact is None:
             return self._render_scalar_cell(value, max_value_chars=value_chars)
         highlighted = Text(compact, end="", no_wrap=True)
         self._json_highlighter.highlight(highlighted)
-        truncated = _truncate_highlighted_text(highlighted, value_chars)
-        _stylize_links(truncated, clickable=False)
+        truncated = truncate_highlighted_text(highlighted, value_chars)
+        stylize_links(truncated, clickable=False)
         return truncated
 
     def _render_scalar_cell(self, value: CellValue, *, max_value_chars: int | None = None) -> RenderedCell:
@@ -774,7 +752,7 @@ class SqlExplorerTui(App[None]):
         if not self._json_rendering_enabled:
             text = format_scalar(value, value_chars)
             rendered = Text(text, end="", no_wrap=True)
-            if not _stylize_links(rendered, clickable=False):
+            if not stylize_links(rendered, clickable=False):
                 return text
             return rendered
         image = summarize_image_cell(value)
@@ -782,7 +760,7 @@ class SqlExplorerTui(App[None]):
             return Text(format_image_cell_token(image), end="", no_wrap=True)
         text = format_scalar(value, value_chars)
         rendered = Text(text, end="", no_wrap=True)
-        if not _stylize_links(rendered, clickable=False):
+        if not stylize_links(rendered, clickable=False):
             return text
         return rendered
 
@@ -871,7 +849,7 @@ class SqlExplorerTui(App[None]):
             return f"{metadata}\nraw:\n{value_any}", False
         should_try_json = is_struct_type_name(type_name) or is_varchar_type(type_name) or isinstance(value, dict | list)
         if should_try_json:
-            pretty = _pretty_json_cell(value_any)
+            pretty = pretty_json_cell(value_any)
             if pretty is not None:
                 return pretty, True
         return str(value_any), False
@@ -904,7 +882,7 @@ class SqlExplorerTui(App[None]):
         type_name: str,
         value: CellValue,
     ) -> None:
-        type_label = _preview_type_label(type_name)
+        type_label = preview_type_label(type_name)
         value_len = self._safe_len(value)
         header = f"{column_name}, {type_label}, row {row_index + 1}, col {column_index + 1}, len {value_len}"
         preview_text = Text(f"{header}\n", end="")
