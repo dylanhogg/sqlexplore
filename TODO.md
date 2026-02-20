@@ -9,14 +9,20 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
-- Enable resize columns in results pane
+- Add a `/load` filename command
+- Add session id to log
+- Update README docs (follow exaple from `uvx showboat --help`)
+- Autodetect csv/tsv (vs plain text) piped stdin and open in TUI
+- Enable load from BQ/Snowflake/other DBs
+- Add quick actions to ^p palette
+- Write log history session to Marimo notebook to track analysis discoveries (with optional LLM summary of each query and result)
+- Key binding: Write marimo notebook and uvx open it
 - Union multiple input files into a single table
     - Fix total row count on `SELECT * FROM "data_src_3" LIMIT 10`
     - If only 1 data source, don't have a union table, just use the single source table
 - ! Enable reproduce this results in a bash file that installs `uv` and runs `sqlexplore` with the same data files and SQL query
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
 - Test all startup options and CLI args
-- Update README docs
 - Migrate logging from file to sqlite database
 - Textual double click to select row? & Cmd+A to select all? (maybe not? codex://threads/019c6a4a-4e25-7842-a7db-356a983f93b7)
 - Improve persistent file log life cycle management (rotate, cleanup, use for /llm-history, etc.)
@@ -37,6 +43,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
     - /llm-chat-data
     - /llm-categoise-data col
 - LLM General:
+    - Add `llm_request` text/prompt to /llm-history for the user
     - Render LLM thinking and reasoning steps in Activity, with replacing line so it doesn't scroll away
     - Add dataset cols or name to /llm-history for better context
     - Config thinking and temperature params (?)
@@ -129,3 +136,10 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Support SQLite
 - Support Excel
 - Ensure multipart parquet files are supported
+
+## Future language migration
+
+- Investigate golang version:
+    - https://github.com/charmbracelet/bubbletea (A powerful little TUI framework)
+    - https://github.com/charmbracelet/lipgloss (Style definitions for nice terminal layouts)
+    - https://github.com/charmbracelet/wish (Make SSH apps)

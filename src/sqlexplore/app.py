@@ -16,7 +16,8 @@ from sqlexplore.core.engine import (
     format_scalar,
 )
 from sqlexplore.core.logging_utils import configure_file_logging, get_logger, truncate_for_log
-from sqlexplore.ui.tui import SqlExplorerTui, SqlQueryEditor
+from sqlexplore.ui.query_editor import SqlQueryEditor
+from sqlexplore.ui.tui_app import SqlExplorerTui
 
 app = typer.Typer(
     help="Interactive DuckDB SQL explorer for CSV/TSV/TXT/Parquet files.",

@@ -13,7 +13,13 @@ from textual.widgets import DataTable, OptionList, Static, TextArea
 
 from sqlexplore.completion.models import CompletionItem
 from sqlexplore.core.engine import EngineResponse, SqlExplorerEngine, app_version
-from sqlexplore.ui.tui import NULL_VALUE_COLOR, URL_COLOR, ResultsPreview, ResultsTable, SqlExplorerTui, SqlQueryEditor
+from sqlexplore.ui.activity_log import ActivityLog
+from sqlexplore.ui.pane_splitter import PaneSplitter
+from sqlexplore.ui.query_editor import SqlQueryEditor
+from sqlexplore.ui.results_preview import ResultsPreview
+from sqlexplore.ui.results_table import ResultsTable
+from sqlexplore.ui.tui_app import SqlExplorerTui
+from sqlexplore.ui.tui_shared import NULL_VALUE_COLOR, URL_COLOR
 
 
 def _build_app(
@@ -85,6 +91,23 @@ def _drag_column_resize(table: ResultsTable, column_index: int, delta_x: int) ->
     table.on_mouse_up(MouseUp(table, start_x + delta_x, 0, 0, 0, 1, False, False, False, style=header_style))
 
 
+def _drag_pane_splitter(splitter: PaneSplitter, delta_y: int) -> None:
+    style = Style()
+    splitter.on_mouse_down(MouseDown(splitter, 0, 0, 0, 0, 1, False, False, False, style=style))
+    splitter.on_mouse_move(MouseMove(splitter, 0, delta_y, 0, delta_y, 1, False, False, False, style=style))
+    splitter.on_mouse_up(MouseUp(splitter, 0, delta_y, 0, 0, 1, False, False, False, style=style))
+
+
+def _pane_heights(app: SqlExplorerTui) -> dict[str, int]:
+    heights = cast(Any, app)._pane_heights()
+    return {
+        "query": int(heights["query"]),
+        "results": int(heights["results"]),
+        "cell_detail": int(heights["cell_detail"]),
+        "activity": int(heights["activity"]),
+    }
+
+
 def _cell_plain_text(cell: object) -> str:
     if isinstance(cell, Text):
         return cell.plain
@@ -109,6 +132,14 @@ def _has_url_color(style: Any) -> bool:
 
 def _has_null_value_color(style: Any) -> bool:
     return style is not None and NULL_VALUE_COLOR.lower() in str(style).lower()
+
+
+def _has_activity_key_color(style: Any) -> bool:
+    return style is not None and "9abed8" in str(style).lower()
+
+
+def _has_preview_header_color(style: Any) -> bool:
+    return style is not None and "7ab6e8" in str(style).lower()
 
 
 def test_query_and_results_panes_share_status_key_order() -> None:
@@ -478,6 +509,38 @@ def test_activity_log_renders_info_activity_messages(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_activity_log_applies_rich_text_styling(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                activity = app.query_one("#activity_log", ActivityLog)
+                activity.load_text("[INFO] [llm] model=openai/gpt-5-mini request_tokens=10")
+                rendered = activity.get_line(0)
+                assert rendered.plain.startswith("[INFO] [llm] model=openai/gpt-5-mini")
+                assert any(_has_activity_key_color(span.style) for span in rendered.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_activity_log_disables_cursor_line_overlay(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                activity = app.query_one("#activity_log", ActivityLog)
+                assert activity.highlight_cursor_line is False
+                assert activity.show_cursor is False
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_copy_tsv_shortcut_copies_visible_results_table(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path, csv_text="a,b\n1,x\n2,y\n3,z\n4,w\n5,v\n", max_rows_display=2)
@@ -626,6 +689,30 @@ def test_activity_and_preview_selection_can_be_copied(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_results_preview_update_clears_stale_selection(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                preview = app.query_one("#results_preview", ResultsPreview)
+                preview.update("alpha\nbeta\ngamma")
+                preview.focus()
+                preview.select_line(1)
+                await pilot.pause()
+                assert preview.selected_text == "beta"
+
+                preview.update("first\nsecond")
+                await pilot.pause()
+                assert preview.selected_text == ""
+                assert preview.selection.start == (0, 0)
+                assert preview.selection.end == (0, 0)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_activity_and_preview_panes_can_scroll(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)
@@ -739,6 +826,21 @@ def test_preview_pane_preserves_json_highlighting(tmp_path: Path) -> None:
                 preview = app.query_one("#results_preview", ResultsPreview)
                 rendered_lines = [preview.get_line(index) for index in range(preview.document.line_count)]
                 assert any("json.key" in str(span.style) for line in rendered_lines for span in line.spans)
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_cell_preview_header_line_is_styled(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                preview = app.query_one("#results_preview", ResultsPreview)
+                line = preview.get_line(0)
+                assert any(_has_preview_header_color(span.style) for span in line.spans)
         finally:
             engine.close()
 
@@ -941,6 +1043,124 @@ def test_results_column_resize_expansion_reveals_more_text(tmp_path: Path) -> No
                 after_text = _cell_plain_text(results.get_row_at(0)[0])
                 assert len(after_text) > len(before_text)
                 assert after_text == long_value
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_query_pane_resize_grows_query_and_shrinks_results_first(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,2\n3,4\n")
+        try:
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                splitter = app.query_one("#pane_splitter_query_results", PaneSplitter)
+                before = _pane_heights(app)
+
+                _drag_pane_splitter(splitter, 2)
+                await pilot.pause()
+                after = _pane_heights(app)
+
+                assert after["query"] == before["query"] + 2
+                assert after["results"] == before["results"] - 2
+                assert after["cell_detail"] == before["cell_detail"]
+                assert after["activity"] == before["activity"]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_pane_minimum_height_is_enforced_during_pane_resize(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,2\n3,4\n")
+        try:
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                splitter = app.query_one("#pane_splitter_query_results", PaneSplitter)
+                minimum_visual_height = _pane_heights(app)["query"]
+
+                _drag_pane_splitter(splitter, 10_000)
+                await pilot.pause()
+
+                after = _pane_heights(app)
+                assert after["results"] == minimum_visual_height
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_cell_detail_pane_resize_grows_cell_detail_and_shrinks_results_first(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,2\n3,4\n")
+        try:
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                splitter = app.query_one("#pane_splitter_results_cell", PaneSplitter)
+                before = _pane_heights(app)
+
+                _drag_pane_splitter(splitter, -2)
+                await pilot.pause()
+                after = _pane_heights(app)
+
+                assert after["cell_detail"] == before["cell_detail"] + 2
+                assert after["results"] == before["results"] - 2
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_activity_pane_resize_uses_next_largest_when_results_is_at_minimum(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,2\n3,4\n")
+        try:
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                query_splitter = app.query_one("#pane_splitter_query_results", PaneSplitter)
+                activity_splitter = app.query_one("#pane_splitter_cell_activity", PaneSplitter)
+                minimum_visual_height = _pane_heights(app)["query"]
+
+                _drag_pane_splitter(query_splitter, 10_000)
+                await pilot.pause()
+                mid = _pane_heights(app)
+                assert mid["results"] == minimum_visual_height
+
+                _drag_pane_splitter(activity_splitter, -3)
+                await pilot.pause()
+                after = _pane_heights(app)
+
+                assert after["results"] == mid["results"]
+                assert after["activity"] == mid["activity"] + 3
+                assert after["query"] == mid["query"] - 3
+                assert after["cell_detail"] == mid["cell_detail"]
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
+def test_results_pane_resize_can_grow_by_shrinking_cell_detail(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path, csv_text="a,b\n1,2\n3,4\n")
+        try:
+            async with app.run_test(size=(120, 50)) as pilot:
+                await pilot.pause()
+                cell_splitter = app.query_one("#pane_splitter_cell_activity", PaneSplitter)
+                results_splitter = app.query_one("#pane_splitter_results_cell", PaneSplitter)
+
+                _drag_pane_splitter(cell_splitter, 3)
+                await pilot.pause()
+                mid = _pane_heights(app)
+
+                _drag_pane_splitter(results_splitter, 2)
+                await pilot.pause()
+                after = _pane_heights(app)
+
+                assert after["results"] == mid["results"] + 2
+                assert after["cell_detail"] == mid["cell_detail"] - 2
         finally:
             engine.close()
 
@@ -1487,7 +1707,21 @@ def test_preview_render_value_highlights_json_for_struct_and_varchar(tmp_path: P
 
         private_app._json_rendering_enabled = False
         no_highlight = private_app._render_preview_value('{"a":1}', "VARCHAR")
-        assert no_highlight.spans == []
+        assert no_highlight.spans
+        assert all("json.key" not in str(span.style) for span in no_highlight.spans)
+    finally:
+        engine.close()
+
+
+def test_preview_render_value_highlights_plain_text_with_rich_repr(tmp_path: Path) -> None:
+    app, engine = _build_app(tmp_path)
+    try:
+        private_app = cast(Any, app)
+        rendered = private_app._render_preview_value(
+            "{'a': 1, 'url': 'https://example.com'}",
+            "VARCHAR",
+        )
+        assert rendered.spans
     finally:
         engine.close()
 
