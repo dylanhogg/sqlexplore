@@ -21,6 +21,7 @@ from sqlexplore.core.logging_utils import (
     read_log_events_for_trace,
     truncate_for_log,
 )
+from sqlexplore.core.marimo_export import MarimoSessionExport, export_session_to_marimo
 from sqlexplore.core.result_utils import format_scalar, result_columns, sql_literal
 from sqlexplore.llm.llm_sql import resolve_llm_model, validate_llm_api_key
 
@@ -54,6 +55,7 @@ USAGE_ROWS = "/rows <n>"
 USAGE_VALUES = "/values <n>"
 USAGE_LIMIT = "/limit <n>"
 USAGE_SAVE = "/save <path.csv|path.parquet|path.pq|path.json>"
+USAGE_SAVE_MARIMO = "/save-marimo"
 USAGE_LAST = "/last"
 USAGE_CLEAR = "/clear"
 USAGE_EXIT = "/exit or /quit"
@@ -788,6 +790,27 @@ def cmd_save(engine: CommandEngine, args: str) -> EngineResponse:
     if not payload:
         return usage_error(USAGE_SAVE)
     return save_last_result(engine, payload)
+
+
+def cmd_save_marimo(engine: CommandEngine, args: str) -> EngineResponse:
+    err = require_no_args(args, USAGE_SAVE_MARIMO)
+    if err is not None:
+        return err
+    try:
+        output_path = export_session_to_marimo(_marimo_session_export(engine), Path.cwd())
+    except (OSError, ValueError) as exc:
+        return response(status="error", message=f"Marimo export failed: {exc}")
+    return response(status="ok", message=f"Saved marimo notebook to {output_path}")
+
+
+def _marimo_session_export(engine: CommandEngine) -> MarimoSessionExport:
+    return MarimoSessionExport(
+        session_id=engine.session_id,
+        data_paths=engine.data_paths,
+        table_name=engine.table_name,
+        database=engine.database,
+        query_history=tuple(engine.query_history),
+    )
 
 
 def cmd_last(engine: CommandEngine, args: str) -> EngineResponse:

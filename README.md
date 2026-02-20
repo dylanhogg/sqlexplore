@@ -34,31 +34,31 @@ Requires Python 3.13+.
 Run directly without a manual install:
 
 ```bash
-uvx sqlexplore --data ./data/example.parquet
+uvx sqlexplore --data my_data.parquet
 ```
 
 Equivalent explicit form:
 
 ```bash
-uvx --from sqlexplore sqlexplore --data ./data/example.parquet
+uvx --from sqlexplore sqlexplore --data my_data.parquet
 ```
 
 Run one query and exit:
 
 ```bash
-uvx sqlexplore --data ./data/example.parquet --execute "SELECT COUNT(*) AS n FROM data" --no-ui
+uvx sqlexplore --data https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet --execute "SELECT COUNT(*) AS n FROM data" --no-ui
 ```
 
 Run SQL from file and exit:
 
 ```bash
-uvx sqlexplore --data ./data/example.parquet --file ./queries/report.sql --no-ui
+uvx sqlexplore --data https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet --file ./queries/report.sql --no-ui
 ```
 
 Use multiple inputs:
 
 ```bash
-uvx sqlexplore --data ./data/jan.parquet --data ./data/feb.parquet
+uvx sqlexplore --data ./data/january.parquet --data ./data/february.parquet
 ```
 
 Analyze piped terminal text:
@@ -77,7 +77,7 @@ uvx sqlexplore --data https://github.com/dylanhogg/awesome-python/raw/refs/heads
 
 ```bash
 pip install sqlexplore
-sqlexplore --data ./data/example.parquet
+sqlexplore --data https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
 ```
 
 ## LLM usage (optional)

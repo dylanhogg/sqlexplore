@@ -16,6 +16,10 @@ which-python:
 clean:
 	rm -rf .venv
 
+marimo-wip:
+	# uvx --from "marimo[recommended]" --with numpy --with pandas marimo edit marimo_b90b9d6031b140dfbc2b2ef4dbdc4fc9.py
+	uvx --from marimo --with duckdb --with numpy --with pandas marimo edit marimo_49593d7f82d04891bd1e9efa0911777b.py
+
 run-example-local:
 	uv run python -m sqlexplore.app --data data/example.parquet
 

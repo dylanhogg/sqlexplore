@@ -9,9 +9,10 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
+- Ability to resume an ended sqlexplore session via `/load-session <session_id>`
 - Show loaded file(s) in activity log on load
 - Add a `/load` filename command
-- Update README docs (follow exaple from `uvx showboat --help`)
+- WIP: Update README docs (follow exaple from `uvx showboat --help`)
 - Autodetect csv/tsv (vs plain text) piped stdin and open in TUI
 - Enable load from BQ/Snowflake/other DBs
 - Add quick actions to ^p palette

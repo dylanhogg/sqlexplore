@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,8 @@ from sqlexplore.llm.llm_sql import SampleRows
 class _FakeEngine:
     conn = None
     session_id = "test-session"
+    data_paths = (Path("data.csv"),)
+    database = ":memory:"
     table_name = "data"
     default_limit = 10
     max_rows_display = 50

@@ -232,6 +232,7 @@ def test_help_text_is_generated_from_command_registry(tmp_path: Path) -> None:
         assert "/group <group cols> | <aggregates> [| having]" in help_text
         assert "/summary [n_cols] [| where]" in help_text
         assert "/save <path.csv|path.parquet|path.pq|path.json>" in help_text
+        assert "/save-marimo" in help_text
         assert "/exit or /quit" in help_text
     finally:
         engine.close()
@@ -502,6 +503,71 @@ def test_save_command_requires_result_and_supports_csv_and_json(tmp_path: Path) 
         json_text = json_path.read_text(encoding="utf-8")
         assert '"col_name": "a"' in json_text
         assert '"x": 1' in json_text
+    finally:
+        engine.close()
+
+
+def test_save_marimo_exports_session_replay_notebook(tmp_path: Path, monkeypatch: Any) -> None:
+    engine = _build_engine(tmp_path)
+    try:
+        monkeypatch.chdir(tmp_path)
+        first = engine.run_input('SELECT\n  col_name,\n  x\nFROM "data"\nORDER BY x')
+        assert first.status == "ok"
+
+        helper = engine.run_input("/sample 1")
+        assert helper.status == "ok"
+
+        command = engine.run_input("/help")
+        assert command.status == "ok"
+
+        out = engine.run_input("/save-marimo")
+        assert out.status == "ok"
+        notebook_path = tmp_path / f"marimo_{engine.session_id}.py"
+        assert out.message == f"Saved marimo notebook to {notebook_path.resolve()}"
+        assert notebook_path.exists() is True
+        notebook_text = notebook_path.read_text(encoding="utf-8")
+        assert "import marimo" in notebook_text
+        assert "app = marimo.App()" in notebook_text
+        assert str(engine.data_path.resolve()) in notebook_text
+        assert "read_csv_auto" in notebook_text
+        assert 'SELECT\n  col_name,\n  x\nFROM "data"\nORDER BY x' in notebook_text
+        assert 'SELECT * FROM "data" LIMIT 1' in notebook_text
+        assert "# step 1: user-entered SQL" in notebook_text
+        assert "# origin: typed directly in sqlexplore" in notebook_text
+        assert "# step 2: helper-command SQL" in notebook_text
+        assert "# source command: /sample 1" in notebook_text
+        assert '    _sql = """' in notebook_text
+        assert '    _sql = """SELECT\n  col_name,\n  x\nFROM "data"\nORDER BY x"""' in notebook_text
+        assert '    _sql = "SELECT\\n  col_name' not in notebook_text
+        assert "# step 3: command-only entry (non-replayable)" in notebook_text
+        assert "# command: /help" in notebook_text
+        assert "/save-marimo" not in notebook_text
+    finally:
+        engine.close()
+
+
+def test_save_marimo_includes_llm_prompt_and_command_context(tmp_path: Path, monkeypatch: Any) -> None:
+    engine = _build_engine(tmp_path)
+
+    def fake_sql(prompt: str, model: str) -> str:
+        _ = prompt
+        _ = model
+        return 'SELECT col_name, COUNT(*) AS count FROM "data" GROUP BY col_name ORDER BY count DESC, col_name LIMIT 10'
+
+    try:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(command_handlers_module, "validate_llm_api_key", lambda: None)
+        monkeypatch.setattr(llm_runner_module, "generate_sql", fake_sql)
+        out = engine.run_input("/llm-query count rows by col_name")
+        assert out.status == "ok"
+
+        export_out = engine.run_input("/save-marimo")
+        assert export_out.status == "ok"
+        notebook_path = tmp_path / f"marimo_{engine.session_id}.py"
+        notebook_text = notebook_path.read_text(encoding="utf-8")
+        assert "# step 1: LLM-generated SQL" in notebook_text
+        assert "# source command: /llm-query count rows by col_name" in notebook_text
+        assert "# llm prompt: count rows by col_name" in notebook_text
     finally:
         engine.close()
 
@@ -1171,6 +1237,10 @@ def test_usage_errors_match_help_usage_lines(tmp_path: Path) -> None:
         assert save_out.status == "error"
         assert save_out.message == "Usage: /save <path.csv|path.parquet|path.pq|path.json>"
 
+        save_marimo_out = engine.run_input("/save-marimo extra")
+        assert save_marimo_out.status == "error"
+        assert save_marimo_out.message == "Usage: /save-marimo"
+
         quit_out = engine.run_input("/quit extra")
         assert quit_out.status == "error"
         assert quit_out.message == "Usage: /exit or /quit"
@@ -1180,6 +1250,7 @@ def test_usage_errors_match_help_usage_lines(tmp_path: Path) -> None:
         assert "/rerun-log <event_id>" in help_text
         assert "/llm-show <trace_id>" in help_text
         assert "/save <path.csv|path.parquet|path.pq|path.json>" in help_text
+        assert "/save-marimo" in help_text
         assert "/exit or /quit" in help_text
     finally:
         engine.close()
