@@ -628,8 +628,8 @@ def test_copy_tsv_shortcut_uses_displayed_helper_command_results(tmp_path: Path)
                 await pilot.pause()
 
                 copied_rows = _parse_tsv(app.clipboard)
-                assert copied_rows[0] == ["#", "type", "status", "sql"]
-                assert any(row[3] == 'SELECT * FROM "data" LIMIT 1' for row in copied_rows[1:])
+                assert copied_rows[0] == ["#", "session_id", "type", "status", "sql"]
+                assert any(row[4] == 'SELECT * FROM "data" LIMIT 1' for row in copied_rows[1:])
         finally:
             engine.close()
 

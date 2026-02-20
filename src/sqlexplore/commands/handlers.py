@@ -74,6 +74,7 @@ KNOWN_QUERY_TYPES: set[HistoryQueryType] = {
 LlmEventStatus = Literal["success", "provider_error", "invalid_sql", "missing_key"]
 LLM_HISTORY_COLUMNS = [
     "trace_id",
+    "session_id",
     "status",
     "retries",
     "total_tokens",
@@ -86,6 +87,8 @@ LLM_HISTORY_COLUMNS = [
     "response_tokens",
     "reasoning_tokens",
 ]
+HISTORY_COLUMNS = ["#", "session_id", "type", "status", "sql"]
+HISTORY_LOG_COLUMNS = ["event_id", "session_id", "type", "status", "sql"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,10 +514,10 @@ def cmd_history(engine: CommandEngine, args: str) -> EngineResponse:
     history = engine.query_history[-count:]
     start_idx = max(1, len(engine.query_history) - len(history) + 1)
     rows = [
-        (idx, entry.query_type, entry.query_status, entry.query_text)
+        (idx, engine.session_id, entry.query_type, entry.query_status, entry.query_text)
         for idx, entry in enumerate(history, start=start_idx)
     ]
-    return engine.table_response(["#", "type", "status", "sql"], rows, f"History ({len(history)} queries)")
+    return engine.table_response(HISTORY_COLUMNS, rows, f"History ({len(history)} queries)")
 
 
 def cmd_llm_history(engine: CommandEngine, args: str) -> EngineResponse:
@@ -530,6 +533,7 @@ def cmd_llm_history(engine: CommandEngine, args: str) -> EngineResponse:
 def _llm_history_row(event: dict[str, Any]) -> tuple[str, ...]:
     return (
         _event_text(event, "trace_id"),
+        _event_session_id(event),
         _event_text(event, "status"),
         _event_text(event, "retry_count"),
         _event_text(event, "total_tokens"),
@@ -551,6 +555,10 @@ def _event_text(event: dict[str, Any], key: str) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+
+def _event_session_id(event: dict[str, Any]) -> str:
+    return _event_text(event, "session_id")
 
 
 def _event_float_text(event: dict[str, Any], key: str, precision: int) -> str:
@@ -595,19 +603,15 @@ def _last_event(grouped_events: dict[str, list[dict[str, Any]]], kind: str) -> d
 
 
 def _bundle_generated_sql(grouped_events: dict[str, list[dict[str, Any]]]) -> str | None:
-    llm_result = _last_event(grouped_events, "llm.result")
-    if llm_result is not None:
-        generated_sql = _event_text(llm_result, "generated_sql").strip()
-        if generated_sql:
-            return generated_sql
-    llm_exec = _last_event(grouped_events, "llm.sql_execution")
-    if llm_exec is not None:
-        generated_sql = _event_text(llm_exec, "sql").strip()
-        if generated_sql:
-            return generated_sql
-    llm_response = _last_event(grouped_events, "llm.response")
-    if llm_response is not None:
-        generated_sql = _event_text(llm_response, "sql").strip()
+    for event_kind, field_name in (
+        ("llm.result", "generated_sql"),
+        ("llm.sql_execution", "sql"),
+        ("llm.response", "sql"),
+    ):
+        event = _last_event(grouped_events, event_kind)
+        if event is None:
+            continue
+        generated_sql = _event_text(event, field_name).strip()
         if generated_sql:
             return generated_sql
     return None
@@ -623,6 +627,14 @@ def _llm_trace_summary(grouped_events: dict[str, list[dict[str, Any]]]) -> tuple
     return query, model, status, generated_sql
 
 
+def _trace_session_id(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        session_id = _event_session_id(event).strip()
+        if session_id:
+            return session_id
+    return ""
+
+
 def cmd_llm_show(engine: CommandEngine, args: str) -> EngineResponse:
     trace_id, err = _parse_single_arg(args, USAGE_LLM_SHOW)
     if err is not None:
@@ -633,6 +645,7 @@ def cmd_llm_show(engine: CommandEngine, args: str) -> EngineResponse:
         return response(status="error", message=f"LLM trace not found: {trace_id}")
 
     grouped_events = _events_by_kind(events)
+    session_id = _trace_session_id(events)
     query, model, status, generated_sql = _llm_trace_summary(grouped_events)
     llm_result = _last_event(grouped_events, "llm.result")
     bundle = {
@@ -648,6 +661,7 @@ def cmd_llm_show(engine: CommandEngine, args: str) -> EngineResponse:
     bundle_json = json.dumps(bundle, ensure_ascii=True, default=str, indent=2, sort_keys=True)
     rows = [
         ("trace_id", trace_id),
+        ("session_id", session_id),
         ("status", status),
         ("query", query),
         ("model", model),
@@ -670,6 +684,7 @@ def cmd_history_log(engine: CommandEngine, args: str) -> EngineResponse:
     rows = [
         (
             _event_text(event, "event_id"),
+            _event_session_id(event),
             _event_text(event, "query_type"),
             _event_text(event, "status"),
             _event_text(event, "sql"),
@@ -677,7 +692,7 @@ def cmd_history_log(engine: CommandEngine, args: str) -> EngineResponse:
         for event in events
     ]
     return engine.table_response(
-        ["event_id", "type", "status", "sql"],
+        HISTORY_LOG_COLUMNS,
         rows,
         f"Persisted SQL history ({len(rows)} queries)",
     )

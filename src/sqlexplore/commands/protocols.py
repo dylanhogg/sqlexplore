@@ -6,6 +6,7 @@ from sqlexplore.core.engine_models import EngineResponse, HistoryQueryType, Quer
 
 class CommandEngine(Protocol):
     conn: Any
+    session_id: str
     table_name: str
     default_limit: int
     max_rows_display: int
