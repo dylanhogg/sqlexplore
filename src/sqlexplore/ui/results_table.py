@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Callable
 
 from rich.style import Style
@@ -14,6 +15,8 @@ class _ColumnResizeState:
     column_index: int
     start_screen_x: float
     start_content_width: int
+    last_delta: int = 0
+    last_applied_delta: int = 0
     did_drag: bool = False
 
 
@@ -21,6 +24,7 @@ class ResultsTable(DataTable[RenderedCell]):
     COMPONENT_CLASSES = DataTable.COMPONENT_CLASSES | {"results-table--cursor-row"}
     RESIZE_HANDLE_WIDTH = 1
     MIN_RESIZED_CONTENT_WIDTH = 3
+    RESIZE_APPLY_INTERVAL_SECS = 1 / 60
     DEFAULT_CSS = """
     ResultsTable > .results-table--cursor-row {
         background: #223744;
@@ -37,6 +41,7 @@ class ResultsTable(DataTable[RenderedCell]):
         self._on_column_resized = on_column_resized
         self._resize_state: _ColumnResizeState | None = None
         self._suppress_next_header_select = False
+        self._last_resize_apply_ts = 0.0
 
     def _get_row_style(self, row_index: int, base_style: Style) -> Style:
         row_style = super()._get_row_style(row_index, base_style)
@@ -105,6 +110,7 @@ class ResultsTable(DataTable[RenderedCell]):
             start_screen_x=self._event_screen_x(event),
             start_content_width=self._column_content_width(column_index),
         )
+        self._last_resize_apply_ts = 0.0
         self.capture_mouse()
 
     def _end_resize(self) -> _ColumnResizeState | None:
@@ -133,10 +139,17 @@ class ResultsTable(DataTable[RenderedCell]):
         if state is None:
             return
         delta = int(round(self._event_screen_x(event) - state.start_screen_x))
-        if delta == 0:
+        if delta == state.last_delta:
             return
+        state.last_delta = delta
         state.did_drag = True
+        now = monotonic()
+        if now - self._last_resize_apply_ts < self.RESIZE_APPLY_INTERVAL_SECS:
+            event.stop()
+            return
         self._set_column_content_width(state.column_index, state.start_content_width + delta)
+        state.last_applied_delta = delta
+        self._last_resize_apply_ts = now
         event.stop()
 
     def on_mouse_up(self, event: MouseUp) -> None:
@@ -145,6 +158,8 @@ class ResultsTable(DataTable[RenderedCell]):
         state = self._end_resize()
         if state is None:
             return
+        if state.last_applied_delta != state.last_delta:
+            self._set_column_content_width(state.column_index, state.start_content_width + state.last_delta)
         if state.did_drag:
             self._suppress_next_header_select = True
             if self._on_column_resized is not None:

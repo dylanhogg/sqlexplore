@@ -32,7 +32,11 @@ from sqlexplore.ui.query_editor import SqlQueryEditor
 from sqlexplore.ui.results_preview import ResultsPreview
 from sqlexplore.ui.results_table import ResultsTable
 from sqlexplore.ui.tui_shared import (
+    DETAIL_PREVIEW_MAX_CHARS,
+    DETAIL_PREVIEW_MAX_LINES,
     FIXED_HEIGHT_PANES,
+    INLINE_CELL_PREVIEW_MAX_CHARS,
+    INLINE_CELL_PREVIEW_MAX_LINES,
     JSON_HIGHLIGHT_MAX_TOTAL_ROWS,
     MAX_ACTIVITY_LOG_CHARS,
     NULL_VALUE_STYLE,
@@ -49,6 +53,7 @@ from sqlexplore.ui.tui_shared import (
     PaneResizePhase,
     RenderedCell,
     build_shortcuts,
+    clamp_preview_text,
     column_looks_like_json,
     compact_json_cell,
     pretty_json_cell,
@@ -75,6 +80,11 @@ class SqlExplorerTui(App[None]):
     RESULTS_PANE_MIN_HEIGHT = 5
     CELL_DETAIL_PANE_MIN_HEIGHT = 5
     ACTIVITY_PANE_MIN_HEIGHT = 5
+    PREVIEW_JSON_PRETTY_MAX_STRING_CHARS = 16_384
+    PREVIEW_JSON_PRETTY_MAX_CONTAINER_ITEMS = 500
+    COLUMN_RESIZE_SYNC_REFRESH_MAX_ROWS = 5_000
+    COLUMN_RESIZE_VISIBLE_ROW_BUFFER = 20
+    PREVIEW_DEFAULT_TEXT = "Move in Results to preview selected cell. F2 copies full value. F4 opens full cell view."
 
     CSS = """
     Screen {
@@ -491,7 +501,7 @@ class SqlExplorerTui(App[None]):
         self._completion_menu().display = False
         self._completion_hint().display = False
         self._set_results_loading(False)
-        self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
+        self._set_results_preview_text(self.PREVIEW_DEFAULT_TEXT)
         self._log(f"sqlexplore {app_version()}", "info")
         self._log(f"Log file: {self._log_file_path or 'unavailable'}", "info")
         for message in self._startup_activity_messages:
@@ -560,6 +570,21 @@ class SqlExplorerTui(App[None]):
         self.copy_to_clipboard(formatted)
         self._update_results_preview(row_index, column_index, column_name, type_name, value)
         self._log(f"Copied full cell value ({column_name}, row {row_index + 1}) to clipboard.", "ok")
+
+    def action_view_selected_cell_full(self) -> None:
+        selected = self._selected_cell_context()
+        if selected is None:
+            self._log("No cell selected to view.", "error")
+            return
+        row_index, column_index, value, column_name, type_name = selected
+        self._update_results_preview(
+            row_index,
+            column_index,
+            column_name,
+            type_name,
+            value,
+            show_full=True,
+        )
 
     def action_toggle_sidebar(self) -> None:
         sidebar = self.query_one("#sidebar", Vertical)
@@ -657,7 +682,7 @@ class SqlExplorerTui(App[None]):
     def _results_column_render_char_limit(self, table: ResultsTable, column_index: int) -> int:
         column = table.ordered_columns[column_index]
         column_width = column.content_width if column.auto_width else column.width
-        return max(self.engine.max_value_chars, column_width)
+        return min(INLINE_CELL_PREVIEW_MAX_CHARS, max(self.engine.max_value_chars, column_width))
 
     def _results_column_char_limits(self, table: ResultsTable, column_count: int) -> list[int]:
         return [self._results_column_render_char_limit(table, column_index) for column_index in range(column_count)]
@@ -672,6 +697,14 @@ class SqlExplorerTui(App[None]):
         if column_index in json_columns:
             return self._render_json_cell(value, max_value_chars=max_value_chars)
         return self._render_scalar_cell(value, max_value_chars=max_value_chars)
+
+    def _visible_row_bounds(self, table: ResultsTable, total_rows: int) -> tuple[int, int]:
+        if total_rows <= 0:
+            return 0, 0
+        viewport = max(1, table.size.height)
+        start = max(0, int(table.scroll_y) - self.COLUMN_RESIZE_VISIBLE_ROW_BUFFER)
+        end = min(total_rows, start + viewport + (self.COLUMN_RESIZE_VISIBLE_ROW_BUFFER * 2))
+        return start, max(start, end)
 
     def _refresh_results_column_cells(self, column_index: int) -> None:
         result = self._active_result
@@ -689,8 +722,17 @@ class SqlExplorerTui(App[None]):
         if len(ordered_rows) != len(result.rows):
             return
 
-        # Update only one column after resize commit to keep drag UX responsive.
-        for row_index, row in enumerate(result.rows):
+        row_indexes: range
+        if len(result.rows) > self.COLUMN_RESIZE_SYNC_REFRESH_MAX_ROWS:
+            start, end = self._visible_row_bounds(table, len(result.rows))
+            row_indexes = range(start, end)
+        else:
+            row_indexes = range(len(result.rows))
+
+        # Update only one column after resize commit. For very large datasets,
+        # refresh the visible window and lazily refresh newly focused rows.
+        for row_index in row_indexes:
+            row = result.rows[row_index]
             if column_index >= len(row):
                 continue
             rendered = self._render_results_cell(column_index, row[column_index], json_columns, max_value_chars)
@@ -698,6 +740,33 @@ class SqlExplorerTui(App[None]):
             private_table._data[row_key][column_key] = rendered
         private_table._update_count += 1
         table.refresh_column(column_index)
+
+    def _refresh_results_row_cells(self, row_index: int) -> None:
+        result = self._active_result
+        if result is None or row_index < 0 or row_index >= len(result.rows):
+            return
+        table = self._results_table()
+        ordered_rows = table.ordered_rows
+        if row_index >= len(ordered_rows):
+            return
+        row = result.rows[row_index]
+        json_columns = self._active_json_columns
+        private_table = cast(Any, table)
+        row_key = ordered_rows[row_index].key
+        char_limits = self._results_column_char_limits(table, len(result.columns))
+        for column_index, value in enumerate(row):
+            if column_index >= len(result.columns):
+                break
+            column_key = table.ordered_columns[column_index].key
+            rendered = self._render_results_cell(
+                column_index,
+                value,
+                json_columns,
+                char_limits[column_index] if column_index < len(char_limits) else self.engine.max_value_chars,
+            )
+            private_table._data[row_key][column_key] = rendered
+        private_table._update_count += 1
+        table.refresh_row(row_index)
 
     def _results_out_of_rows(self, result: QueryResult) -> int:
         if not result.sql:
@@ -729,9 +798,30 @@ class SqlExplorerTui(App[None]):
                 detected.add(index)
         return detected
 
+    def _clamp_inline_cell_text(self, text: str, max_value_chars: int) -> str:
+        clamped, _ = clamp_preview_text(
+            text,
+            max_chars=max_value_chars,
+            max_lines=INLINE_CELL_PREVIEW_MAX_LINES,
+            single_line=True,
+        )
+        return clamped
+
+    @staticmethod
+    def _json_value_too_large_for_inline_render(value: CellValue) -> bool:
+        if isinstance(value, str):
+            return len(value) > INLINE_CELL_PREVIEW_MAX_CHARS
+        if isinstance(value, dict):
+            return len(cast(JsonObject, value)) > 500
+        if isinstance(value, list):
+            return len(cast(JsonArray, value)) > 500
+        return False
+
     def _render_json_cell(self, value: CellValue, *, max_value_chars: int | None = None) -> RenderedCell:
         value_chars = self.engine.max_value_chars if max_value_chars is None else max_value_chars
         if not self._json_rendering_enabled:
+            return self._render_scalar_cell(value, max_value_chars=value_chars)
+        if self._json_value_too_large_for_inline_render(value):
             return self._render_scalar_cell(value, max_value_chars=value_chars)
         image = summarize_image_cell(value)
         if image is not None:
@@ -750,7 +840,7 @@ class SqlExplorerTui(App[None]):
         if value is None:
             return Text("NULL", style=NULL_VALUE_STYLE, end="", no_wrap=True)
         if not self._json_rendering_enabled:
-            text = format_scalar(value, value_chars)
+            text = self._clamp_inline_cell_text(format_scalar(value, value_chars), value_chars)
             rendered = Text(text, end="", no_wrap=True)
             if not stylize_links(rendered, clickable=False):
                 return text
@@ -758,7 +848,7 @@ class SqlExplorerTui(App[None]):
         image = summarize_image_cell(value)
         if image is not None:
             return Text(format_image_cell_token(image), end="", no_wrap=True)
-        text = format_scalar(value, value_chars)
+        text = self._clamp_inline_cell_text(format_scalar(value, value_chars), value_chars)
         rendered = Text(text, end="", no_wrap=True)
         if not stylize_links(rendered, clickable=False):
             return text
@@ -775,7 +865,7 @@ class SqlExplorerTui(App[None]):
         if result is None or not result.columns:
             self._active_json_columns = set()
             self.query_one("#results_header", Static).update(f"Results{self._json_rendering_status_suffix()}")
-            self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
+            self._set_results_preview_text(self.PREVIEW_DEFAULT_TEXT)
             return
 
         self._add_results_columns(table, result.columns)
@@ -834,36 +924,78 @@ class SqlExplorerTui(App[None]):
         return self._selected_cell_context_at(table.cursor_row, table.cursor_column)
 
     def _format_full_cell_value(self, value: CellValue, type_name: str) -> str:
-        formatted_value, _ = self._format_preview_value(value, type_name)
+        formatted_value, _, _ = self._format_preview_value(value, type_name, show_full=True)
         return formatted_value
 
-    def _format_preview_value(self, value: CellValue, type_name: str) -> tuple[str, bool]:
+    def _should_pretty_json_preview(self, value: CellValue, *, show_full: bool) -> bool:
+        if show_full:
+            return True
+        if isinstance(value, str):
+            return len(value) <= self.PREVIEW_JSON_PRETTY_MAX_STRING_CHARS
+        if isinstance(value, dict):
+            return len(cast(JsonObject, value)) <= self.PREVIEW_JSON_PRETTY_MAX_CONTAINER_ITEMS
+        if isinstance(value, list):
+            return len(cast(JsonArray, value)) <= self.PREVIEW_JSON_PRETTY_MAX_CONTAINER_ITEMS
+        return True
+
+    def _format_preview_value(self, value: CellValue, type_name: str, *, show_full: bool) -> tuple[str, bool, bool]:
         value_any = cast(Any, value)
         if value is None:
-            return "NULL", False
+            return "NULL", False, False
         if not self._json_rendering_enabled:
-            return str(value_any), False
+            base_text = str(value_any)
+            if show_full:
+                return base_text, False, False
+            clamped, truncated = clamp_preview_text(
+                base_text,
+                max_chars=DETAIL_PREVIEW_MAX_CHARS,
+                max_lines=DETAIL_PREVIEW_MAX_LINES,
+            )
+            return clamped, False, truncated
         image = summarize_image_cell(value_any)
         if image is not None:
             metadata = format_image_preview_metadata(image)
-            return f"{metadata}\nraw:\n{value_any}", False
+            image_text = f"{metadata}\nraw:\n{value_any}"
+            if show_full:
+                return image_text, False, False
+            clamped, truncated = clamp_preview_text(
+                image_text,
+                max_chars=DETAIL_PREVIEW_MAX_CHARS,
+                max_lines=DETAIL_PREVIEW_MAX_LINES,
+            )
+            return clamped, False, truncated
         should_try_json = is_struct_type_name(type_name) or is_varchar_type(type_name) or isinstance(value, dict | list)
-        if should_try_json:
+        if should_try_json and self._should_pretty_json_preview(cast(CellValue, value_any), show_full=show_full):
             pretty = pretty_json_cell(value_any)
             if pretty is not None:
-                return pretty, True
-        return str(value_any), False
+                if show_full:
+                    return pretty, True, False
+                clamped, truncated = clamp_preview_text(
+                    pretty,
+                    max_chars=DETAIL_PREVIEW_MAX_CHARS,
+                    max_lines=DETAIL_PREVIEW_MAX_LINES,
+                )
+                return clamped, True, truncated
+        fallback = str(value_any)
+        if show_full:
+            return fallback, False, False
+        clamped, truncated = clamp_preview_text(
+            fallback,
+            max_chars=DETAIL_PREVIEW_MAX_CHARS,
+            max_lines=DETAIL_PREVIEW_MAX_LINES,
+        )
+        return clamped, False, truncated
 
-    def _render_preview_value(self, value: CellValue, type_name: str) -> Text:
+    def _render_preview_value(self, value: CellValue, type_name: str, *, show_full: bool = False) -> tuple[Text, bool]:
         if value is None:
-            return Text("NULL", style=NULL_VALUE_STYLE, end="")
-        formatted_value, is_json = self._format_preview_value(value, type_name)
+            return Text("NULL", style=NULL_VALUE_STYLE, end=""), False
+        formatted_value, is_json, is_truncated = self._format_preview_value(value, type_name, show_full=show_full)
         rendered = Text(formatted_value, end="")
         if is_json:
             self._json_highlighter.highlight(rendered)
         else:
             self._repr_highlighter.highlight(rendered)
-        return rendered
+        return rendered, is_truncated
 
     def _safe_len(self, value: CellValue) -> int | None:
         if not value:
@@ -883,14 +1015,21 @@ class SqlExplorerTui(App[None]):
         column_name: str,
         type_name: str,
         value: CellValue,
+        *,
+        show_full: bool = False,
     ) -> None:
         type_label = preview_type_label(type_name)
         value_len = self._safe_len(value)
+        rendered_value, is_truncated = self._render_preview_value(value, type_name, show_full=show_full)
         header = f"{column_name}, {type_label}, row {row_index + 1}, col {column_index + 1}, len {value_len}"
+        if is_truncated and not show_full:
+            header += " [preview clipped]"
         preview_text = Text(end="")
         preview_text.append(header, style=PREVIEW_HEADER_STYLE)
         preview_text.append("\n")
-        preview_text.append_text(self._render_preview_value(value, type_name))
+        if is_truncated and not show_full:
+            preview_text.append("Preview clipped for performance. Press F4 for full value.\n", style="dim")
+        preview_text.append_text(rendered_value)
         preview = self._results_preview()
         self._results_preview_plain_text = preview_text.plain
         preview.update(preview_text)
@@ -899,7 +1038,7 @@ class SqlExplorerTui(App[None]):
     def _refresh_results_preview_from_cursor(self) -> None:
         selected = self._selected_cell_context()
         if selected is None:
-            self._set_results_preview_text("Move in Results to preview full cell value. F2 copies selected full value.")
+            self._set_results_preview_text(self.PREVIEW_DEFAULT_TEXT)
             return
         row_index, column_index, value, column_name, type_name = selected
         self._update_results_preview(row_index, column_index, column_name, type_name, value)
@@ -938,6 +1077,7 @@ class SqlExplorerTui(App[None]):
         self._log(f"Sorted results by {event.label.plain} {direction}", "info")
 
     def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted) -> None:
+        self._refresh_results_row_cells(event.coordinate.row)
         self._refresh_results_preview_at(event.coordinate.row, event.coordinate.column)
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:

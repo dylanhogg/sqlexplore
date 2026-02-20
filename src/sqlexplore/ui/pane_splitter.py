@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Callable
 
 from textual.events import Blur, MouseDown, MouseMove, MouseUp
@@ -11,10 +12,12 @@ from sqlexplore.ui.tui_shared import PaneResizePhase
 class _PaneSplitterDragState:
     start_screen_y: float
     last_delta: int = 0
+    last_applied_delta: int = 0
     did_drag: bool = False
 
 
 class PaneSplitter(Static):
+    RESIZE_APPLY_INTERVAL_SECS = 1 / 60
     DEFAULT_CSS = """
     PaneSplitter {
         height: 1;
@@ -44,6 +47,7 @@ class PaneSplitter(Static):
         self._splitter_index = splitter_index
         self._on_resize = on_resize
         self._drag_state: _PaneSplitterDragState | None = None
+        self._last_resize_apply_ts = 0.0
         self.tooltip = "Drag to resize panes"
 
     @staticmethod
@@ -61,6 +65,8 @@ class PaneSplitter(Static):
         state = self._end_drag()
         if state is None:
             return
+        if state.last_applied_delta != state.last_delta:
+            self._on_resize(self._splitter_index, "update", state.last_delta)
         if state.did_drag:
             self._on_resize(self._splitter_index, "end", state.last_delta)
 
@@ -68,6 +74,7 @@ class PaneSplitter(Static):
         if event.button != 1:
             return
         self._drag_state = _PaneSplitterDragState(start_screen_y=self._event_screen_y(event))
+        self._last_resize_apply_ts = 0.0
         self.capture_mouse()
         self.add_class("-dragging")
         self._on_resize(self._splitter_index, "start", 0)
@@ -83,7 +90,13 @@ class PaneSplitter(Static):
         state.last_delta = delta
         if delta != 0:
             state.did_drag = True
+        now = monotonic()
+        if now - self._last_resize_apply_ts < self.RESIZE_APPLY_INTERVAL_SECS:
+            event.stop()
+            return
         self._on_resize(self._splitter_index, "update", delta)
+        state.last_applied_delta = delta
+        self._last_resize_apply_ts = now
         event.stop()
 
     def on_mouse_up(self, event: MouseUp) -> None:

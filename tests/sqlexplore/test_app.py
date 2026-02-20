@@ -1560,6 +1560,32 @@ def test_f2_copies_full_selected_cell_value(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_f4_shows_full_value_after_clipped_preview(tmp_path: Path) -> None:
+    async def run() -> None:
+        long_value = "a" * 10_000
+        app, engine = _build_app(tmp_path, csv_text=f"txt\n{long_value}\n")
+        engine.max_value_chars = 80
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("ctrl+2")
+                await pilot.pause()
+
+                clipped_preview = _preview_text(app)
+                assert "[preview clipped]" in clipped_preview
+                assert "Press F4 for full value." in clipped_preview
+                assert long_value not in clipped_preview
+
+                await pilot.press("f4")
+                await pilot.pause()
+                full_preview = _preview_text(app)
+                assert long_value in full_preview
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_results_preview_tracks_correct_row_value_on_cursor_move(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)
@@ -1697,8 +1723,8 @@ def test_preview_render_value_highlights_json_for_struct_and_varchar(tmp_path: P
     app, engine = _build_app(tmp_path)
     try:
         private_app = cast(Any, app)
-        varchar_rendered = private_app._render_preview_value('{"a":1,"b":{"c":2}}', "VARCHAR")
-        struct_rendered = private_app._render_preview_value(
+        varchar_rendered, _ = private_app._render_preview_value('{"a":1,"b":{"c":2}}', "VARCHAR")
+        struct_rendered, _ = private_app._render_preview_value(
             {"a": 1, "b": {"c": 2}},
             "STRUCT(a INTEGER, b STRUCT(c INTEGER))",
         )
@@ -1706,7 +1732,7 @@ def test_preview_render_value_highlights_json_for_struct_and_varchar(tmp_path: P
         assert any("json.key" in str(span.style) for span in struct_rendered.spans)
 
         private_app._json_rendering_enabled = False
-        no_highlight = private_app._render_preview_value('{"a":1}', "VARCHAR")
+        no_highlight, _ = private_app._render_preview_value('{"a":1}', "VARCHAR")
         assert no_highlight.spans
         assert all("json.key" not in str(span.style) for span in no_highlight.spans)
     finally:
@@ -1717,7 +1743,7 @@ def test_preview_render_value_highlights_plain_text_with_rich_repr(tmp_path: Pat
     app, engine = _build_app(tmp_path)
     try:
         private_app = cast(Any, app)
-        rendered = private_app._render_preview_value(
+        rendered, _ = private_app._render_preview_value(
             "{'a': 1, 'url': 'https://example.com'}",
             "VARCHAR",
         )
