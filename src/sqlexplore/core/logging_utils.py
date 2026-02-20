@@ -18,7 +18,13 @@ MAX_LOG_TEXT_CHARS = 64_000
 EVENT_LOG_MESSAGE_PREFIX = "event_json="
 
 _configured_log_path: Path | None = None
-_session_id = uuid4().hex
+_session_id: str | None = None
+
+
+class _SessionIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.session_id = get_session_id()
+        return True
 
 
 def _default_log_dir() -> Path:
@@ -54,10 +60,11 @@ def _build_file_handler(log_path: Path) -> RotatingFileHandler:
         encoding="utf-8",
     )
     formatter = logging.Formatter(
-        fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+        fmt="%(asctime)s %(levelname)s %(name)s session_id=%(session_id)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     handler.setFormatter(formatter)
+    handler.addFilter(_SessionIdFilter())
     handler.setLevel(logging.DEBUG)
     return handler
 
@@ -97,12 +104,13 @@ def configure_file_logging(log_dir: Path | None = None) -> Path | None:
 
 
 def reset_file_logging() -> None:
-    global _configured_log_path
+    global _configured_log_path, _session_id
     root_logger = logging.getLogger(APP_LOGGER_NAME)
     for existing in tuple(root_logger.handlers):
         root_logger.removeHandler(existing)
         existing.close()
     _configured_log_path = None
+    _session_id = None
 
 
 def get_configured_log_path() -> Path | None:
@@ -113,11 +121,24 @@ def new_trace_id() -> str:
     return uuid4().hex
 
 
+def start_session_id() -> str:
+    global _session_id
+    _session_id = uuid4().hex
+    return _session_id
+
+
+def get_session_id() -> str:
+    global _session_id
+    if _session_id is None:
+        _session_id = uuid4().hex
+    return _session_id
+
+
 def _event_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     event = {
         "event_id": uuid4().hex,
         "kind": event_type,
-        "session_id": _session_id,
+        "session_id": get_session_id(),
         "ts": datetime.now(timezone.utc).isoformat(),
     }
     event.update(payload)

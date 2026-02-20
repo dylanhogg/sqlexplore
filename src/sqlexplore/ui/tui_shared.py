@@ -34,6 +34,14 @@ class ShortcutSpec:
     key_display: str | None = None
 
 
+@dataclass(slots=True)
+class DragDeltaState:
+    start_screen: float
+    last_delta: int = 0
+    last_applied_delta: int = 0
+    did_drag: bool = False
+
+
 PaneId = Literal["query", "results", "cell_detail", "activity"]
 PaneResizePhase = Literal["start", "update", "end"]
 
@@ -61,6 +69,7 @@ SHORTCUT_SPECS: tuple[ShortcutSpec, ...] = (
     ShortcutSpec("ctrl+2", "focus_results", "Results"),
     ShortcutSpec("ctrl+b", "toggle_sidebar", "Data Explorer", key_display="^b"),
     ShortcutSpec("f3", "toggle_json_rendering", "JSON View"),
+    ShortcutSpec("f4", "view_selected_cell_full", "View Full"),
     ShortcutSpec("f2", "copy_selected_cell", "Copy Cell"),
     ShortcutSpec("f8", "copy_results_tsv", "Copy TSV"),
     ShortcutSpec("f1", "show_help", "Help"),
@@ -92,6 +101,10 @@ JSON_DETECTION_SAMPLE_SIZE = 12
 JSON_DETECTION_MIN_VALID = 3
 JSON_DETECTION_MIN_RATIO = 0.7
 JSON_CELL_MAX_PARSE_CHARS = 4_096
+INLINE_CELL_PREVIEW_MAX_CHARS = 4_096
+INLINE_CELL_PREVIEW_MAX_LINES = 1
+DETAIL_PREVIEW_MAX_CHARS = 8_192
+DETAIL_PREVIEW_MAX_LINES = 64
 URL_COLOR = "#74B6E6"
 URL_STYLE = Style(color=URL_COLOR, underline=True)
 NULL_VALUE_COLOR = "#9CB0C2"
@@ -276,6 +289,37 @@ def truncate_highlighted_text(text: Text, max_chars: int | None) -> Text:
     out.end = ""
     out.no_wrap = True
     return out
+
+
+def clamp_preview_text(
+    text: str,
+    *,
+    max_chars: int,
+    max_lines: int,
+    single_line: bool = False,
+) -> tuple[str, bool]:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    truncated = False
+    if max_lines > 0:
+        lines = normalized.split("\n")
+        if len(lines) > max_lines:
+            normalized = "\n".join(lines[:max_lines])
+            truncated = True
+    if single_line and "\n" in normalized:
+        normalized = normalized.replace("\n", " \\n ")
+        truncated = True
+    if max_chars >= 0 and len(normalized) > max_chars:
+        normalized = normalized[:max_chars]
+        truncated = True
+    if not truncated:
+        return normalized, False
+    if max_chars == 0:
+        return "", True
+    if max_chars <= 3:
+        return "." * max_chars, True
+    if len(normalized) >= max_chars:
+        normalized = normalized[: max_chars - 3]
+    return f"{normalized}...", True
 
 
 def preview_type_label(type_name: str) -> str:

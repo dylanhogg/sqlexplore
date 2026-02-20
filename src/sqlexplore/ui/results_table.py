@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Callable
 
 from rich.style import Style
@@ -6,21 +6,14 @@ from textual.coordinate import Coordinate
 from textual.events import MouseDown, MouseMove, MouseUp
 from textual.widgets import DataTable
 
-from sqlexplore.ui.tui_shared import RenderedCell
-
-
-@dataclass(slots=True)
-class _ColumnResizeState:
-    column_index: int
-    start_screen_x: float
-    start_content_width: int
-    did_drag: bool = False
+from sqlexplore.ui.tui_shared import DragDeltaState, RenderedCell
 
 
 class ResultsTable(DataTable[RenderedCell]):
     COMPONENT_CLASSES = DataTable.COMPONENT_CLASSES | {"results-table--cursor-row"}
     RESIZE_HANDLE_WIDTH = 1
     MIN_RESIZED_CONTENT_WIDTH = 3
+    RESIZE_APPLY_INTERVAL_SECS = 1 / 60
     DEFAULT_CSS = """
     ResultsTable > .results-table--cursor-row {
         background: #223744;
@@ -35,8 +28,9 @@ class ResultsTable(DataTable[RenderedCell]):
     ) -> None:
         super().__init__(*args, **kwargs)
         self._on_column_resized = on_column_resized
-        self._resize_state: _ColumnResizeState | None = None
+        self._resize_state: tuple[int, int, DragDeltaState] | None = None
         self._suppress_next_header_select = False
+        self._last_resize_apply_ts = 0.0
 
     def _get_row_style(self, row_index: int, base_style: Style) -> Style:
         row_style = super()._get_row_style(row_index, base_style)
@@ -100,14 +94,15 @@ class ResultsTable(DataTable[RenderedCell]):
         self.refresh(layout=True)
 
     def _start_resize(self, column_index: int, event: MouseDown) -> None:
-        self._resize_state = _ColumnResizeState(
-            column_index=column_index,
-            start_screen_x=self._event_screen_x(event),
-            start_content_width=self._column_content_width(column_index),
+        self._resize_state = (
+            column_index,
+            self._column_content_width(column_index),
+            DragDeltaState(start_screen=self._event_screen_x(event)),
         )
+        self._last_resize_apply_ts = 0.0
         self.capture_mouse()
 
-    def _end_resize(self) -> _ColumnResizeState | None:
+    def _end_resize(self) -> tuple[int, int, DragDeltaState] | None:
         state = self._resize_state
         self._resize_state = None
         self.release_mouse()
@@ -129,24 +124,35 @@ class ResultsTable(DataTable[RenderedCell]):
         event.stop()
 
     def on_mouse_move(self, event: MouseMove) -> None:
-        state = self._resize_state
-        if state is None:
+        resize_state = self._resize_state
+        if resize_state is None:
             return
-        delta = int(round(self._event_screen_x(event) - state.start_screen_x))
-        if delta == 0:
+        column_index, start_content_width, state = resize_state
+        delta = int(round(self._event_screen_x(event) - state.start_screen))
+        if delta == state.last_delta:
             return
+        state.last_delta = delta
         state.did_drag = True
-        self._set_column_content_width(state.column_index, state.start_content_width + delta)
+        now = monotonic()
+        if now - self._last_resize_apply_ts < self.RESIZE_APPLY_INTERVAL_SECS:
+            event.stop()
+            return
+        self._set_column_content_width(column_index, start_content_width + delta)
+        state.last_applied_delta = delta
+        self._last_resize_apply_ts = now
         event.stop()
 
     def on_mouse_up(self, event: MouseUp) -> None:
         if self._resize_state is None:
             return
-        state = self._end_resize()
-        if state is None:
+        resize_state = self._end_resize()
+        if resize_state is None:
             return
+        column_index, start_content_width, state = resize_state
+        if state.last_applied_delta != state.last_delta:
+            self._set_column_content_width(column_index, start_content_width + state.last_delta)
         if state.did_drag:
             self._suppress_next_header_select = True
             if self._on_column_resized is not None:
-                self._on_column_resized(state.column_index, self._column_content_width(state.column_index))
+                self._on_column_resized(column_index, self._column_content_width(column_index))
         event.stop()

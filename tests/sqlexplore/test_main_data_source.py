@@ -362,6 +362,68 @@ def test_main_uses_downloaded_path_when_data_arg_is_https(tmp_path: Path, monkey
     assert captured["closed"] is True
 
 
+def test_main_emits_session_start_event_with_data_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    data_path = tmp_path / "data.csv"
+    data_path.write_text("x\n1\n", encoding="utf-8")
+    captured: dict[str, Any] = {"events": []}
+
+    class FakeEngine:
+        def __init__(
+            self,
+            data_path: Path,
+            table_name: str,
+            database: str,
+            default_limit: int,
+            max_rows_display: int,
+            max_value_chars: int,
+        ) -> None:
+            _ = data_path
+            _ = table_name
+            _ = database
+            _ = default_limit
+            _ = max_rows_display
+            self.default_query = 'SELECT * FROM "data" LIMIT 100'
+            self.max_value_chars = max_value_chars
+
+        def run_sql(self, sql_text: str, remember: bool = True) -> app_module.EngineResponse:
+            _ = sql_text
+            _ = remember
+            return app_module.EngineResponse(status="ok", message="ok")
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    def fake_log_event(
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        logger: Any | None = None,
+        level: int = 20,
+    ) -> str:
+        _ = logger
+        _ = level
+        captured["events"].append((event_type, payload))
+        return "event-1"
+
+    monkeypatch.setattr(app_module, "SqlExplorerEngine", cast(Any, FakeEngine))
+    monkeypatch.setattr(app_module, "log_event", fake_log_event)
+
+    result = runner.invoke(app_module.app, ["--data", str(data_path), "--no-ui"])
+
+    assert result.exit_code == 0
+    assert captured["closed"] is True
+    events = cast(list[tuple[str, dict[str, Any]]], captured["events"])
+    session_start_events = [payload for kind, payload in events if kind == "session.start"]
+    assert len(session_start_events) == 1
+    payload = session_start_events[0]
+    assert payload["table_name"] == "data"
+    assert payload["database"] == ":memory:"
+    assert payload["data_paths"] == [str(data_path.resolve())]
+    assert payload["use_stdin"] is False
+    assert payload["overwrite"] is False
+
+
 def test_main_passes_overwrite_flag_for_remote_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = CliRunner()
     remote_url = "https://example.com/data.parquet"

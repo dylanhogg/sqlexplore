@@ -17,6 +17,7 @@ from sqlexplore.llm.llm_sql import SampleRows
 
 class _FakeEngine:
     conn = None
+    session_id = "test-session"
     table_name = "data"
     default_limit = 10
     max_rows_display = 50

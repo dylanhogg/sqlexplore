@@ -1,124 +1,106 @@
 # sqlexplore
 
-Get answers from messy data files fast, without building pipelines first.
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![PyPI version](https://badge.fury.io/py/sqlexplore.svg?1)](https://badge.fury.io/py/sqlexplore)
+[![build](https://github.com/dylanhogg/sqlexplore/actions/workflows/ci.yml/badge.svg)](https://github.com/dylanhogg/sqlexplore/actions/workflows/ci.yml)
+[![Latest Tag](https://img.shields.io/github/v/tag/dylanhogg/sqlexplore)](https://github.com/dylanhogg/sqlexplore/tags)
+[![Downloads](https://static.pepy.tech/badge/sqlexplore)](https://pepy.tech/project/sqlexplore)
 
-With `sqlexplore`, you can:
+`sqlexplore` is a terminal SQL explorer for flat files (`.csv`, `.tsv`, `.txt`, `.parquet`, `.pq`), powered by DuckDB.
 
-- Inspect new datasets in minutes instead of writing setup scripts.
-- Ask ad hoc questions with SQL and get immediate feedback.
-- Move from quick profiling to exportable results in one terminal workflow.
-
-`sqlexplore` is a terminal SQL workbench for flat files. Point it at a local or remote dataset, then explore with DuckDB SQL in an interactive TUI or run one-shot queries in standard CLI mode.
+Use it when you need quick answers from local files, URLs, or piped terminal output without building a separate pipeline first.
 
 ## Useful features
 
-- Works with `.csv`, `.tsv`, `.txt`, `.parquet`, and `.pq`.
-- Accepts local paths and `http(s)` URLs for supported file types.
-- Accepts piped stdin text (omit `data` when piping) and opens in TUI by default.
-  If no controlling tty is available, it falls back to `--no-ui`.
-- Interactive TUI with query editor, results grid, preview pane, and activity log.
-- SQL + helper commands for common analysis tasks: `/summary`, `/profile`, `/hist`, `/corr`, `/dupes`, `/top`, `/group`, and more.
-- Context-aware autocomplete for SQL clauses and helper command arguments.
-- Query history and rerun support (`/history`, `/rerun`), plus editor helpers (`/last`, `/clear`).
-- Export last result to `.csv`, `.parquet`/`.pq`, or `.json` with `/save`.
-- JSON-aware rendering in result cells and clickable links in preview.
-- Image bytes in `BLOB` or `STRUCT{bytes,path}` cells render as compact `[img ...]` tags with metadata in preview.
-- Non-interactive mode via `--no-ui` (optionally with `--execute` or `--file`).
-- Remote download controls: custom directory (`--download-dir`) and overwrite behavior (`--overwrite`); existing local downloads are reused by default.
-- `.txt` files are ingested line-by-line with derived metrics (`line_number`, `word_count`, `line_hash`, etc).
+- Interactive TUI with query editor, results grid, cell preview, and activity log.
+- Non-interactive mode (`--no-ui`) for one-shot queries in plain terminal output.
+- SQL helper commands for common analysis and shaping tasks:
+  `/summary`, `/describe`, `/profile`, `/hist`, `/corr`, `/top`, `/dupes`, `/crosstab`,
+  `/sample`, `/filter`, `/sort`, `/group`, `/agg`.
+- LLM-assisted SQL generation with `/llm-query`, plus trace tools (`/llm-history`, `/llm-show`).
+- Query history and rerun helpers (`/history`, `/rerun`, `/history-log`, `/rerun-log`).
+- Context-aware autocomplete for SQL and helper commands.
+- Result export via `/save` to `.csv`, `.parquet`/`.pq`, or `.json`.
+- JSON-aware table rendering and preview, including compact image-cell tokens for image-like values.
+- Local files, HTTP(S) URLs, and stdin input (for piped text).
+- Multiple sources via repeated `--data` (schemas must match; sources are unioned).
+- Remote download cache controls with `--download-dir` and `--overwrite`.
+- `.txt` input support with derived fields like `line_number`, `line_length`, `word_count`, and `line_hash`.
 
-## Usage examples
+## Run with uvx (preferred)
 
-Open a local file in the TUI:
+Requires Python 3.13+.
+
+Run directly without a manual install:
 
 ```bash
-sqlexplore ./data/example.parquet
+uvx sqlexplore --data ./data/example.parquet
 ```
 
-Open a remote dataset URL (downloaded first, then loaded):
+Equivalent explicit form:
 
 ```bash
-sqlexplore https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
+uvx --from sqlexplore sqlexplore --data ./data/example.parquet
 ```
 
-Run one SQL query and exit:
+Run one query and exit:
 
 ```bash
-sqlexplore ./data/example.parquet --execute "SELECT COUNT(*) AS n FROM data" --no-ui
+uvx sqlexplore --data ./data/example.parquet --execute "SELECT COUNT(*) AS n FROM data" --no-ui
 ```
 
-Run SQL from a file and exit:
+Run SQL from file and exit:
 
 ```bash
-sqlexplore ./data/example.parquet --file ./queries/report.sql --no-ui
+uvx sqlexplore --data ./data/example.parquet --file ./queries/report.sql --no-ui
 ```
 
-Run default sample query in plain terminal output (no TUI):
+Use multiple inputs:
 
 ```bash
-sqlexplore ./data/example.csv --no-ui
+uvx sqlexplore --data ./data/jan.parquet --data ./data/feb.parquet
 ```
 
 Analyze piped terminal text:
 
 ```bash
-ls -lha | sqlexplore
+ls -lha | uvx sqlexplore
 ```
 
-Analyze piped terminal text in plain terminal output (no TUI):
+Open remote data (downloaded then loaded):
 
 ```bash
-ls -lha | sqlexplore --no-ui
+uvx sqlexplore --data https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
 ```
 
-Pipe text and open TUI with a startup SQL query:
-
-```bash
-ps aux | sqlexplore - --execute "SELECT line FROM data WHERE line ILIKE '%python%'"
-```
-
-Control remote download location and overwrite:
-
-```bash
-sqlexplore https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet --download-dir ./data/cache --overwrite
-```
-
-Typical helper commands in the editor:
-
-```sql
-/limit 5000
-/rows 5000
-/summary
-/profile amount
-/top category 10
-/hist amount 20 | amount > 0
-/corr tip_amount total_amount
-/dupes order_id
-/save ./out/results.parquet
-```
-
-`/limit <n>` sets both helper query limit and row display limit.  
-`/rows <n>` only sets row display limit.
-
-Show installed version:
-
-```bash
-sqlexplore --version
-```
-
-## Install
-
-Requires Python 3.13+.
+## Install with pip
 
 ```bash
 pip install sqlexplore
+sqlexplore --data ./data/example.parquet
 ```
 
-or:
+## LLM usage (optional)
+
+Set an API key for your chosen LiteLLM provider (for example `OPENAI_API_KEY`), then run:
+
+```sql
+/llm-query top 10 customers by total revenue
+```
+
+Optional model override:
 
 ```bash
-uv tool install sqlexplore
+export SQLEXPLORE_LLM_MODEL=openai/gpt-5-mini
 ```
+
+## Notes
+
+- `--data` can be omitted when piping stdin.
+- If stdin has no controlling TTY, sqlexplore falls back to `--no-ui`.
+- `--limit` sets default helper query limit. `/limit` also updates row display limit.
+- Logs are written to `sqlexplore.log` in your app log directory (with fallbacks).
+- Run `sqlexplore --help` to view all options.
 
 ## Links
 

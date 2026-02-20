@@ -15,7 +15,13 @@ from sqlexplore.core.engine import (
     app_version,
     format_scalar,
 )
-from sqlexplore.core.logging_utils import configure_file_logging, get_logger, truncate_for_log
+from sqlexplore.core.logging_utils import (
+    configure_file_logging,
+    get_logger,
+    log_event,
+    start_session_id,
+    truncate_for_log,
+)
 from sqlexplore.ui.query_editor import SqlQueryEditor
 from sqlexplore.ui.tui_app import SqlExplorerTui
 
@@ -80,6 +86,35 @@ def _run_console_query_and_exit(engine: SqlExplorerEngine, query: str | None) ->
     raise typer.Exit(code=exit_code)
 
 
+def _build_engine(
+    resolved_paths: tuple[Path, ...],
+    table_name: str,
+    database: str,
+    limit: int,
+    max_rows: int,
+    max_value_chars: int,
+) -> SqlExplorerEngine:
+    first_data_path = resolved_paths[0]
+    if len(resolved_paths) > 1:
+        return SqlExplorerEngine(
+            data_path=first_data_path,
+            data_paths=resolved_paths,
+            table_name=table_name,
+            database=database,
+            default_limit=limit,
+            max_rows_display=max_rows,
+            max_value_chars=max_value_chars,
+        )
+    return SqlExplorerEngine(
+        data_path=first_data_path,
+        table_name=table_name,
+        database=database,
+        default_limit=limit,
+        max_rows_display=max_rows,
+        max_value_chars=max_value_chars,
+    )
+
+
 def _version_callback(version: bool) -> None:
     if not version:
         return
@@ -142,8 +177,10 @@ def main(
         help="Show sqlexplore version and exit.",
     ),
 ) -> None:
+    start_session_id()
+    version_text = app_version()
     log_path = configure_file_logging()
-    logger.info("startup version=%s log_path=%s", app_version(), log_path)
+    logger.info("startup version=%s log_path=%s", version_text, log_path)
     logger.debug(
         "startup args data_count=%s data=%s table_name=%s limit=%s max_rows=%s max_value_chars=%s database=%s "
         "no_ui=%s overwrite=%s download_dir=%s execute_chars=%s query_file=%s",
@@ -174,7 +211,18 @@ def main(
     resolved_paths = resolved_data_sources.paths
     use_stdin = resolved_data_sources.use_stdin
     stdin_capture = resolved_data_sources.stdin_capture
-    first_data_path = resolved_paths[0]
+    log_event(
+        "session.start",
+        {
+            "version": version_text,
+            "table_name": table_name,
+            "database": database,
+            "data_paths": [str(path) for path in resolved_paths],
+            "use_stdin": use_stdin,
+            "overwrite": overwrite,
+        },
+        logger=logger,
+    )
     logger.info("data sources resolved count=%s use_stdin=%s paths=%s", len(resolved_paths), use_stdin, resolved_paths)
     for file_path in resolved_paths:
         try:
@@ -182,25 +230,14 @@ def main(
         except OSError:
             logger.exception("failed to stat data file path=%s", file_path)
 
-    if len(resolved_paths) == 1:
-        engine = SqlExplorerEngine(
-            data_path=first_data_path,
-            table_name=table_name,
-            database=database,
-            default_limit=limit,
-            max_rows_display=max_rows,
-            max_value_chars=max_value_chars,
-        )
-    else:
-        engine = SqlExplorerEngine(
-            data_path=first_data_path,
-            data_paths=resolved_paths,
-            table_name=table_name,
-            database=database,
-            default_limit=limit,
-            max_rows_display=max_rows,
-            max_value_chars=max_value_chars,
-        )
+    engine = _build_engine(
+        resolved_paths,
+        table_name,
+        database,
+        limit,
+        max_rows,
+        max_value_chars,
+    )
     logger.info("engine initialized table=%s database=%s", table_name, database)
 
     try:

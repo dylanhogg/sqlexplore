@@ -28,7 +28,7 @@ from sqlexplore.core.engine_models import (
     QueryResult,
     ResultStatus,
 )
-from sqlexplore.core.logging_utils import get_logger, log_event, new_trace_id, truncate_for_log
+from sqlexplore.core.logging_utils import get_logger, get_session_id, log_event, new_trace_id, truncate_for_log
 from sqlexplore.core.result_utils import format_scalar, result_column_types, result_columns, sql_literal
 from sqlexplore.core.source_union import (
     SchemaSignature,
@@ -265,6 +265,7 @@ class SqlExplorerEngine:
         max_rows_display: int,
         max_value_chars: int,
         data_paths: tuple[Path, ...] | None = None,
+        session_id: str | None = None,
     ) -> None:
         normalized_paths = normalize_data_paths(data_path, data_paths)
         logger.info(
@@ -284,6 +285,7 @@ class SqlExplorerEngine:
         self.default_limit = max(1, default_limit)
         self.max_rows_display = max(1, max_rows_display)
         self.max_value_chars = max(8, max_value_chars)
+        self.session_id = session_id or get_session_id()
         self.source_view_names: tuple[str, ...] = ()
         self._union_source_sql = ""
         self._startup_tables: tuple[StartupTableInfo, ...] = ()

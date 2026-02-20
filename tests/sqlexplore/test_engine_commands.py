@@ -288,10 +288,11 @@ def test_history_and_rerun_commands_cover_success_and_errors(tmp_path: Path) -> 
         history = engine.run_input("/history 1")
         assert history.status == "ok"
         assert history.result is not None
-        assert history.result.columns == ["#", "type", "status", "sql"]
+        assert history.result.columns == ["#", "session_id", "type", "status", "sql"]
         assert len(history.result.rows) == 1
         assert tuple(history.result.rows[0]) == (
             2,
+            engine.session_id,
             "user_entered_sql",
             "success",
             'SELECT COUNT(*) AS n FROM "data"',
@@ -331,9 +332,9 @@ def test_history_includes_helper_commands_and_rerun_replays_them(tmp_path: Path)
         assert history.status == "ok"
         assert history.result is not None
         assert [tuple(row) for row in history.result.rows] == [
-            (1, "user_entered_sql", "success", 'SELECT COUNT(*) AS n FROM "data"'),
-            (2, "command_generated_sql", "success", 'SELECT * FROM "data" LIMIT 1'),
-            (3, "user_entered_command", "success", "/sample 1"),
+            (1, engine.session_id, "user_entered_sql", "success", 'SELECT COUNT(*) AS n FROM "data"'),
+            (2, engine.session_id, "command_generated_sql", "success", 'SELECT * FROM "data" LIMIT 1'),
+            (3, engine.session_id, "user_entered_command", "success", "/sample 1"),
         ]
 
         rerun_helper = engine.run_input("/rerun 3")
@@ -358,10 +359,11 @@ def test_history_log_and_rerun_log_replay_sql_from_log(tmp_path: Path) -> None:
         history_log = engine.run_input("/history-log 1")
         assert history_log.status == "ok"
         assert history_log.result is not None
-        assert history_log.result.columns == ["event_id", "type", "status", "sql"]
+        assert history_log.result.columns == ["event_id", "session_id", "type", "status", "sql"]
         assert len(history_log.result.rows) == 1
-        event_id, query_type, query_status, sql_text = history_log.result.rows[0]
+        event_id, session_id, query_type, query_status, sql_text = history_log.result.rows[0]
         assert isinstance(event_id, str) and event_id
+        assert session_id == engine.session_id
         assert query_type == "user_entered_sql"
         assert query_status == "success"
         assert sql_text == 'SELECT * FROM "data" LIMIT 1'
@@ -371,6 +373,9 @@ def test_history_log_and_rerun_log_replay_sql_from_log(tmp_path: Path) -> None:
         assert rerun.generated_sql == 'SELECT * FROM "data" LIMIT 1'
         assert rerun.result is not None
         assert len(rerun.result.rows) == 1
+        log_lines = (tmp_path / "logs" / "sqlexplore.log").read_text(encoding="utf-8").splitlines()
+        assert log_lines
+        assert all(" session_id=" in line for line in log_lines)
     finally:
         engine.close()
         _reset_log_state()
@@ -801,6 +806,7 @@ def test_llm_history_and_show_commands_replay_logged_bundle(tmp_path: Path, monk
         assert history_out.result is not None
         assert history_out.result.columns == [
             "trace_id",
+            "session_id",
             "status",
             "retries",
             "total_tokens",
@@ -817,6 +823,7 @@ def test_llm_history_and_show_commands_replay_logged_bundle(tmp_path: Path, monk
 
         (
             trace_id,
+            session_id,
             status,
             retries,
             total_tokens,
@@ -830,6 +837,7 @@ def test_llm_history_and_show_commands_replay_logged_bundle(tmp_path: Path, monk
             reasoning_tokens,
         ) = history_out.result.rows[0]
         assert isinstance(trace_id, str) and trace_id
+        assert session_id == engine.session_id
         assert status == "success"
         assert retries == "0"
         assert request_tokens == "10"
@@ -846,12 +854,14 @@ def test_llm_history_and_show_commands_replay_logged_bundle(tmp_path: Path, monk
         assert any(event.get("kind") == "llm.request" for event in trace_events)
         assert any(event.get("kind") == "llm.response" for event in trace_events)
         assert any(event.get("kind") == "llm.result" for event in trace_events)
+        assert all(event.get("session_id") == engine.session_id for event in trace_events)
 
         show_out = engine.run_input(f"/llm-show {trace_id}")
         assert show_out.status == "ok"
         assert show_out.result is not None
         fields = {str(row[0]): str(row[1]) for row in show_out.result.rows}
         assert fields["trace_id"] == trace_id
+        assert fields["session_id"] == engine.session_id
         assert fields["status"] == "success"
         assert fields["query"] == "count rows by col_name"
         assert fields["generated_sql"] == sql
