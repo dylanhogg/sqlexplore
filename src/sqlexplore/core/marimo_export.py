@@ -11,6 +11,7 @@ from sqlexplore.core.sql_templates import DEFAULT_LOAD_QUERY_TEMPLATE, TXT_LOAD_
 
 SQL_QUERY_TYPES = frozenset({"user_entered_sql", "command_generated_sql", "llm_generated_sql"})
 GENERATED_SQL_TYPES = frozenset({"command_generated_sql", "llm_generated_sql"})
+MARIMO_SAVE_COMMAND = "/save-marimo"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,7 @@ def build_marimo_notebook(export: MarimoSessionExport) -> str:
 
 
 def _build_setup_cell(export: MarimoSessionExport, setup_sql: list[str]) -> list[str]:
+    setup_sql_lines = [f"        {json.dumps(statement)}," for statement in setup_sql]
     lines = [
         "@app.cell",
         "def _(duckdb):",
@@ -80,18 +82,13 @@ def _build_setup_cell(export: MarimoSessionExport, setup_sql: list[str]) -> list
         f"    table_name = {json.dumps(export.table_name)}",
         f"    data_paths = {json.dumps([str(path.resolve()) for path in export.data_paths])}",
         "    setup_sql = [",
+        *setup_sql_lines,
+        "    ]",
+        "    for sql in setup_sql:",
+        "        conn.execute(sql)",
+        "    return conn, data_paths, session_id, table_name",
+        "",
     ]
-    for statement in setup_sql:
-        lines.append(f"        {json.dumps(statement)},")
-    lines.extend(
-        [
-            "    ]",
-            "    for sql in setup_sql:",
-            "        conn.execute(sql)",
-            "    return conn, data_paths, session_id, table_name",
-            "",
-        ]
-    )
     return lines
 
 
@@ -103,20 +100,27 @@ def _build_replay_cells(replay_steps: list[ReplayStep]) -> list[str]:
 
 
 def _render_replay_cell(index: int, step: ReplayStep) -> list[str]:
+    heading_lines = _render_heading_lines(index, step)
     if step.kind == "sql":
         sql_text = _triple_quote_safe(step.text)
-        heading_lines = _render_heading_lines(index, step)
-        return [
-            "@app.cell",
-            "def _(conn):",
-            *heading_lines,
-            f'    _sql = """{sql_text}"""',
-            "    _result = conn.execute(_sql).df()",
-            "    _result",
-            "    return",
-            "",
-        ]
-    heading_lines = _render_heading_lines(index, step)
+        return _render_sql_cell_lines(heading_lines, sql_text)
+    return _render_comment_cell_lines(heading_lines)
+
+
+def _render_sql_cell_lines(heading_lines: list[str], sql_text: str) -> list[str]:
+    return [
+        "@app.cell",
+        "def _(conn):",
+        *heading_lines,
+        f'    _sql = """{sql_text}"""',
+        "    _result = conn.execute(_sql).df()",
+        "    _result",
+        "    return",
+        "",
+    ]
+
+
+def _render_comment_cell_lines(heading_lines: list[str]) -> list[str]:
     return [
         "@app.cell",
         "def _():",
@@ -129,29 +133,49 @@ def _render_replay_cell(index: int, step: ReplayStep) -> list[str]:
 def _build_replay_steps(query_history: tuple[QueryHistoryEntry, ...]) -> list[ReplayStep]:
     steps: list[ReplayStep] = []
     for index, entry in enumerate(query_history):
-        query_text = entry.query_text.strip()
-        if not query_text:
-            continue
-        command_name = query_text.split(maxsplit=1)[0].casefold()
-        if command_name == "/save-marimo":
-            continue
-        if entry.query_type in SQL_QUERY_TYPES:
-            title, detail_lines = _describe_sql_step(query_history, index, entry)
-            steps.append(ReplayStep(kind="sql", text=query_text, title=title, detail_lines=detail_lines))
-            continue
-        if entry.query_type != "user_entered_command":
-            continue
-        if _skip_redundant_command_entry(query_history, index):
-            continue
-        steps.append(
-            ReplayStep(
-                kind="comment",
-                text=query_text,
-                title="command-only entry (non-replayable)",
-                detail_lines=(f"command: {query_text}", f"status: {entry.query_status}"),
-            )
-        )
+        step = _build_replay_step(query_history, index, entry)
+        if step is not None:
+            steps.append(step)
     return steps
+
+
+def _build_replay_step(
+    query_history: tuple[QueryHistoryEntry, ...],
+    index: int,
+    entry: QueryHistoryEntry,
+) -> ReplayStep | None:
+    query_text = entry.query_text.strip()
+    if not query_text:
+        return None
+    if _is_save_marimo_command(query_text):
+        return None
+    if entry.query_type in SQL_QUERY_TYPES:
+        return _build_sql_replay_step(query_history, index, entry, query_text)
+    if entry.query_type != "user_entered_command":
+        return None
+    if _skip_redundant_command_entry(query_history, index):
+        return None
+    return ReplayStep(
+        kind="comment",
+        text=query_text,
+        title="command-only entry (non-replayable)",
+        detail_lines=(f"command: {query_text}", f"status: {entry.query_status}"),
+    )
+
+
+def _build_sql_replay_step(
+    query_history: tuple[QueryHistoryEntry, ...],
+    index: int,
+    entry: QueryHistoryEntry,
+    query_text: str,
+) -> ReplayStep:
+    title, detail_lines = _describe_sql_step(query_history, index, entry)
+    return ReplayStep(kind="sql", text=query_text, title=title, detail_lines=detail_lines)
+
+
+def _is_save_marimo_command(query_text: str) -> bool:
+    command_name = query_text.split(maxsplit=1)[0].casefold()
+    return command_name == MARIMO_SAVE_COMMAND
 
 
 def _describe_sql_step(
@@ -163,45 +187,41 @@ def _describe_sql_step(
         return "user-entered SQL", ("origin: typed directly in sqlexplore",)
     command_entry = _origin_command_entry(query_history, index)
     if entry.query_type == "command_generated_sql":
-        return "helper-command SQL", _helper_details(command_entry)
+        return "helper-command SQL", _command_source_details(command_entry)
     if entry.query_type == "llm_generated_sql":
-        return "LLM-generated SQL", _llm_details(command_entry)
+        return "LLM-generated SQL", _command_source_details(command_entry, include_llm_prompt=True)
     return "SQL", ()
 
 
-def _helper_details(command_entry: QueryHistoryEntry | None) -> tuple[str, ...]:
+def _command_source_details(
+    command_entry: QueryHistoryEntry | None,
+    *,
+    include_llm_prompt: bool = False,
+) -> tuple[str, ...]:
     if command_entry is None:
+        if include_llm_prompt:
+            return ("source command: unavailable", "llm prompt: unavailable")
         return ("source command: unavailable",)
-    return (
-        f"source command: {command_entry.query_text.strip()}",
-        f"status: {command_entry.query_status}",
-    )
-
-
-def _llm_details(command_entry: QueryHistoryEntry | None) -> tuple[str, ...]:
-    if command_entry is None:
-        return ("source command: unavailable", "llm prompt: unavailable")
     command_text = command_entry.query_text.strip()
-    prompt = _llm_prompt_text(command_text)
-    return (
-        f"source command: {command_text}",
-        f"llm prompt: {prompt}",
-        f"status: {command_entry.query_status}",
-    )
+    details = [f"source command: {command_text}"]
+    if include_llm_prompt:
+        details.append(f"llm prompt: {_llm_prompt_text(command_text)}")
+    details.append(f"status: {command_entry.query_status}")
+    return tuple(details)
 
 
 def _origin_command_entry(query_history: tuple[QueryHistoryEntry, ...], sql_index: int) -> QueryHistoryEntry | None:
-    next_index = sql_index + 1
-    if next_index < len(query_history):
-        candidate = query_history[next_index]
-        if candidate.query_type == "user_entered_command":
-            return candidate
-    prev_index = sql_index - 1
-    if prev_index >= 0:
-        candidate = query_history[prev_index]
-        if candidate.query_type == "user_entered_command":
+    for neighbor_index in (sql_index + 1, sql_index - 1):
+        candidate = _history_entry_at(query_history, neighbor_index)
+        if candidate is not None and candidate.query_type == "user_entered_command":
             return candidate
     return None
+
+
+def _history_entry_at(query_history: tuple[QueryHistoryEntry, ...], index: int) -> QueryHistoryEntry | None:
+    if index < 0 or index >= len(query_history):
+        return None
+    return query_history[index]
 
 
 def _llm_prompt_text(command_text: str) -> str:
