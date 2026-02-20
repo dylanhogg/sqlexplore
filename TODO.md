@@ -9,6 +9,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
+- Check activity log is pinned to bottom message
 - Show loaded file(s) in activity log on load
 - Add a `/load` filename command
 - Add session id to log

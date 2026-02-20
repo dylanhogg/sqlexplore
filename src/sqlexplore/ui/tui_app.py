@@ -714,11 +714,9 @@ class SqlExplorerTui(App[None]):
         if not table.is_valid_column_index(column_index) or column_index >= len(result.columns):
             return
 
-        max_value_chars = self._results_column_render_char_limit(table, column_index)
         json_columns = self._active_json_columns
         private_table = cast(Any, table)
         ordered_rows = table.ordered_rows
-        column_key = table.ordered_columns[column_index].key
         if len(ordered_rows) != len(result.rows):
             return
 
@@ -731,40 +729,65 @@ class SqlExplorerTui(App[None]):
 
         # Update only one column after resize commit. For very large datasets,
         # refresh the visible window and lazily refresh newly focused rows.
+        char_limits = self._results_column_char_limits(table, len(result.columns))
         for row_index in row_indexes:
-            row = result.rows[row_index]
-            if column_index >= len(row):
-                continue
-            rendered = self._render_results_cell(column_index, row[column_index], json_columns, max_value_chars)
-            row_key = ordered_rows[row_index].key
-            private_table._data[row_key][column_key] = rendered
+            self._refresh_rendered_row_columns(
+                table=table,
+                private_table=private_table,
+                result=result,
+                row_index=row_index,
+                column_indexes=(column_index,),
+                json_columns=json_columns,
+                char_limits=char_limits,
+            )
         private_table._update_count += 1
         table.refresh_column(column_index)
+
+    def _refresh_rendered_row_columns(
+        self,
+        *,
+        table: ResultsTable,
+        private_table: Any,
+        result: QueryResult,
+        row_index: int,
+        column_indexes: Sequence[int],
+        json_columns: set[int],
+        char_limits: list[int],
+    ) -> None:
+        ordered_rows = table.ordered_rows
+        if row_index < 0 or row_index >= len(ordered_rows) or row_index >= len(result.rows):
+            return
+        row = result.rows[row_index]
+        row_key = ordered_rows[row_index].key
+        for column_index in column_indexes:
+            if column_index < 0 or column_index >= len(result.columns) or column_index >= len(row):
+                continue
+            column_key = table.ordered_columns[column_index].key
+            rendered = self._render_results_cell(
+                column_index,
+                row[column_index],
+                json_columns,
+                char_limits[column_index] if column_index < len(char_limits) else self.engine.max_value_chars,
+            )
+            private_table._data[row_key][column_key] = rendered
 
     def _refresh_results_row_cells(self, row_index: int) -> None:
         result = self._active_result
         if result is None or row_index < 0 or row_index >= len(result.rows):
             return
         table = self._results_table()
-        ordered_rows = table.ordered_rows
-        if row_index >= len(ordered_rows):
-            return
-        row = result.rows[row_index]
         json_columns = self._active_json_columns
         private_table = cast(Any, table)
-        row_key = ordered_rows[row_index].key
         char_limits = self._results_column_char_limits(table, len(result.columns))
-        for column_index, value in enumerate(row):
-            if column_index >= len(result.columns):
-                break
-            column_key = table.ordered_columns[column_index].key
-            rendered = self._render_results_cell(
-                column_index,
-                value,
-                json_columns,
-                char_limits[column_index] if column_index < len(char_limits) else self.engine.max_value_chars,
-            )
-            private_table._data[row_key][column_key] = rendered
+        self._refresh_rendered_row_columns(
+            table=table,
+            private_table=private_table,
+            result=result,
+            row_index=row_index,
+            column_indexes=range(min(len(result.columns), len(result.rows[row_index]))),
+            json_columns=json_columns,
+            char_limits=char_limits,
+        )
         private_table._update_count += 1
         table.refresh_row(row_index)
 
@@ -807,14 +830,14 @@ class SqlExplorerTui(App[None]):
         )
         return clamped
 
-    @staticmethod
-    def _json_value_too_large_for_inline_render(value: CellValue) -> bool:
+    @classmethod
+    def _json_value_too_large_for_inline_render(cls, value: CellValue) -> bool:
         if isinstance(value, str):
             return len(value) > INLINE_CELL_PREVIEW_MAX_CHARS
         if isinstance(value, dict):
-            return len(cast(JsonObject, value)) > 500
+            return len(cast(JsonObject, value)) > cls.PREVIEW_JSON_PRETTY_MAX_CONTAINER_ITEMS
         if isinstance(value, list):
-            return len(cast(JsonArray, value)) > 500
+            return len(cast(JsonArray, value)) > cls.PREVIEW_JSON_PRETTY_MAX_CONTAINER_ITEMS
         return False
 
     def _render_json_cell(self, value: CellValue, *, max_value_chars: int | None = None) -> RenderedCell:
@@ -839,16 +862,15 @@ class SqlExplorerTui(App[None]):
         value_chars = self.engine.max_value_chars if max_value_chars is None else max_value_chars
         if value is None:
             return Text("NULL", style=NULL_VALUE_STYLE, end="", no_wrap=True)
-        if not self._json_rendering_enabled:
-            text = self._clamp_inline_cell_text(format_scalar(value, value_chars), value_chars)
-            rendered = Text(text, end="", no_wrap=True)
-            if not stylize_links(rendered, clickable=False):
-                return text
-            return rendered
-        image = summarize_image_cell(value)
-        if image is not None:
-            return Text(format_image_cell_token(image), end="", no_wrap=True)
+        if self._json_rendering_enabled:
+            image = summarize_image_cell(value)
+            if image is not None:
+                return Text(format_image_cell_token(image), end="", no_wrap=True)
         text = self._clamp_inline_cell_text(format_scalar(value, value_chars), value_chars)
+        return self._render_linkified_scalar_text(text)
+
+    @staticmethod
+    def _render_linkified_scalar_text(text: str) -> RenderedCell:
         rendered = Text(text, end="", no_wrap=True)
         if not stylize_links(rendered, clickable=False):
             return text
@@ -927,6 +949,16 @@ class SqlExplorerTui(App[None]):
         formatted_value, _, _ = self._format_preview_value(value, type_name, show_full=True)
         return formatted_value
 
+    @staticmethod
+    def _clip_detail_preview_text(text: str, *, show_full: bool) -> tuple[str, bool]:
+        if show_full:
+            return text, False
+        return clamp_preview_text(
+            text,
+            max_chars=DETAIL_PREVIEW_MAX_CHARS,
+            max_lines=DETAIL_PREVIEW_MAX_LINES,
+        )
+
     def _should_pretty_json_preview(self, value: CellValue, *, show_full: bool) -> bool:
         if show_full:
             return True
@@ -943,47 +975,21 @@ class SqlExplorerTui(App[None]):
         if value is None:
             return "NULL", False, False
         if not self._json_rendering_enabled:
-            base_text = str(value_any)
-            if show_full:
-                return base_text, False, False
-            clamped, truncated = clamp_preview_text(
-                base_text,
-                max_chars=DETAIL_PREVIEW_MAX_CHARS,
-                max_lines=DETAIL_PREVIEW_MAX_LINES,
-            )
+            clamped, truncated = self._clip_detail_preview_text(str(value_any), show_full=show_full)
             return clamped, False, truncated
         image = summarize_image_cell(value_any)
         if image is not None:
             metadata = format_image_preview_metadata(image)
             image_text = f"{metadata}\nraw:\n{value_any}"
-            if show_full:
-                return image_text, False, False
-            clamped, truncated = clamp_preview_text(
-                image_text,
-                max_chars=DETAIL_PREVIEW_MAX_CHARS,
-                max_lines=DETAIL_PREVIEW_MAX_LINES,
-            )
+            clamped, truncated = self._clip_detail_preview_text(image_text, show_full=show_full)
             return clamped, False, truncated
         should_try_json = is_struct_type_name(type_name) or is_varchar_type(type_name) or isinstance(value, dict | list)
         if should_try_json and self._should_pretty_json_preview(cast(CellValue, value_any), show_full=show_full):
             pretty = pretty_json_cell(value_any)
             if pretty is not None:
-                if show_full:
-                    return pretty, True, False
-                clamped, truncated = clamp_preview_text(
-                    pretty,
-                    max_chars=DETAIL_PREVIEW_MAX_CHARS,
-                    max_lines=DETAIL_PREVIEW_MAX_LINES,
-                )
+                clamped, truncated = self._clip_detail_preview_text(pretty, show_full=show_full)
                 return clamped, True, truncated
-        fallback = str(value_any)
-        if show_full:
-            return fallback, False, False
-        clamped, truncated = clamp_preview_text(
-            fallback,
-            max_chars=DETAIL_PREVIEW_MAX_CHARS,
-            max_lines=DETAIL_PREVIEW_MAX_LINES,
-        )
+        clamped, truncated = self._clip_detail_preview_text(str(value_any), show_full=show_full)
         return clamped, False, truncated
 
     def _render_preview_value(self, value: CellValue, type_name: str, *, show_full: bool = False) -> tuple[Text, bool]:

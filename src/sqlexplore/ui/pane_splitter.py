@@ -1,19 +1,10 @@
-from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Callable
 
 from textual.events import Blur, MouseDown, MouseMove, MouseUp
 from textual.widgets import Static
 
-from sqlexplore.ui.tui_shared import PaneResizePhase
-
-
-@dataclass(slots=True)
-class _PaneSplitterDragState:
-    start_screen_y: float
-    last_delta: int = 0
-    last_applied_delta: int = 0
-    did_drag: bool = False
+from sqlexplore.ui.tui_shared import DragDeltaState, PaneResizePhase
 
 
 class PaneSplitter(Static):
@@ -46,7 +37,7 @@ class PaneSplitter(Static):
         super().__init__("", **kwargs)
         self._splitter_index = splitter_index
         self._on_resize = on_resize
-        self._drag_state: _PaneSplitterDragState | None = None
+        self._drag_state: DragDeltaState | None = None
         self._last_resize_apply_ts = 0.0
         self.tooltip = "Drag to resize panes"
 
@@ -54,7 +45,7 @@ class PaneSplitter(Static):
     def _event_screen_y(event: MouseDown | MouseMove | MouseUp) -> float:
         return float(event.screen_y)
 
-    def _end_drag(self) -> _PaneSplitterDragState | None:
+    def _end_drag(self) -> DragDeltaState | None:
         state = self._drag_state
         self._drag_state = None
         self.release_mouse()
@@ -73,7 +64,7 @@ class PaneSplitter(Static):
     def on_mouse_down(self, event: MouseDown) -> None:
         if event.button != 1:
             return
-        self._drag_state = _PaneSplitterDragState(start_screen_y=self._event_screen_y(event))
+        self._drag_state = DragDeltaState(start_screen=self._event_screen_y(event))
         self._last_resize_apply_ts = 0.0
         self.capture_mouse()
         self.add_class("-dragging")
@@ -84,7 +75,7 @@ class PaneSplitter(Static):
         state = self._drag_state
         if state is None:
             return
-        delta = int(round(self._event_screen_y(event) - state.start_screen_y))
+        delta = int(round(self._event_screen_y(event) - state.start_screen))
         if delta == state.last_delta:
             return
         state.last_delta = delta

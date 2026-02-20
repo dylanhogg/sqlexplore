@@ -34,6 +34,14 @@ class ShortcutSpec:
     key_display: str | None = None
 
 
+@dataclass(slots=True)
+class DragDeltaState:
+    start_screen: float
+    last_delta: int = 0
+    last_applied_delta: int = 0
+    did_drag: bool = False
+
+
 PaneId = Literal["query", "results", "cell_detail", "activity"]
 PaneResizePhase = Literal["start", "update", "end"]
 
@@ -95,7 +103,7 @@ JSON_DETECTION_MIN_RATIO = 0.7
 JSON_CELL_MAX_PARSE_CHARS = 4_096
 INLINE_CELL_PREVIEW_MAX_CHARS = 4_096
 INLINE_CELL_PREVIEW_MAX_LINES = 1
-DETAIL_PREVIEW_MAX_CHARS = 4_096
+DETAIL_PREVIEW_MAX_CHARS = 8_192
 DETAIL_PREVIEW_MAX_LINES = 8
 URL_COLOR = "#74B6E6"
 URL_STYLE = Style(color=URL_COLOR, underline=True)
