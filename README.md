@@ -1,5 +1,11 @@
 # sqlexplore
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![PyPI version](https://badge.fury.io/py/sqlexplore.svg?1)](https://badge.fury.io/py/sqlexplore)
+[![build](https://github.com/dylanhogg/sqlexplore/actions/workflows/ci.yml/badge.svg)](https://github.com/dylanhogg/sqlexplore/actions/workflows/ci.yml)
+[![Latest Tag](https://img.shields.io/github/v/tag/dylanhogg/sqlexplore)](https://github.com/dylanhogg/sqlexplore/tags)
+[![Downloads](https://static.pepy.tech/badge/sqlexplore)](https://pepy.tech/project/sqlexplore)
+
 `sqlexplore` is a terminal SQL explorer for flat files (`.csv`, `.tsv`, `.txt`, `.parquet`, `.pq`), powered by DuckDB.
 
 Use it when you need quick answers from local files, URLs, or piped terminal output without building a separate pipeline first.
