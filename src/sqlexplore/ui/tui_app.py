@@ -453,7 +453,7 @@ class SqlExplorerTui(App[None]):
             with Vertical(id="sidebar"):
                 yield Static(self.engine.schema_preview(), id="sidebar_text")
             with Vertical(id="workspace"):
-                yield Static("SQL Query or /command", classes="section-title")
+                yield Static("Query or command", classes="section-title")
                 yield SqlQueryEditor(
                     self._startup_query,
                     self.engine.completion_tokens,
@@ -1129,9 +1129,7 @@ class SqlExplorerTui(App[None]):
         activity_log = self._activity_log()
         self._activity_lines.append(f"[{status.upper()}] {message}")
         activity_log.load_text("\n".join(self._activity_lines))
-        if activity_log.document.line_count:
-            last_line = activity_log.document.line_count - 1
-            activity_log.move_cursor((last_line, len(activity_log.document[last_line])))
+        activity_log.scroll_end(animate=False, immediate=True)
         payload = truncate_for_log(message, max_chars=MAX_ACTIVITY_LOG_CHARS)
         if status == "error":
             logger.error("activity status=%s message=%s", status, payload)

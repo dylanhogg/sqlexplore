@@ -746,6 +746,33 @@ def test_activity_and_preview_panes_can_scroll(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_activity_log_auto_scrolls_to_newest_line(tmp_path: Path) -> None:
+    async def run() -> None:
+        app, engine = _build_app(tmp_path)
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                activity = app.query_one("#activity_log", TextArea)
+
+                for index in range(150):
+                    cast(Any, app)._log(f"line {index}", "info")
+                await pilot.pause()
+                assert activity.max_scroll_y > 0
+                assert activity.scroll_y == activity.max_scroll_y
+
+                activity.scroll_home(animate=False, immediate=True)
+                await pilot.pause()
+                assert activity.scroll_y == 0
+
+                cast(Any, app)._log("latest", "info")
+                await pilot.pause()
+                assert activity.scroll_y == activity.max_scroll_y
+        finally:
+            engine.close()
+
+    asyncio.run(run())
+
+
 def test_results_cells_render_http_https_ftp_links_in_blue(tmp_path: Path) -> None:
     async def run() -> None:
         app, engine = _build_app(tmp_path)
