@@ -34,29 +34,45 @@ This file contains guidelines for AI agents to follow when writing code in this 
 
 ## Project Structure
 
-- Package management is via `uv`.
-- Manage dependencies via `pyproject.toml`, with dev dependencies in the `[dependency-groups]` section.
 - Keep source code in a `./src/<package_name>/` directory.
 - Place tests in a `./tests/<package_name>/` directory.
 - Keep configuration files in the root directory.
 - See below for more details on testing, linting, and type checking.
 - See `Makefile` for additional project management commands.
 
+## Package Management with uv
+
+- Package management is via `uv`.
+- Create venv and install deps with `uv sync`.
+- Install project in editable mode with `uv pip install -e . --no-deps`.
+- Manage dependencies via `pyproject.toml`, with dev dependencies in the `[dependency-groups]` section.
+- Add runtime dependencies: `uv add <pkg>`.
+- Add dev dependencies: `uv add --group dev <pkg>`.
+- Sync lockfile: `uv sync`.
+
 ## Tests
 
-- Use `pytest` for testing
-- Use `pytest-cov` for code coverage reporting
-- Follow the naming convention: test_*.py
-- Use fixtures for test setup and teardown
-- Place test files in `./tests/<package_name>/`
+- Use `pytest` for testing.
+- Use `pytest-cov` for code coverage reporting.
+- Follow the naming convention: test_*.py.
+- Use fixtures for test setup and teardown.
+- Place test files in `./tests/<package_name>/`.
 
 ## Linting
 
-- Use `ruff` for formatting and linting
-- Run `uv run ruff format .` to format the code
-- Run `uv run ruff check . --fix` to check the code and fix any issues
+- Use `ruff` for formatting and linting.
+- Run `uv run ruff format .` to format the code.
+- Run `uv run ruff check . --fix` to check the code and fix any issues.
 
 ## Type Checking
 
-- Use `pyright` for type checking
-- Run `uv run pyright` to type check the code
+- Use `pyright` for type checking.
+- Run `uv run pyright` to type check the code.
+
+## Docker
+
+- Dockerfile is in the root directory
+- Use `docker compose` for building and running the container.
+- Build: `docker compose build`
+- Run CLI: `docker compose run --rm app --data https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet`
+- Run tests: `docker compose run --rm tests`
