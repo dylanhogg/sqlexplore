@@ -37,4 +37,4 @@ RUN uv pip install -e . --no-deps
 RUN mkdir -p /app/log
 
 # Default command run CLI app
-ENTRYPOINT ["uv", "run", "app"]
+ENTRYPOINT ["uv", "run", "sqlexplore"]

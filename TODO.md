@@ -9,9 +9,12 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## -> Next feature!
 
+- Docs site: https://dylanhogg.github.io/sqlexplore/
+- Load jsonl files (?)
+- Ability to resume an ended sqlexplore session via `/load-session <session_id>`
 - Show loaded file(s) in activity log on load
 - Add a `/load` filename command
-- Update README docs (follow exaple from `uvx showboat --help`)
+- WIP: Update README docs (follow exaple from `uvx showboat --help`)
 - Autodetect csv/tsv (vs plain text) piped stdin and open in TUI
 - Enable load from BQ/Snowflake/other DBs
 - Add quick actions to ^p palette
@@ -50,6 +53,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## App code quality
 
+- Add https://github.com/fpgmaas/deptry/ to detect unused dependencies
+- Check out: https://github.com/fpgmaas/cookiecutter-uv
 - Review pypi publish workflow
 - Add LLM:
     - Fix Binder Errors

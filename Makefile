@@ -16,6 +16,10 @@ which-python:
 clean:
 	rm -rf .venv
 
+marimo-wip:
+	# uvx --from "marimo[recommended]" --with numpy --with pandas marimo edit marimo_b90b9d6031b140dfbc2b2ef4dbdc4fc9.py
+	uvx --from marimo --with duckdb --with numpy --with pandas marimo edit marimo_49593d7f82d04891bd1e9efa0911777b.py
+
 run-example-local:
 	uv run python -m sqlexplore.app --data data/example.parquet
 
@@ -51,11 +55,11 @@ run-example-pipe-2:
 run-as-tool:
 	uv run sqlexplore --data data/example.parquet
 
-run-as-docker:
-	docker compose run --rm app --data gnaf.parquet
-
 docker-build:
 	docker compose build --no-cache
+
+run-as-docker:
+	docker compose run --rm app --data https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
 
 test:
 	uv run pytest -vv --capture=no --no-cov tests

@@ -77,6 +77,7 @@ DEFAULT_HELPER_COMMANDS = (
     "/values",
     "/limit",
     "/save",
+    "/save-marimo",
     "/last",
     "/clear",
     "/exit",
