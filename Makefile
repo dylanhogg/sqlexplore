@@ -55,11 +55,11 @@ run-example-pipe-2:
 run-as-tool:
 	uv run sqlexplore --data data/example.parquet
 
-run-as-docker:
-	docker compose run --rm app --data gnaf.parquet
-
 docker-build:
 	docker compose build --no-cache
+
+run-as-docker:
+	docker compose run --rm app --data https://github.com/dylanhogg/awesome-python/raw/refs/heads/main/github_data.parquet
 
 test:
 	uv run pytest -vv --capture=no --no-cov tests
