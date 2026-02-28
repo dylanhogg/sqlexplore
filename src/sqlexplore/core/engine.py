@@ -495,7 +495,7 @@ class SqlExplorerEngine:
             [
                 "",
                 "Shortcuts",
-                "Ctrl+Enter or F5 run query",
+                "F5 or Ctrl+Enter run query",
                 "Ctrl+N or F6 sample query",
                 "Ctrl+L or F7 clear editor",
                 "Tab accept completion",
@@ -523,7 +523,7 @@ class SqlExplorerEngine:
                     "Editor: completions appear while typing; Ctrl+Space opens completion mode; "
                     "Tab accepts completion; Esc closes completion menu; Up/Down navigates completion menu "
                     "when visible, otherwise moves cursor/history at first/last line; "
-                    "Ctrl+Enter/F5 runs; Ctrl+N/F6 loads sample; Ctrl+L/F7 clears."
+                    "F5/Ctrl+Enter runs; Ctrl+N/F6 loads sample; Ctrl+L/F7 clears."
                 ),
                 (
                     "Navigation: Ctrl+1 focuses query editor, Ctrl+2 focuses results, "

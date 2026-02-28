@@ -506,7 +506,7 @@ class SqlExplorerTui(App[None]):
         self._log(f"Log file: {self._log_file_path or 'unavailable'}", "info")
         for message in self._startup_activity_messages:
             self._log(message, "info")
-        self._log("Ready. Press Ctrl+Enter/F5 to run SQL. F1 opens help, F10 quits.", "info")
+        self._log("Ready. Press F5/Ctrl+Enter to run SQL. F1 opens help, F10 quits.", "info")
         self.action_run_query()
         if self._query_task is not None:
             await self._query_task
