@@ -1,11 +1,15 @@
 # TODO (list for humans, not AI agents)
 
 Note: This is a working todo list for a human developer, not for an LLM AI Agent.
-      If you are an LLM AI Agent like gpt-codex, please ignore this file now.
+If you are an LLM AI Agent like gpt-codex, please ignore this file now.
 
 ## Bugs
 
-- uv run sqlexplore --data https://huggingface.co/datasets/stanfordnlp/sst2/blob/main/data/test-00000-of-00001.parquet  # Invalid Input Error: No magic bytes found at end of file '/Users/dylan/Library/Application Support/sqlexplore/downloads/test-00000-of-00001-a3225f08085d.parquet'
+- uv run sqlexplore --data https://huggingface.co/datasets/stanfordnlp/sst2/blob/main/data/test-00000-of-00001.parquet # Invalid Input Error: No magic bytes found at end of file '/Users/dylan/Library/Application Support/sqlexplore/downloads/test-00000-of-00001-a3225f08085d.parquet'
+
+- pytz
+  [ERROR] Invalid Input Error: Required module 'pytz' failed to import, due to the following Python exception:
+  ModuleNotFoundError: No module named 'pytz'
 
 ## -> Next feature!
 
@@ -21,8 +25,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Write log history session to Marimo notebook to track analysis discoveries (with optional LLM summary of each query and result)
 - Key binding: Write marimo notebook and uvx open it
 - Union multiple input files into a single table
-    - Fix total row count on `SELECT * FROM "data_src_3" LIMIT 10`
-    - If only 1 data source, don't have a union table, just use the single source table
+  - Fix total row count on `SELECT * FROM "data_src_3" LIMIT 10`
+  - If only 1 data source, don't have a union table, just use the single source table
 - ! Enable reproduce this results in a bash file that installs `uv` and runs `sqlexplore` with the same data files and SQL query
 - Review consistent naming for /llm-history and /llm-show commands with /history-log, /history and /rerun etc
 - Test all startup options and CLI args
@@ -37,19 +41,19 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Add CLI arg for default number of rows to display (i.e. limit)
 - LiteLLM, return error messages, e.g. litellm.exceptions.ContextWindowExceededError: litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - Input tokens exceed the configured limit of 272000 tokens. Your messages resulted in 2211484 tokens. Please reduce the length of the messages.
 - Integrate more LLM features:
-    - /llm-describe-data
-    - /llm-suggest-sql
-    - /llm-analyse-data
-    - /llm-fix-sql
-    - /llm-explain-sql
-    - /llm-summarize-data
-    - /llm-chat-data
-    - /llm-categoise-data col
+  - /llm-describe-data
+  - /llm-suggest-sql
+  - /llm-analyse-data
+  - /llm-fix-sql
+  - /llm-explain-sql
+  - /llm-summarize-data
+  - /llm-chat-data
+  - /llm-categoise-data col
 - LLM General:
-    - Add `llm_request` text/prompt to /llm-history for the user
-    - Render LLM thinking and reasoning steps in Activity, with replacing line so it doesn't scroll away
-    - Add dataset cols or name to /llm-history for better context
-    - Config thinking and temperature params (?)
+  - Add `llm_request` text/prompt to /llm-history for the user
+  - Render LLM thinking and reasoning steps in Activity, with replacing line so it doesn't scroll away
+  - Add dataset cols or name to /llm-history for better context
+  - Config thinking and temperature params (?)
 
 ## App code quality
 
@@ -57,7 +61,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Check out: https://github.com/fpgmaas/cookiecutter-uv
 - Review pypi publish workflow
 - Add LLM:
-    - Fix Binder Errors
+  - Fix Binder Errors
 
 ## UI & UX (layout, navigation, keybindings)
 
@@ -80,7 +84,6 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 - Offer sqlglot.transpile(...) options for different SQL dialects (e.g. tsql, duckdb, postgres, mysql, etc.)
 - (?) Support for Ibis Query API -> SQL translation (https://ibis-project.org/)
 
-
 ## Data sources
 
 - https://github.com/pydata/pandas-datareader : Extract data from a wide range of Internet sources into a pandas DataFrame.
@@ -97,7 +100,7 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 ## Export, persistence & I/O
 
-- Optional pass pre-filled sql queries in text file at startup, F? Key to load and 1st is pre-filled in query 
+- Optional pass pre-filled sql queries in text file at startup, F? Key to load and 1st is pre-filled in query
 - Enable copy all results to clip board
 - Add save SQL results to file (and also write python that applies the sql to the data for reproducibility)
 - Add file open
@@ -133,8 +136,8 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 
 - ML: train classifier or time series function (write file perhaps, spec-driven using codex?)
 - TabML modelling (?):
-    - https://github.com/soda-inria/tabicl
-    - https://github.com/PriorLabs/TabPFN
+  - https://github.com/soda-inria/tabicl
+  - https://github.com/PriorLabs/TabPFN
 
 ## Storage / engine support
 
@@ -145,6 +148,6 @@ Note: This is a working todo list for a human developer, not for an LLM AI Agent
 ## Future language migration
 
 - Investigate golang version:
-    - https://github.com/charmbracelet/bubbletea (A powerful little TUI framework)
-    - https://github.com/charmbracelet/lipgloss (Style definitions for nice terminal layouts)
-    - https://github.com/charmbracelet/wish (Make SSH apps)
+  - https://github.com/charmbracelet/bubbletea (A powerful little TUI framework)
+  - https://github.com/charmbracelet/lipgloss (Style definitions for nice terminal layouts)
+  - https://github.com/charmbracelet/wish (Make SSH apps)
