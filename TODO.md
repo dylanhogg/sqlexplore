@@ -7,10 +7,6 @@ If you are an LLM AI Agent like gpt-codex, please ignore this file now.
 
 - uv run sqlexplore --data https://huggingface.co/datasets/stanfordnlp/sst2/blob/main/data/test-00000-of-00001.parquet # Invalid Input Error: No magic bytes found at end of file '/Users/dylan/Library/Application Support/sqlexplore/downloads/test-00000-of-00001-a3225f08085d.parquet'
 
-- pytz
-  [ERROR] Invalid Input Error: Required module 'pytz' failed to import, due to the following Python exception:
-  ModuleNotFoundError: No module named 'pytz'
-
 ## -> Next feature!
 
 - Docs site: https://dylanhogg.github.io/sqlexplore/
