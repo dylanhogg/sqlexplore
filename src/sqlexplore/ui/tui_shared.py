@@ -59,7 +59,7 @@ FIXED_HEIGHT_PANES: tuple[PaneId, ...] = (PANE_QUERY, PANE_CELL_DETAIL, PANE_ACT
 
 
 SHORTCUT_SPECS: tuple[ShortcutSpec, ...] = (
-    ShortcutSpec("ctrl+enter", "run_query", "Run"),
+    ShortcutSpec("ctrl+enter", "run_query", "Run", key_display="F5"),
     ShortcutSpec("f5", "run_query", "Run", show=False),
     ShortcutSpec("ctrl+n", "load_sample", "Sample"),
     ShortcutSpec("f6", "load_sample", "Sample", show=False),

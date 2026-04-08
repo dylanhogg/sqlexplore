@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sqlexplore"
-version = "0.8.1"
+version = "0.8.2"
 description = "SQL exploration over data files with your CLI and LLM"
 readme = "README.md"
 license = "MIT"
@@ -27,6 +27,7 @@ requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.4.4",
     "litellm>=1.81.12",
+    "pytz>=2026.1.post1",
     "rich>=14.0.0",
     "sqlglot>=26.0.0",
     "textual>=7.5.0",
